@@ -3,7 +3,7 @@ import PaymentSheet, { type PendingPayment } from "./PaymentSheet";
 import { useNavigate } from "react-router-dom";
 import { fetchUnseenPayment, markPaymentSeen } from "../utils/api";
 
-// возврат platega / tg startapp pay_… читаем при старте до редиректов
+// возврат после оплаты в ЮKassa / tg startapp pay_… читаем при старте до редиректов
 type ReturnInfo = { id: string; failed: boolean };
 
 function readReturnId(): ReturnInfo | null {

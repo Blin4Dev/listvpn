@@ -216,7 +216,7 @@ export type CreatePaymentResponse = {
   referral_applied?: number;
   currency: string;
   method: string;
-  provider: "platega" | "tg_stars" | "balance";
+  provider: "yookassa" | "tg_stars" | "balance";
   pay_url?: string | null;
   invoice_link?: string | null;
   transaction_id?: string;

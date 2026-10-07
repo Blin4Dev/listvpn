@@ -387,7 +387,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-$(_webhook_location /platega)
+$(_webhook_location /yookassa)
 }
 
 # панель
@@ -508,12 +508,19 @@ VITE_BOT_USERNAME=${BOT_USERNAME}
 REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
 
-# платежи: platega / telegram stars (ключи позже в .env или панели)
+# платежи: ЮKassa / telegram stars (ключи позже в .env)
 
-# мерчант platega
-PLATEGA_API_URL=https://app.platega.io
-PLATEGA_MERCHANT_ID=
-PLATEGA_SECRET_KEY=
+# ЮKassa: shopId и секретный ключ из личного кабинета (Интеграция → Ключи API)
+YOOKASSA_SHOP_ID=
+YOOKASSA_SECRET_KEY=
+# чеки 54-ФЗ через ЮKassa: 1 — отправлять чек (нужна почта покупателя или YOOKASSA_RECEIPT_EMAIL)
+YOOKASSA_RECEIPT=0
+YOOKASSA_RECEIPT_EMAIL=
+# ставка НДС в чеке (1 — без НДС) и система налогообложения (пусто — как в кабинете)
+YOOKASSA_VAT_CODE=1
+YOOKASSA_TAX_SYSTEM_CODE=
+# принимать уведомления только с IP ЮKassa (1 — да; статус всё равно перепроверяется через API)
+YOOKASSA_CHECK_IP=0
 # return url после оплаты задавать не нужно
 
 # telegram stars: bot = polling, webhook = /api/telegram/webhook
@@ -560,7 +567,7 @@ EOF
     chmod 600 .env 2>/dev/null || true
     log_success "✔ Файл .env создан (права 600)."
     log_warn "\n⚠️  Логин и пароль панели будут показаны ниже, после запуска (один раз)."
-    log_warn "⚠️  Платежи (Platega, Telegram Stars) — ключи в .env или в панели."
+    log_warn "⚠️  Платежи (ЮKassa, Telegram Stars) — ключи в .env."
 }
 
 # stars: bot polling; webhook только при TELEGRAM_STARS_DELIVERY=webhook
@@ -618,7 +625,8 @@ print_payment_webhooks() {
     printf "${GREEN}───────────────────────────────────────────────────────────────${NC}\n"
     printf "${BOLD}  Payment webhooks${NC}\n"
     printf "${GREEN}───────────────────────────────────────────────────────────────${NC}\n"
-    printf "  Platega:          ${YELLOW}https://%s/platega${NC}\n" "$domain"
+    printf "  ЮKassa:           ${YELLOW}https://%s/yookassa${NC}\n" "$domain"
+    printf "                    события: payment.succeeded, payment.canceled\n"
     printf "  Telegram Stars:   ${YELLOW}bot polling${NC} (или /api/telegram/webhook)\n"
     printf "\n"
 }
@@ -731,6 +739,19 @@ migrate_security_update() {
     secret="$(gen_secret_hex)"
     if ensure_env_var MONITOR_SECRET_KEY "$secret" "$file"; then
         log_info "  + MONITOR_SECRET_KEY сгенерирован (шифрование ключей нод мониторинга)"
+    fi
+
+    # переход с Platega на ЮKassa: добавить ключи (пустые — заполнить вручную)
+    local yk
+    for yk in "YOOKASSA_SHOP_ID=" "YOOKASSA_SECRET_KEY=" "YOOKASSA_RECEIPT=0" "YOOKASSA_RECEIPT_EMAIL=" \
+              "YOOKASSA_VAT_CODE=1" "YOOKASSA_TAX_SYSTEM_CODE=" "YOOKASSA_CHECK_IP=0"; do
+        if ! grep -q "^${yk%%=*}=" "$file"; then
+            set_env_var "${yk%%=*}" "${yk#*=}" "$file"
+            log_info "  + ${yk%%=*}"
+        fi
+    done
+    if [[ -z "$(get_env_var YOOKASSA_SHOP_ID "$file" 2>/dev/null || true)" ]]; then
+        log_warn "  ЮKassa: заполните YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в .env, уведомления — https://<домен>/yookassa"
     fi
 
     if ensure_env_var TELEGRAM_STARS_DELIVERY "bot" "$file"; then

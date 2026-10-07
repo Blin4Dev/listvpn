@@ -4,7 +4,7 @@ import { DotsMenu, Modal, Spinner, Toggle } from './ui';
 import { apiFetch, parseErr } from '../lib/api';
 import type { PaymentRow, ToastType } from '../lib/types';
 
-// refund через platega/stars; chargeback только откат (деньги уже вернул банк)
+// refund через ЮKassa/stars; chargeback только откат (деньги уже вернул банк)
 export const PaymentActions: React.FC<{ pm: PaymentRow; onDone: () => void; onToast: (t: string, m: string, ty?: ToastType) => void }> = ({ pm, onDone, onToast }) => {
   const [ask, setAsk] = useState<'' | 'refund' | 'chargeback'>('');
   const [busy, setBusy] = useState(false);
@@ -36,9 +36,9 @@ export const PaymentActions: React.FC<{ pm: PaymentRow; onDone: () => void; onTo
             <button className={`btn ${ask === 'chargeback' ? 'danger' : 'solid'}`} disabled={busy} onClick={run}>
               {busy ? <Spinner size={15} /> : null} {ask === 'refund' ? `Вернуть ${amount}` : 'Провести чарджбек'}</button></>}>
           <div className="flex flex-col gap-3" style={{ fontSize: 14, lineHeight: 1.5 }}>
-            <div className="sub">Платёж <span className="mono">{pm.payment_id}</span>{pm.provider_payment_id ? <> · Platega <span className="mono">{pm.provider_payment_id}</span></> : null} · {amount}</div>
+            <div className="sub">Платёж <span className="mono">{pm.payment_id}</span>{pm.provider_payment_id ? <> · {pm.provider === 'tg_stars' ? 'Stars' : pm.provider === 'platega' ? 'Platega' : 'ЮKassa'} <span className="mono">{pm.provider_payment_id}</span></> : null} · {amount}</div>
             {ask === 'refund' ? (<>
-              <div>Деньги вернутся пользователю через {pm.provider === 'tg_stars' ? 'Telegram Stars' : 'Platega'}. Подписка по этому платежу откатится, реферальный бонус пригласившего будет снят.</div>
+              <div>Деньги вернутся пользователю через {pm.provider === 'tg_stars' ? 'Telegram Stars' : 'ЮKassa'}. Подписка по этому платежу откатится, реферальный бонус пригласившего будет снят.</div>
               <div className="badge danger" style={{ whiteSpace: 'normal' }}>Если по платежу пришёл чарджбек — не делайте возврат, нажмите «Чарджбек».</div>
             </>) : (<>
               <div>Банк уже вернул деньги пользователю. Здесь <b>деньги не возвращаются</b> — откатываются только последствия этого платежа:</div>

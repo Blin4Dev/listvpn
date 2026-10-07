@@ -21,7 +21,7 @@ try:
 except ImportError:
     import database as db  # type: ignore
 
-# src/api (platega, telegram_stars, remnawave) в sys.path
+# src/api (yookassa, telegram_stars, remnawave) в sys.path
 import sys as _sys
 _API_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "api"))
 if os.path.isdir(_API_DIR) and _API_DIR not in _sys.path:
@@ -130,9 +130,9 @@ except ImportError:  # pragma: no cover
     import stats as stats_mod  # type: ignore
 
 try:
-    import platega  # type: ignore
+    import yookassa  # type: ignore
 except Exception:  # noqa: BLE001
-    platega = None  # type: ignore
+    yookassa = None  # type: ignore
 try:
     import telegram_stars  # type: ignore
 except Exception:  # noqa: BLE001
@@ -178,8 +178,7 @@ ENV = _env("ENV", "production")
 IS_PROD = ENV == "production"
 
 MINIAPP_URL = _env("MINIAPP_URL").rstrip("/")
-PLATEGA_RETURN_URL = _env("PLATEGA_RETURN_URL") or (f"{MINIAPP_URL}/payment/success" if MINIAPP_URL else "")
-PLATEGA_FAILED_URL = _env("PLATEGA_FAILED_URL") or (f"{MINIAPP_URL}/payment/failed" if MINIAPP_URL else "")
+YOOKASSA_RETURN_URL = _env("YOOKASSA_RETURN_URL") or (f"{MINIAPP_URL}/payment/success" if MINIAPP_URL else "")
 
 
 # в проде без swagger/openapi
@@ -2157,14 +2156,11 @@ class CreatePaymentBody(BaseModel):
     whitelist: bool = False  # опция «белые списки» (отдельный сквад)
 
 
-# минимум суммы у провайдера (руб)
+# минимум суммы, которую отправляем в ЮKassa (руб); остальное можно покрыть реф. балансом
 PROVIDER_MIN_RUB: dict[str, float] = {
-    "card": 50.0,
-    "sberpay": 50.0,
-    "international": 50.0,
+    "card": 10.0,
+    "sberpay": 10.0,
     "sbp": 10.0,
-    "erip": 10.0,
-    "crypto": 10.0,
 }
 
 
@@ -3311,7 +3307,7 @@ def _panel_tx_label(t: dict[str, Any]) -> str:
 
 def _payment_refundable(p: dict[str, Any]) -> bool:
     return bool(
-        p.get("provider") in ("platega", "tg_stars")
+        p.get("provider") in ("yookassa", "tg_stars")
         and p.get("status") == "paid"
         and p.get("provider_payment_id")
     )
@@ -3592,9 +3588,10 @@ def _finalize_refund(payment_id: str, p: dict[str, Any], admin: dict[str, Any],
     return {"ok": True, "message": message or "Возврат выполнен", "manual": bool(manual)}
 
 
-CHARGEBACK_PROVIDERS = ("platega", "tg_stars")
+# platega — старые платежи до перехода на ЮKassa
+CHARGEBACK_PROVIDERS = ("yookassa", "platega", "tg_stars")
 
-CHARGEBACK_REFUND_BLOCK = ("По этому платежу пришёл чарджбек — возвращать деньги нельзя (правило Platega). "
+CHARGEBACK_REFUND_BLOCK = ("По этому платежу пришёл чарджбек — возвращать деньги нельзя. "
                            "Нажмите «Чарджбек»: он откатит подписку без возврата денег.")
 
 
@@ -3664,31 +3661,35 @@ def panel_payment_chargeback(payment_id: str, body: Optional[ChargebackBody] = N
 
 @app.get("/api/panel/payments/{payment_id}/refund-check")
 def panel_payment_refund_check(payment_id: str, _: dict = Depends(require_panel)) -> dict[str, Any]:
-    """можно ли вернуть: platega cancel-supported; stars всегда."""
+    """можно ли вернуть: ЮKassa — поле refundable платежа; stars всегда."""
     p = fulfillment.get_payment(payment_id)
     if not p:
         raise HTTPException(404, detail={"message": "Платёж не найден"})
     if p.get("chargeback_reported_at"):
         return {"supported": False, "blockReason": CHARGEBACK_REFUND_BLOCK}
+    if p.get("provider") == "platega":
+        return {"supported": False, "blockReason": "Платёж прошёл через Platega до перехода на ЮKassa — верните деньги вручную в кабинете Platega."}
     if not _payment_refundable(p):
         return {"supported": False, "blockReason": "Платёж нельзя вернуть (не оплачен или уже возвращён)"}
     if p.get("provider") == "tg_stars":
         return {"supported": True, "kind": "stars"}
-    if platega is None:
+    if yookassa is None:
         raise HTTPException(503, detail={"message": "Платёжный модуль недоступен"})
-    client = platega.get_client()
+    client = yookassa.get_client()
     if not client.is_configured():
-        raise HTTPException(503, detail={"message": "Platega не настроена"})
+        raise HTTPException(503, detail={"message": "ЮKassa не настроена"})
     try:
-        info = client.cancel_supported(str(p["provider_payment_id"]))
+        yp = client.get_payment(str(p["provider_payment_id"]))
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, detail={"message": f"Platega: {exc}"})
-    return info
+        raise HTTPException(502, detail={"message": f"ЮKassa: {exc}"})
+    if not yp.get("refundable"):
+        return {"supported": False, "blockReason": "ЮKassa не разрешает возврат по этому платежу"}
+    return {"supported": True, "kind": "yookassa"}
 
 
 @app.post("/api/panel/payments/{payment_id}/refund")
 def panel_payment_refund(payment_id: str, admin: dict = Depends(require_panel)) -> dict[str, Any]:
-    """возврат: platega cancel или stars refundstarpPayment."""
+    """возврат: ЮKassa /refunds или stars refundStarPayment."""
     p = fulfillment.get_payment(payment_id)
     if not p:
         raise HTTPException(404, detail={"message": "Платёж не найден"})
@@ -3724,24 +3725,31 @@ def panel_payment_refund(payment_id: str, admin: dict = Depends(require_panel)) 
             raise HTTPException(502, detail={"message": f"Telegram: {exc}"})
         return _finalize_refund(payment_id, p, admin, "Звёзды возвращены пользователю")
 
-    if platega is None:
+    if yookassa is None:
         _unclaim()
         raise HTTPException(503, detail={"message": "Платёжный модуль недоступен"})
-    client = platega.get_client()
+    client = yookassa.get_client()
     if not client.is_configured():
         _unclaim()
-        raise HTTPException(503, detail={"message": "Platega не настроена"})
+        raise HTTPException(503, detail={"message": "ЮKassa не настроена"})
+    owner = get_user(int(p["user_id"])) or {}
     try:
-        res = client.cancel_transaction(str(p["provider_payment_id"]))
+        res = client.create_refund(
+            str(p["provider_payment_id"]), float(p.get("amount") or 0),
+            key=f"refund-{payment_id}",
+            receipt_email=owner.get("email"),
+            receipt_item=_payment_description(p.get("purpose"), p.get("user_id")),
+        )
     except Exception as exc:  # noqa: BLE001
         _unclaim()
-        raise HTTPException(502, detail={"message": f"Platega: {exc}"})
-    if not bool(res.get("accepted")):
+        raise HTTPException(502, detail={"message": f"ЮKassa: {exc}"})
+    status = str(res.get("status") or "")
+    if status == "canceled":
         _unclaim()
-        return {"ok": False, "message": res.get("message") or "Возврат отклонён провайдером", "raw": res}
+        reason = (res.get("cancellation_details") or {}).get("reason") if isinstance(res.get("cancellation_details"), dict) else None
+        return {"ok": False, "message": f"ЮKassa отклонила возврат{f' ({reason})' if reason else ''}", "raw": res}
     return _finalize_refund(payment_id, p, admin,
-                            res.get("message") or "Возврат в процессе",
-                            manual=bool(res.get("manualControlRequired")))
+                            "Деньги возвращены" if status == "succeeded" else "Возврат в обработке у ЮKassa")
 
 
 @app.get("/api/panel/surveys/stats")
@@ -6712,7 +6720,7 @@ def _bot_has_main_app() -> bool:
 
 
 def _payment_return_url(payment_id: str, in_telegram: bool, failed: bool = False) -> Optional[str]:
-    """куда platega вернёт после оплаты (сайт или мини-приложение)."""
+    """куда ЮKassa вернёт после оплаты (сайт или мини-приложение)."""
     if in_telegram and BOT_USERNAME:
         tag = f"{'payfail' if failed else 'pay'}_{payment_id}"
         link = (_env("TELEGRAM_MINIAPP_LINK") or "").strip().rstrip("/")
@@ -6725,7 +6733,7 @@ def _payment_return_url(payment_id: str, in_telegram: bool, failed: bool = False
     suffix = "&result=fail" if failed else ""
     if MINIAPP_URL:
         return f"{MINIAPP_URL}/payment/return?payment_id={payment_id}{suffix}"
-    base = PLATEGA_FAILED_URL if failed else PLATEGA_RETURN_URL
+    base = YOOKASSA_RETURN_URL
     return f"{base}?payment_id={payment_id}" if base else None
 
 
@@ -6788,7 +6796,7 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
 
     # полностью с баланса: провайдер не нужен
     fully_by_balance = (not is_stars) and charge <= 0 and referral_applied > 0
-    provider = "tg_stars" if is_stars else ("balance" if fully_by_balance else "platega")
+    provider = "tg_stars" if is_stars else ("balance" if fully_by_balance else "yookassa")
 
     payment = fulfillment.create_payment_intent(
         user_id=int(user["id"]),
@@ -6849,37 +6857,35 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
             "status": "pending",
         }
 
-    if platega is None:
-        fulfillment.mark_failed(payment_id, "platega_module_missing")
+    if yookassa is None:
+        fulfillment.mark_failed(payment_id, "yookassa_module_missing")
         raise HTTPException(503, detail={"message": "Платёжная система недоступна"})
-    client = platega.get_client()
+    client = yookassa.get_client()
     if not client.is_configured():
-        fulfillment.mark_failed(payment_id, "platega_not_configured")
+        fulfillment.mark_failed(payment_id, "yookassa_not_configured")
         raise HTTPException(503, detail={"message": "Платёжная система не настроена"})
 
-    method_code = platega.APP_METHOD_MAP.get(body.method, platega.METHOD_SBP)
-    # return url: мини-приложение или сайт
+    # куда вернуть после оплаты: мини-приложение или сайт
     in_telegram = bool((request.headers.get("X-Telegram-Init-Data") or "").strip())
     return_url = _payment_return_url(payment_id, in_telegram)
-    failed_url = _payment_return_url(payment_id, in_telegram, failed=True)
     try:
-        tx = client.create_transaction(
+        yp = client.create_payment(
             amount=float(charge),
-            method=method_code,
-            currency="RUB",
+            method=body.method,
             description=description,
             return_url=return_url,
-            failed_url=failed_url,
-            payload=payment_id,
+            payment_id=payment_id,
             user_id=str(user["telegram_id"] or f"web{int(user['id'])}"),
+            receipt_email=user.get("email"),
         )
     except Exception as exc:  # noqa: BLE001
-        fulfillment.mark_failed(payment_id, f"platega_error: {exc}")
-        forum.report_error("Не удалось создать ссылку на оплату (Platega)", f"{type(exc).__name__}: {exc}")
+        fulfillment.mark_failed(payment_id, f"yookassa_error: {exc}")
+        forum.report_error("Не удалось создать ссылку на оплату (ЮKassa)", f"{type(exc).__name__}: {exc}")
         raise HTTPException(502, detail={"message": "Не удалось создать платёж"})
 
-    provider_txn = tx.get("transactionId") or tx.get("id")
-    pay_url = tx.get("redirect") or tx.get("url")
+    provider_txn = yp.get("id")
+    conf = yp.get("confirmation") if isinstance(yp.get("confirmation"), dict) else {}
+    pay_url = conf.get("confirmation_url")
     fulfillment.set_provider_data(
         payment_id, provider_payment_id=str(provider_txn) if provider_txn else None, pay_url=pay_url
     )
@@ -6890,7 +6896,7 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
         "referral_applied": referral_applied,
         "currency": "RUB",
         "method": body.method,
-        "provider": "platega",
+        "provider": "yookassa",
         "pay_url": pay_url,
         "transaction_id": provider_txn,
         "status": "pending",
@@ -7409,7 +7415,7 @@ def internal_payment_chargeback(
     body: InternalFulfillBody,
     x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret"),
 ) -> dict[str, Any]:
-    """чарджбек от platega: помечаем, автоматом не откатываем."""
+    """сообщение о чарджбеке от провайдера: помечаем, автоматом не откатываем."""
     _require_internal(x_internal_secret)
     p = fulfillment.get_payment(body.payment_id)
     if not p:
@@ -7422,15 +7428,15 @@ def internal_payment_chargeback(
     if st == "paid":
         todo = "НЕ делайте возврат. Панель → Финансы → ⋯ → «Чарджбек»."
     elif st in ("refunding", "refunded"):
-        todo = "ВНИМАНИЕ: по этому платежу уже делался возврат — деньги могли уйти дважды, свяжитесь с Platega."
+        todo = "ВНИМАНИЕ: по этому платежу уже делался возврат — деньги могли уйти дважды, свяжитесь с платёжной системой."
     elif st == "chargeback":
         todo = "Чарджбек в панели уже проведён."
     else:
         todo = f"Статус платежа: {st}."
     try:
         forum.report_error(
-            "Platega: чарджбек по платежу",
-            f"payment_id={body.payment_id}, транзакция Platega {p.get('provider_payment_id')}, user id{p.get('user_id')}, "
+            "Чарджбек по платежу",
+            f"payment_id={body.payment_id}, платёж провайдера {p.get('provider_payment_id')}, user id{p.get('user_id')}, "
             f"{p.get('amount')}₽. {todo}",
         )
     except Exception:  # noqa: BLE001

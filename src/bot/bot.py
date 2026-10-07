@@ -206,7 +206,7 @@ def handle_start(message: dict[str, Any]) -> None:
 
 
 def _send_payment_return(chat_id: int, user: dict[str, Any], payment_id: str, failed: bool = False) -> bool:
-    """возврат из platega: кнопка на платёж в мини-приложении; false если не найден."""
+    """возврат после оплаты (ЮKassa): кнопка на платёж в мини-приложении; false если не найден."""
     if not MINIAPP_URL or not re.fullmatch(r"[a-f0-9]{16,64}", payment_id or ""):
         return False
     pay = db.fetchone("SELECT status FROM payments WHERE payment_id = ? AND user_id = ?", (payment_id, int(user["id"])))

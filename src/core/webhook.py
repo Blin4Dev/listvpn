@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import sys as _sys
-from typing import Any, Optional
+from typing import Any
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 # src/api в path
@@ -23,27 +23,9 @@ except ImportError:
     import fulfillment  # type: ignore
 
 try:
-    import platega  # type: ignore
+    import yookassa  # type: ignore
 except Exception:  # noqa: BLE001
-    platega = None  # type: ignore
-
-
-def _internal_post(path: str, body: dict[str, Any]) -> bool:
-    """Вызов внутренней ручки API (127.0.0.1, заголовок X-Internal-Secret)."""
-    import json
-    import urllib.request
-
-    url = f"http://127.0.0.1:{os.getenv('API_PORT', '8000')}{path}"
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(), method="POST",
-        headers={"Content-Type": "application/json", "X-Internal-Secret": os.getenv("INTERNAL_API_SECRET", "")},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return 200 <= resp.status < 300
-    except Exception as exc:  # noqa: BLE001
-        print(f"[webhook] internal call {path} failed: {exc}", flush=True)
-        return False
+    yookassa = None  # type: ignore
 
 
 app = FastAPI(title="BatmanVPN Webhooks", version="1.0.0", docs_url=None, redoc_url=None)
@@ -60,9 +42,9 @@ def health() -> dict[str, Any]:
     return {"ok": True, "service": "webhook"}
 
 
-# healthcheck platega: get → 200
-@app.get("/platega")
-def platega_probe() -> dict[str, Any]:
+# проверка доступности адреса уведомлений: get → 200
+@app.get("/yookassa")
+def yookassa_probe() -> dict[str, Any]:
     return {"ok": True}
 
 
@@ -76,32 +58,31 @@ def _client_ip(request: Request) -> str:
             or (request.client.host if request.client else ""))
 
 
-@app.post("/platega")
-async def platega_callback(
-    request: Request,
-    x_merchant_id: Optional[str] = Header(None, alias="X-MerchantId"),
-    x_secret: Optional[str] = Header(None, alias="X-Secret"),
-) -> JSONResponse:
-    """
-    Callback Platega. Защита в три слоя:
-      1) заголовки X-MerchantId / X-Secret должны совпасть с нашими ключами;
-      2) (необязательно) IP отправителя — из PLATEGA_WEBHOOK_IPS;
-      3) телу callback НЕ доверяем: статус и сумму перепроверяем запросом к API
-         Platega по ID транзакции, который мы сами сохранили при создании платежа.
-    Так поддельный (или ошибочный) callback не выдаст подписку и не отменит платёж.
-    """
-    if platega is None:
-        return JSONResponse(status_code=503, content={"error": "platega_unavailable"})
+def _ack(note: str = "") -> JSONResponse:
+    return JSONResponse(status_code=200, content={"ok": True, **({"note": note} if note else {})})
 
-    client = platega.get_client()
-    if not client.verify_callback(x_merchant_id, x_secret):
-        _log(f"отклонён callback с неверными ключами (ip {_client_ip(request)})")
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
 
-    allowed_ips = [x.strip() for x in (os.getenv("PLATEGA_WEBHOOK_IPS") or "").split(",") if x.strip()]
-    if allowed_ips and _client_ip(request) not in allowed_ips:
-        _log(f"отклонён callback с чужого IP {_client_ip(request)}")
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
+@app.post("/yookassa")
+async def yookassa_callback(request: Request) -> JSONResponse:
+    """
+    HTTP-уведомление ЮKassa. Подписи у уведомлений нет, поэтому:
+      1) (по желанию) IP отправителя — из сетей ЮKassa (YOOKASSA_CHECK_IP=1);
+      2) телу НЕ доверяем: статус и сумму берём запросом к API ЮKassa по ID платежа,
+         который мы сами сохранили при создании, и сверяем metadata.payment_id.
+    Так поддельное уведомление не выдаст подписку и не отменит платёж.
+    ЮKassa повторяет уведомление, пока не получит 200.
+    """
+    if yookassa is None:
+        return JSONResponse(status_code=503, content={"error": "yookassa_unavailable"})
+    client = yookassa.get_client()
+    if not client.is_configured():
+        return JSONResponse(status_code=503, content={"error": "yookassa_not_configured"})
+
+    if (os.getenv("YOOKASSA_CHECK_IP") or "").strip().lower() in ("1", "true", "yes", "on"):
+        ip = _client_ip(request)
+        if not yookassa.YooKassaClient.ip_allowed(ip):
+            _log(f"отклонено уведомление с чужого IP {ip}")
+            return JSONResponse(status_code=403, content={"error": "forbidden"})
 
     try:
         payload = await request.json()
@@ -110,69 +91,58 @@ async def platega_callback(
     if not isinstance(payload, dict):
         return JSONResponse(status_code=400, content={"error": "bad_json"})
 
-    provider_txn = str(payload.get("id") or "")
-    our_payment_id = payload.get("payload")  # наш payment_id в payload
-    if not provider_txn and not our_payment_id:
-        return JSONResponse(status_code=400, content={"error": "no_transaction_id"})
+    event = str(payload.get("event") or "")
+    obj = payload.get("object") if isinstance(payload.get("object"), dict) else {}
+    # для refund.* id платежа лежит в object.payment_id
+    yk_id = str((obj.get("payment_id") if event.startswith("refund.") else obj.get("id")) or "")
+    if not yk_id:
+        return JSONResponse(status_code=400, content={"error": "no_payment_id"})
 
-    payment = None
-    if our_payment_id:
-        payment = fulfillment.get_payment(str(our_payment_id))
-    if payment is None and provider_txn:
-        payment = fulfillment.get_payment_by_provider_id(provider_txn)
+    payment = fulfillment.get_payment_by_provider_id(yk_id)
     if payment is None:
-        # неизвестный платёж: 200 без ретраев
-        return JSONResponse(status_code=200, content={"ok": True, "note": "unknown_payment"})
+        meta = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+        if meta.get("payment_id"):
+            payment = fulfillment.get_payment(str(meta["payment_id"]))
+    if payment is None:
+        return _ack("unknown_payment")
+    if payment.get("provider") != "yookassa":
+        _log(f"уведомление для платежа {payment['payment_id']} другого провайдера ({payment.get('provider')}) — игнор")
+        return _ack("ignored")
 
-    # только platega-платежи
-    if payment.get("provider") != "platega":
-        _log(f"callback для платежа {payment['payment_id']} другого провайдера ({payment.get('provider')}) — игнор")
-        return JSONResponse(status_code=200, content={"ok": True, "note": "ignored"})
+    stored = str(payment.get("provider_payment_id") or "")
+    if stored and stored != yk_id:
+        _log(f"уведомление: платёж ЮKassa {yk_id} не совпадает с {stored} ({payment['payment_id']}) — игнор")
+        return _ack("id_mismatch")
 
-    # txn id только из создания у platega
-    stored_txn = str(payment.get("provider_payment_id") or "")
-    if stored_txn and provider_txn and provider_txn != stored_txn:
-        _log(f"callback: транзакция {provider_txn} не совпадает с {stored_txn} платежа {payment['payment_id']} — игнор")
-        return JSONResponse(status_code=200, content={"ok": True, "note": "txn_mismatch"})
-    txn_id = stored_txn or provider_txn
-    if not txn_id:
-        return JSONResponse(status_code=200, content={"ok": True, "note": "no_txn"})
+    if event.startswith("refund."):
+        # возвраты делаем сами из панели; тут только лог
+        _log(f"{event} по платежу {payment['payment_id']}")
+        return _ack()
 
-    # статус/сумма у platega напрямую
     try:
-        tx = client.get_transaction(txn_id)
+        yp = client.get_payment(yk_id)
     except Exception as exc:  # noqa: BLE001
-        _log(f"не удалось перепроверить транзакцию {txn_id}: {exc} — попросим повторить")
+        _log(f"не удалось перепроверить платёж {yk_id}: {exc} — попросим повторить")
         return JSONResponse(status_code=503, content={"error": "verify_failed"})
-    if not fulfillment.platega_tx_matches(tx, payment):
-        _log(f"транзакция {txn_id} создана не для платежа {payment['payment_id']} — игнор")
-        return JSONResponse(status_code=200, content={"ok": True, "note": "payload_mismatch"})
-    norm = platega.PlategaClient.normalize_status(tx.get("status"))
-    claimed = platega.PlategaClient.normalize_status(payload.get("status"))
-    if norm != claimed:
-        _log(f"callback для {payment['payment_id']}: заявлен {claimed}, у Platega {norm} — работаем по Platega")
+    if not yookassa.YooKassaClient.matches(yp, payment["payment_id"]):
+        _log(f"платёж ЮKassa {yk_id} создан не для {payment['payment_id']} — игнор")
+        return _ack("payload_mismatch")
 
+    norm = yookassa.YooKassaClient.normalize_status(yp.get("status"))
     if norm == "paid":
-        if not stored_txn:
+        if not stored:
             db.execute("UPDATE payments SET provider_payment_id = ? WHERE payment_id = ? AND provider_payment_id IS NULL",
-                       (txn_id, payment["payment_id"]))
+                       (yk_id, payment["payment_id"]))
         result = fulfillment.fulfill_payment(
             payment["payment_id"],
-            provider_payment_id=txn_id,
-            amount=fulfillment.platega_tx_amount(tx),
+            provider_payment_id=yk_id,
+            amount=yookassa.YooKassaClient.payment_amount(yp),
         )
         return JSONResponse(status_code=200, content={"ok": bool(result.get("ok"))})
     if norm == "failed":
         fulfillment.mark_failed(payment["payment_id"], "provider_canceled")
-        return JSONResponse(status_code=200, content={"ok": True})
-    if norm == "refunded":
-        # chargeback: отзыв через api
-        ok = _internal_post("/api/internal/payments/chargeback", {"payment_id": payment["payment_id"]})
-        # 5xx чтобы platega повторила
-        return JSONResponse(status_code=200 if ok else 503, content={"ok": ok})
-
-    # pending/прочее: ack
-    return JSONResponse(status_code=200, content={"ok": True})
+        return _ack()
+    return _ack()
 
 
 if __name__ == "__main__":

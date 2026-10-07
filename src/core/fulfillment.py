@@ -906,22 +906,6 @@ def stars_precheckout_ok(payment: Optional[dict[str, Any]], query: dict[str, Any
         return False
 
 
-def platega_tx_amount(tx: dict[str, Any]) -> Optional[float]:
-    details = tx.get("paymentDetails") if isinstance(tx.get("paymentDetails"), dict) else {}
-    for val in (details.get("amount"), tx.get("amount")):
-        try:
-            if val is not None:
-                return float(val)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def platega_tx_matches(tx: dict[str, Any], payment: dict[str, Any]) -> bool:
-    tx_payload = tx.get("payload")
-    return not tx_payload or str(tx_payload) == str(payment["payment_id"])
-
-
 def confirm_via_provider(payment_id: str) -> dict[str, Any]:
     payment = get_payment(payment_id)
     if not payment:
@@ -930,23 +914,23 @@ def confirm_via_provider(payment_id: str) -> dict[str, Any]:
         return {"ok": True, "status": "paid", "subscription_id": payment.get("subscription_id")}
     if payment["status"] == "failed":
         return {"ok": False, "status": "failed"}
-    if payment.get("provider") != "platega" or not payment.get("provider_payment_id"):
+    if payment.get("provider") != "yookassa" or not payment.get("provider_payment_id"):
         return {"ok": True, "status": "pending"}
 
     try:
-        import platega  # type: ignore
-        client = platega.get_client()
+        import yookassa  # type: ignore
+        client = yookassa.get_client()
         if not client.is_configured():
             return {"ok": True, "status": "pending"}
-        tx = client.get_transaction(str(payment["provider_payment_id"]))
-        if not platega_tx_matches(tx, payment):
+        yp = client.get_payment(str(payment["provider_payment_id"]))
+        if not yookassa.YooKassaClient.matches(yp, payment_id):
             return {"ok": False, "status": "pending", "note": "payload_mismatch"}
-        norm = platega.PlategaClient.normalize_status(tx.get("status"))
+        norm = yookassa.YooKassaClient.normalize_status(yp.get("status"))
         if norm == "paid":
             res = fulfill_payment(
                 payment_id,
                 provider_payment_id=str(payment["provider_payment_id"]),
-                amount=platega_tx_amount(tx),
+                amount=yookassa.YooKassaClient.payment_amount(yp),
             )
             return {"ok": res.get("ok", False), "status": "paid" if res.get("ok") else "pending",
                     "subscription_id": res.get("subscription_id")}
@@ -959,7 +943,7 @@ def confirm_via_provider(payment_id: str) -> dict[str, Any]:
 
 
 STUCK_PROCESSING_MIN = 10  # «processing» дольше - процесс упал посреди выдачи
-RECHECK_AFTER_MIN = 3  # перепроверять у Platega не раньше чем через 3 мин
+RECHECK_AFTER_MIN = 3  # перепроверять у ЮKassa не раньше чем через 3 мин
 UNPAID_EXPIRE_HOURS = 24  # неоплаченный платёж через сутки отменяется
 RECONCILE_BATCH = 50
 
@@ -978,7 +962,7 @@ def reconcile_payments(log=print) -> dict[str, int]:
 
     recheck_before = iso(now - timedelta(minutes=RECHECK_AFTER_MIN))
     rows = db.fetchall(
-        "SELECT payment_id FROM payments WHERE status = 'pending' AND provider = 'platega' "
+        "SELECT payment_id FROM payments WHERE status = 'pending' AND provider = 'yookassa' "
         "AND provider_payment_id IS NOT NULL AND created_at < ? ORDER BY created_at DESC LIMIT ?",
         (recheck_before, RECONCILE_BATCH),
     )

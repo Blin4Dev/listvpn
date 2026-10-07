@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     payment_id TEXT NOT NULL UNIQUE,
     user_id INTEGER NOT NULL,
-    provider TEXT NOT NULL DEFAULT 'platega',
+    provider TEXT NOT NULL DEFAULT 'yookassa',
     method TEXT,
     provider_payment_id TEXT,
     amount REAL NOT NULL DEFAULT 0,
@@ -888,14 +888,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "whitelist": "ALTER TABLE payments ADD COLUMN whitelist INTEGER NOT NULL DEFAULT 0",
             # реф. баланс, замороженный при создании
             "referral_applied": "ALTER TABLE payments ADD COLUMN referral_applied REAL NOT NULL DEFAULT 0",
-            # возвраты (отмена platega)
+            # возвраты (refund через провайдера)
             "refunded_at": "ALTER TABLE payments ADD COLUMN refunded_at TEXT",
             "refund_info": "ALTER TABLE payments ADD COLUMN refund_info TEXT",
             # время claim для разбора зависших processing
             "processing_at": "ALTER TABLE payments ADD COLUMN processing_at TEXT",
             # куда вернуться после оплаты + показан ли итог
             "return_to": "ALTER TABLE payments ADD COLUMN return_to TEXT",
-            # флаги чарджбека (откат в панели; reported = спор platega)
+            # флаги чарджбека (откат в панели; reported = сообщение провайдера)
             "chargeback_at": "ALTER TABLE payments ADD COLUMN chargeback_at TEXT",
             "chargeback_info": "ALTER TABLE payments ADD COLUMN chargeback_info TEXT",
             "chargeback_reported_at": "ALTER TABLE payments ADD COLUMN chargeback_reported_at TEXT",

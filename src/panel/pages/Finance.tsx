@@ -31,7 +31,7 @@ export const FinancePage: React.FC<{ onToast: (t: string, m: string, ty?: ToastT
           <div className="sub" style={{ fontWeight: 600 }}>Платежи, возвраты и чарджбеки</div>
           <div className="search" style={{ minWidth: 280, flex: '0 1 380px' }}>
             <Search className="ico" size={16} />
-            <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="ID транзакции Platega, ID платежа, @username, ID…" />
+            <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="ID платежа ЮKassa, ID платежа, @username, ID…" />
           </div>
         </div>
         <div style={{ overflowX: 'auto' }}>
