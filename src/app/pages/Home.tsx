@@ -535,29 +535,7 @@ export default function HomePage() {
               </button>
             </div>
 
-            {isTrialCta ? (
-              <button
-                type="button"
-                onClick={() => navigate(BUY_PATH)}
-                style={{
-                  ...btnReset,
-                  fontFamily: H.font,
-                  display: "block",
-                  margin: "0 auto",
-                  padding: "20px 16px 22px",
-                  background: "transparent",
-                  border: "none",
-                  color: H.muted,
-                  fontSize: 15.5,
-                  cursor: "pointer",
-                  animation: rise(0.46),
-                }}
-              >
-                Смотреть тарифы
-              </button>
-            ) : (
-              <div style={{ height: 16 }} />
-            )}
+            <div style={{ height: 16 }} />
 
             <div
               style={{
