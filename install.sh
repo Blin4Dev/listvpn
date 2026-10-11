@@ -365,21 +365,78 @@ _webhook_location() {
 EOF
 }
 
+# заголовки к API: реальный IP клиента ставит только наш nginx (подделку CF-/True-Client-IP режем)
+_api_proxy_headers() {
+    cat <<'EOF'
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_set_header True-Client-IP "";
+EOF
+}
+
+# configure_nginx <miniapp> <panel> <conf> <link> [<ip_сервера_панели> <секрет_шлюза>]
+# с двумя последними аргументами панель живёт на отдельном сервере: здесь её нет,
+# а /api/panel открыт только для IP сервера панели с секретным заголовком.
 configure_nginx() {
     local miniapp_domain="$1"
     local panel_domain="$2"
     local nginx_conf="$3"
     local nginx_link="$4"
+    local remote_ip="${5:-}"
+    local gw_secret="${6:-}"
+    local remote=0
+    [[ -n "$remote_ip" && -n "$gw_secret" ]] && remote=1
 
     log_info "\nНастройка Nginx (HTTPS :443)"
     sudo rm -f /etc/nginx/sites-enabled/default
 
-    sudo tee "$nginx_conf" >/dev/null <<EOF
+    local http_names="${miniapp_domain} ${panel_domain}"
+    [[ $remote -eq 1 ]] && http_names="${miniapp_domain}"
+
+    local api_panel_block
+    if [[ $remote -eq 1 ]]; then
+        api_panel_block="    # /api/panel — только шлюз панели (отдельный сервер ${remote_ip}) с секретным заголовком
+    location /api/panel {
+        allow ${remote_ip};
+        deny all;
+        if (\$http_x_panel_gateway != \"${gw_secret}\") {
+            return 404;
+        }
+        client_max_body_size 55m;
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Connection \"\";
+        proxy_set_header Host \$host;
+        # IP клиента передаёт шлюз (доверяем только ему — см. allow выше)
+        proxy_set_header X-Real-IP \$http_x_real_ip;
+        proxy_set_header X-Forwarded-For \$http_x_real_ip;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Panel-Gateway \"\";
+        proxy_set_header CF-Connecting-IP \"\";
+        proxy_set_header True-Client-IP \"\";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }"
+    else
+        api_panel_block="    # /api/panel только на домене панели
+    location /api/panel {
+        return 404;
+    }"
+    fi
+
+    local tmp_conf
+    tmp_conf="$(mktemp)"
+    chmod 600 "$tmp_conf"
+    cat > "$tmp_conf" <<EOF
 # редирект http → https
 server {
     listen 80;
     listen [::]:80;
-    server_name ${miniapp_domain} ${panel_domain};
+    server_name ${http_names};
     location /.well-known/acme-challenge/ {
         root /var/www/html;
     }
@@ -409,7 +466,7 @@ server {
         proxy_pass http://127.0.0.1:9741;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 60s;
         proxy_connect_timeout 15s;
@@ -420,10 +477,7 @@ server {
         return 404;
     }
 
-    # /api/panel только на домене панели
-    location /api/panel {
-        return 404;
-    }
+${api_panel_block}
 
     # deep-link redirect: не пишем в access_log
     location = /redirect.html {
@@ -434,14 +488,15 @@ server {
 
     location /api {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+$(_api_proxy_headers)
     }
 
 $(_webhook_location /yookassa)
 }
+EOF
+
+    if [[ $remote -eq 0 ]]; then
+        cat >> "$tmp_conf" <<EOF
 
 # панель
 server {
@@ -467,22 +522,23 @@ server {
 
     location /api {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+$(_api_proxy_headers)
     }
 
     location / {
         proxy_pass http://127.0.0.1:9742;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
+    fi
 
+    # конфиг может содержать секрет шлюза — только root
+    sudo install -m 600 -o root -g root "$tmp_conf" "$nginx_conf"
+    rm -f "$tmp_conf"
     sudo rm -f "$nginx_link"
     sudo ln -s "$nginx_conf" "$nginx_link"
     sudo nginx -t
@@ -847,6 +903,42 @@ migrate_security_update() {
     log_success "✔ миграция завершена."
 }
 
+# перед certbot: проверить, что http://домен/.well-known/acme-challenge/ отдаётся ЭТИМ nginx
+acme_preflight() {
+    local d="$1" token body my_ip dns_ip headers others
+    token="blinvpn-probe-$RANDOM$RANDOM"
+    sudo mkdir -p /var/www/html/.well-known/acme-challenge
+    echo "$token" | sudo tee "/var/www/html/.well-known/acme-challenge/${token}" >/dev/null
+    body="$(curl -s -m 10 "http://${d}/.well-known/acme-challenge/${token}" 2>/dev/null || true)"
+    headers="$(curl -sI -m 10 "http://${d}/.well-known/acme-challenge/${token}" 2>/dev/null || true)"
+    sudo rm -f "/var/www/html/.well-known/acme-challenge/${token}"
+    if [[ "$body" == "$token" ]]; then
+        return 0
+    fi
+
+    log_error "Домен ${d} не отдаёт проверочный файл с этого сервера — Let's Encrypt не сможет выдать сертификат."
+    my_ip="$(curl -s -m 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
+    dns_ip="$(getent ahostsv4 "$d" 2>/dev/null | awk 'NR==1{print $1}')"
+    echo "   IP сервера:      ${my_ip:-?}"
+    echo "   A-запись ${d}: ${dns_ip:-нет}"
+    if echo "$headers" | grep -qi '^server: *cloudflare'; then
+        hint "Домен проксируется через Cloudflare (оранжевое облако). Выключите прокси (DNS only) на время выпуска сертификата или отключите «Always Use HTTPS»."
+    elif [[ -n "$dns_ip" && -n "$my_ip" && "$dns_ip" != "$my_ip" ]]; then
+        hint "A-запись ${d} указывает на другой сервер (${dns_ip}). Направьте её на ${my_ip} и подождите обновления DNS."
+    else
+        others="$(sudo nginx -T 2>/dev/null | awk -v d="$d" '/^# configuration file/{f=$4} $1=="server_name" && index($0, d){print "   " f}' | sort -u | grep -v blinvpn_certbot || true)"
+        if [[ -n "$others" ]]; then
+            hint "Домен ${d} уже занят другим конфигом nginx (он перехватывает запросы и редиректит на https):"
+            echo "$others"
+            hint "Удалите/отключите этот конфиг (или уберите из него ${d}), выполните sudo nginx -t && sudo systemctl reload nginx и запустите установку снова."
+        else
+            echo "$headers" | head -n 5 | sed 's/^/   /'
+            hint "Порт 80 этого домена обслуживает не этот nginx (другой прокси/панель на сервере или перед ним)."
+        fi
+    fi
+    return 1
+}
+
 obtain_certificates() {
     local email="$1"; shift
     local domains=("$@")
@@ -882,6 +974,11 @@ obtain_certificates() {
 
     for d in "${domains[@]}"; do
         log_info "Выпуск сертификата для ${d}..."
+        if ! acme_preflight "$d"; then
+            sudo rm -f "$temp_link" "$temp_conf"
+            sudo systemctl reload nginx || true
+            exit 1
+        fi
         if sudo certbot certonly --webroot -w /var/www/html -d "$d" \
             --email "$email" --agree-tos --non-interactive --keep-until-expiring; then
             log_success "✔ Сертификат для ${d} получен."
@@ -968,11 +1065,23 @@ replace_domains_flow() {
     echo
     confirm "Применить замену? (y/n): " || { log_info "Отменено."; return 0; }
 
+    # панель на отдельном сервере: её сертификат выпускается там, не здесь
+    local remote_panel=0
+    local -a local_changed=()
+    panel_is_remote && panel_remote_load && remote_panel=1
+    for tmp in "${changed[@]}"; do
+        if [[ $remote_panel -eq 1 && "$tmp" == "$new_panel" && "$tmp" != "$new_miniapp" ]]; then
+            panel_remote_check_dns "$tmp" || exit 1
+            continue
+        fi
+        local_changed+=("$tmp")
+    done
+
     local server_ip; server_ip=$(get_server_ip || true)
     if [[ -n "$server_ip" ]]; then
         log_info "IP сервера: ${server_ip}"
         local dip
-        for tmp in "${changed[@]}"; do
+        for tmp in "${local_changed[@]}"; do
             dip=$(resolve_domain_ip "$tmp" || true)
             if [[ -z "$dip" ]]; then
                 log_warn "Не удалось определить A-запись для ${tmp} (нужен ${server_ip})."
@@ -991,10 +1100,10 @@ replace_domains_flow() {
     fi
 
     section "Выпуск сертификатов Let's Encrypt"
-    obtain_certificates "$cur_email" "${changed[@]}"
+    ((${#local_changed[@]})) && obtain_certificates "$cur_email" "${local_changed[@]}"
 
     section "Обновление Nginx"
-    configure_nginx "$new_miniapp" "$new_panel" "$NGINX_CONF" "$NGINX_LINK"
+    apply_bot_nginx "$new_miniapp" "$new_panel"
 
     section "Обновление .env"
     update_env_domains "$new_miniapp" "$new_panel"
@@ -1006,6 +1115,14 @@ replace_domains_flow() {
         dc down
     fi
     dc up -d
+
+    # панель на отдельном сервере: новый домен панели и/или новый адрес API
+    if [[ $remote_panel -eq 1 ]]; then
+        dc stop panel >/dev/null 2>&1 || true
+        if ! panel_remote_deploy "$new_miniapp" "$new_panel" "$cur_email"; then
+            log_warn "Домены заменены, но панель на ${PR_HOST} не обновлена. Повторите: install.sh → «Панель на отдельном сервере»."
+        fi
+    fi
 
     if [[ "$new_miniapp" != "$cur_miniapp" ]]; then
         section "Telegram Stars"
@@ -1069,6 +1186,454 @@ UNIT
     sudo systemctl restart blinvpn-host.service || log_warn "Не удалось запустить помощник blinvpn-host — мастер XBM в панели будет недоступен."
 }
 
+# ═══════════════ панель на отдельном сервере ═══════════════
+# Настройки (не в .env — чтобы секрет не попадал в контейнеры): .env.panel-remote, права 600.
+PANEL_REMOTE_FILE=".env.panel-remote"
+PR_SSH_DIR="${HOME}/.ssh"
+PR_KEY="${PR_SSH_DIR}/blinvpn_panel_ed25519"
+PR_KNOWN="${PR_SSH_DIR}/blinvpn_panel_known_hosts"
+PR_IPV4_RE='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+
+panel_is_remote() {
+    [[ -f "$PANEL_REMOTE_FILE" ]] && [[ -n "$(get_env_var PANEL_REMOTE_HOST "$PANEL_REMOTE_FILE" 2>/dev/null || true)" ]]
+}
+
+panel_remote_load() {
+    PR_HOST="$(get_env_var PANEL_REMOTE_HOST "$PANEL_REMOTE_FILE" 2>/dev/null || true)"
+    PR_PORT="$(get_env_var PANEL_REMOTE_PORT "$PANEL_REMOTE_FILE" 2>/dev/null || true)"
+    PR_USER="$(get_env_var PANEL_REMOTE_USER "$PANEL_REMOTE_FILE" 2>/dev/null || true)"
+    PR_EGRESS_IP="$(get_env_var PANEL_REMOTE_EGRESS_IP "$PANEL_REMOTE_FILE" 2>/dev/null || true)"
+    PR_SECRET="$(get_env_var PANEL_GATEWAY_SECRET "$PANEL_REMOTE_FILE" 2>/dev/null || true)"
+    PR_PORT="${PR_PORT:-22}"
+    PR_USER="${PR_USER:-root}"
+    [[ -n "$PR_HOST" && -n "$PR_EGRESS_IP" && -n "$PR_SECRET" ]]
+}
+
+panel_remote_save() {
+    local tmp
+    tmp="$(mktemp)"
+    chmod 600 "$tmp"
+    cat > "$tmp" <<EOF
+# панель BatmanVPN на отдельном сервере (заполняет install.sh; не публиковать — тут секрет шлюза)
+PANEL_REMOTE_HOST=${PR_HOST}
+PANEL_REMOTE_PORT=${PR_PORT}
+PANEL_REMOTE_USER=${PR_USER}
+PANEL_REMOTE_EGRESS_IP=${PR_EGRESS_IP}
+PANEL_GATEWAY_SECRET=${PR_SECRET}
+EOF
+    mv -f "$tmp" "$PANEL_REMOTE_FILE"
+    chmod 600 "$PANEL_REMOTE_FILE"
+}
+
+# ssh на сервер панели: только наш ключ, только сохранённый отпечаток хоста, только IPv4
+_pr_ssh() {
+    ssh -i "$PR_KEY" -p "$PR_PORT" \
+        -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+        -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PR_KNOWN" \
+        -o AddressFamily=inet -o ConnectTimeout=15 \
+        -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+        -o LogLevel=ERROR \
+        "${PR_USER}@${PR_HOST}" "$@"
+}
+
+# префикс для root-команд на сервере панели
+_pr_sudo() {
+    if [[ "$PR_USER" == "root" ]]; then echo ""; else echo "sudo -n"; fi
+}
+
+# отпечаток хоста: показать и подтвердить (защита от подмены сервера)
+_pr_trust_host() {
+    local scan
+    scan="$(mktemp)"
+    if ! ssh-keyscan -4 -T 10 -p "$PR_PORT" -t ed25519,ecdsa,rsa "$PR_HOST" 2>/dev/null > "$scan" || [[ ! -s "$scan" ]]; then
+        rm -f "$scan"
+        log_error "Не удалось подключиться к ${PR_HOST}:${PR_PORT} по SSH."
+        hint "Проверьте адрес, порт и что SSH открыт в фаерволе сервера панели."
+        return 1
+    fi
+    local known_name="$PR_HOST"
+    [[ "$PR_PORT" != "22" ]] && known_name="[${PR_HOST}]:${PR_PORT}"
+    if [[ -f "$PR_KNOWN" ]] && ssh-keygen -F "$known_name" -f "$PR_KNOWN" >/dev/null 2>&1; then
+        # уже доверяли: при смене ключа ssh сам откажет (StrictHostKeyChecking=yes)
+        rm -f "$scan"
+        return 0
+    fi
+    echo
+    log_info "Отпечатки SSH-ключа сервера ${PR_HOST}:"
+    ssh-keygen -lf "$scan" | sed 's/^/     /'
+    hint "Сверить на сервере панели: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"
+    if ! confirm "Отпечаток верный, доверять этому серверу? (y/n): "; then
+        rm -f "$scan"
+        return 1
+    fi
+    mkdir -p "$PR_SSH_DIR"
+    chmod 700 "$PR_SSH_DIR"
+    cat "$scan" >> "$PR_KNOWN"
+    chmod 600 "$PR_KNOWN"
+    rm -f "$scan"
+}
+
+# ключ установщика на сервере панели (from= — вход только с этого сервера)
+_pr_install_key() {
+    local mode="$1" auth_key="${2:-}" my_ip pub line_from line_plain remote_cmd
+    pub="$(cat "${PR_KEY}.pub")"
+    my_ip="$(get_server_ip || true)"
+    line_plain="no-agent-forwarding,no-X11-forwarding ${pub}"
+    line_from="$line_plain"
+    [[ "$my_ip" =~ $PR_IPV4_RE ]] && line_from="from=\"${my_ip}\",${line_plain}"
+    # убрать прежние записи этого ключа и дописать новую
+    remote_cmd='umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && IFS= read -r l && body="$(printf "%s" "$l" | awk "{print \$(NF-1)}")" && { grep -vF "$body" ~/.ssh/authorized_keys || true; } > ~/.ssh/authorized_keys.blinvpn && printf "%s\n" "$l" >> ~/.ssh/authorized_keys.blinvpn && mv -f ~/.ssh/authorized_keys.blinvpn ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'
+    local -a base=(-p "$PR_PORT" -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PR_KNOWN"
+                   -o AddressFamily=inet -o ConnectTimeout=15 -o LogLevel=ERROR)
+    local line
+    for line in "$line_from" "$line_plain"; do
+        if [[ "$mode" == "password" ]]; then
+            printf '%s\n' "$line" | SSHPASS="${SSHPASS:-}" sshpass -e ssh "${base[@]}" -o PubkeyAuthentication=no \
+                -o PreferredAuthentications=password,keyboard-interactive \
+                "${PR_USER}@${PR_HOST}" "$remote_cmd" || return 1
+        else
+            printf '%s\n' "$line" | ssh "${base[@]}" -i "$auth_key" -o IdentitiesOnly=yes -o BatchMode=yes \
+                "${PR_USER}@${PR_HOST}" "$remote_cmd" || return 1
+        fi
+        if _pr_ssh true 2>/dev/null; then
+            [[ "$line" == "$line_plain" && "$line_from" != "$line_plain" ]] && \
+                log_warn "Вход по ключу с ограничением по IP не прошёл — ключ установлен без ограничения по IP."
+            return 0
+        fi
+        [[ "$line_from" == "$line_plain" ]] && break
+    done
+    return 1
+}
+
+panel_remote_collect() {
+    section "Панель на отдельном сервере · SSH"
+    hint "Установщик подключится по SSH, поставит nginx + сертификат и разместит там панель."
+    hint "Пароль никуда не сохраняется: он нужен один раз, чтобы добавить на сервер отдельный ключ."
+    local v
+    prompt_valid "  ${BOLD}IP или домен сервера панели${NC}: " PR_HOST \
+        '^([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+$' "Нужен IPv4 или домен, например 203.0.113.10"
+    prompt_valid "  ${BOLD}SSH-порт${NC} (Enter = 22): " v '^[0-9]{1,5}$' "Порт — число" 1
+    PR_PORT="${v:-22}"
+    prompt_valid "  ${BOLD}Пользователь${NC} (Enter = root): " v '^[a-z_][a-z0-9_-]{0,31}$' "Имя пользователя латиницей" 1
+    PR_USER="${v:-root}"
+
+    for cmd in ssh ssh-keygen ssh-keyscan; do
+        command -v "$cmd" >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends openssh-client >/dev/null
+    done
+    _pr_trust_host || return 1
+
+    mkdir -p "$PR_SSH_DIR"; chmod 700 "$PR_SSH_DIR"
+    if [[ ! -f "$PR_KEY" ]]; then
+        ssh-keygen -q -t ed25519 -N "" -C "blinvpn-panel-deploy@$(hostname)" -f "$PR_KEY"
+    fi
+    chmod 600 "$PR_KEY"
+
+    if _pr_ssh true 2>/dev/null; then
+        log_success "✔ вход по ключу установщика уже настроен."
+    else
+        step "1)" "Войти по паролю (рекомендуется)"
+        step "2)" "Войти по своему SSH-ключу"
+        prompt "  Способ входа [1-2] (Enter = 1): " v
+        if [[ "${v:-1}" == "2" ]]; then
+            local kp
+            prompt "  Путь к приватному ключу: " kp
+            kp="${kp/#\~/$HOME}"
+            [[ -f "$kp" ]] || { log_error "Файл ключа не найден."; return 1; }
+            _pr_install_key key "$kp" || { log_error "Не удалось войти по этому ключу."; return 1; }
+        else
+            command -v sshpass >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends sshpass >/dev/null
+            local pw=""
+            read -r -s -p "  Пароль ${PR_USER}@${PR_HOST}: " pw < /dev/tty; echo
+            [[ -n "$pw" ]] || { log_error "Пароль пустой."; return 1; }
+            # пароль только в окружении этого вызова (не в аргументах, не на диске)
+            if ! SSHPASS="$pw" _pr_install_key password; then
+                pw=""
+                log_error "Не удалось войти по паролю (проверьте пароль и что вход по паролю разрешён)."
+                return 1
+            fi
+            pw=""
+        fi
+        log_success "✔ ключ установщика добавлен на сервер панели."
+    fi
+
+    local priv
+    priv="$(_pr_ssh 'if [ "$(id -u)" = 0 ]; then echo root; elif sudo -n true 2>/dev/null; then echo sudo; else echo none; fi' 2>/dev/null || true)"
+    if [[ "$priv" == "none" || -z "$priv" ]]; then
+        log_error "У пользователя ${PR_USER} нет прав root (нужен root или sudo без пароля)."
+        return 1
+    fi
+    if ! _pr_ssh 'command -v apt-get >/dev/null && command -v systemctl >/dev/null' 2>/dev/null; then
+        log_error "Сервер панели должен быть на Debian/Ubuntu с systemd."
+        return 1
+    fi
+
+    # IPv4, с которого сервер панели ходит наружу — его пускаем к /api/panel
+    local a_ip
+    a_ip="$(get_server_ip || true)"
+    PR_EGRESS_IP="$(_pr_ssh "curl -4 -fsS -m 10 https://api.ipify.org 2>/dev/null || curl -4 -fsS -m 10 https://ipv4.icanhazip.com 2>/dev/null || wget -4 -qO- -T 10 https://api.ipify.org 2>/dev/null || ip -4 route get ${a_ip:-1.1.1.1} 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p'" 2>/dev/null | tr -d '\r\n\t ' || true)"
+    if [[ ! "$PR_EGRESS_IP" =~ $PR_IPV4_RE ]]; then
+        PR_EGRESS_IP="$(resolve_domain_ip "$PR_HOST" 2>/dev/null || true)"
+        [[ "$PR_HOST" =~ $PR_IPV4_RE ]] && PR_EGRESS_IP="$PR_HOST"
+    fi
+    [[ "$PR_EGRESS_IP" =~ $PR_IPV4_RE ]] || { log_error "Не удалось определить IPv4 сервера панели."; return 1; }
+    log_info "IPv4 сервера панели: ${PR_EGRESS_IP}"
+
+    local old_secret
+    old_secret="$(get_env_var PANEL_GATEWAY_SECRET "$PANEL_REMOTE_FILE" 2>/dev/null || true)"
+    PR_SECRET="${old_secret:-$(gen_secret_hex)$(gen_secret_hex)}"
+    panel_remote_save
+    log_success "✔ сервер панели подключён."
+}
+
+# nginx-конфиг для сервера панели: статика + шлюз только на /api/panel/
+_pr_render_nginx() {
+    local panel_domain="$1" miniapp_domain="$2" bot_ip="$3" out="$4"
+    local sec='        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;'
+    ( umask 077; cat > "$out" <<EOF
+# BatmanVPN — панель (сгенерировано install.sh на сервере бота; правки затрутся при обновлении)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${panel_domain};
+    location /.well-known/acme-challenge/ {
+        root /var/www/blinvpn-acme;
+    }
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${panel_domain};
+
+    ssl_certificate /etc/letsencrypt/live/${panel_domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${panel_domain}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
+
+    root /var/www/blinvpn-panel/current/html;
+    index index.html;
+
+    # вложения поддержки: до 50 мб
+    client_max_body_size 55m;
+
+    location / {
+${sec}
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    # API панели → сервер бота по HTTPS (сертификат проверяется), с секретом шлюза
+    location /api/panel {
+${sec}
+        proxy_pass https://${bot_ip};
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${miniapp_domain};
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${miniapp_domain};
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Panel-Gateway "${PR_SECRET}";
+        proxy_set_header CF-Connecting-IP "";
+        proxy_set_header True-Client-IP "";
+        proxy_connect_timeout 15s;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+        proxy_request_buffering on;
+    }
+
+    # остальное API панели не нужно
+    location /api/ {
+${sec}
+        return 404;
+    }
+
+    location = /node.sh {
+${sec}
+        default_type text/plain;
+        charset utf-8;
+        add_header Cache-Control "no-store" always;
+        try_files /node.sh =404;
+    }
+
+    location = /sw.js {
+${sec}
+        add_header Cache-Control "no-cache" always;
+        add_header Service-Worker-Allowed "/" always;
+        try_files /sw.js =404;
+    }
+
+    location = /manifest.webmanifest {
+${sec}
+        default_type application/manifest+json;
+        add_header Cache-Control "no-cache" always;
+        try_files /manifest.webmanifest =404;
+    }
+
+    # assets: свежие из проекта, иначе собранные
+    location ^~ /assets/ {
+${sec}
+        root /var/www/blinvpn-panel/current/live;
+        add_header Cache-Control "public, max-age=600" always;
+        try_files \$uri @built_assets;
+    }
+    location @built_assets {
+${sec}
+        root /var/www/blinvpn-panel/current/html;
+        add_header Cache-Control "public, max-age=604800" always;
+    }
+
+    location ~* \.(js|css|woff2?|png|jpg|jpeg|svg|ico|webp|gif)\$ {
+${sec}
+        add_header Cache-Control "public, max-age=604800" always;
+        try_files \$uri =404;
+    }
+}
+EOF
+    )
+}
+
+# собрать статику панели здесь и разместить на сервере панели
+panel_remote_deploy() {
+    local miniapp_domain="$1" panel_domain="$2" email="$3"
+    panel_remote_load || { log_error "Сервер панели не настроен (${PANEL_REMOTE_FILE})."; return 1; }
+    local email_re='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+    [[ "$email" =~ $email_re ]] || { log_error "Некорректный email для Let's Encrypt: ${email}"; return 1; }
+
+    section "Панель → ${PR_HOST}"
+    local bot_ip
+    bot_ip="$(resolve_domain_ip "$miniapp_domain" || true)"
+    [[ "$bot_ip" =~ $PR_IPV4_RE ]] || bot_ip="$(get_server_ip || true)"
+    [[ "$bot_ip" =~ $PR_IPV4_RE ]] || { log_error "Не удалось определить IPv4 сервера бота."; return 1; }
+
+    log_info "Сборка панели..."
+    local npm_reg i built=0
+    npm_reg="$(get_env_var NPM_REGISTRY .env 2>/dev/null || true)"
+    for i in 1 2 3; do
+        if sudo docker build -q -f docker/Dockerfile.panel \
+                --build-arg NPM_REGISTRY="${npm_reg:-https://registry.npmjs.org/}" \
+                -t blinvpn-panel-static:latest . >/dev/null; then
+            built=1; break
+        fi
+        [[ $i -lt 3 ]] && { log_warn "Сборка панели не удалась (попытка ${i}/3), повтор через 20 с…"; sleep 20; }
+    done
+    [[ $built -eq 1 ]] || { log_error "Не удалось собрать панель."; return 1; }
+
+    local stage cid
+    stage="$(mktemp -d)"
+    chmod 700 "$stage"
+    mkdir -p "$stage/release/live"
+    cid="$(sudo docker create blinvpn-panel-static:latest)"
+    if ! sudo docker cp "${cid}:/usr/share/nginx/html" "$stage/release/html"; then
+        sudo docker rm -f "$cid" >/dev/null 2>&1 || true
+        sudo rm -rf "$stage"
+        log_error "Не удалось извлечь статику панели из образа."
+        return 1
+    fi
+    sudo docker rm -f "$cid" >/dev/null 2>&1 || true
+    if [[ -d assets ]]; then
+        cp -a assets "$stage/release/live/assets"
+    else
+        mkdir -p "$stage/release/live/assets"
+    fi
+    sudo tar -C "$stage/release" --owner=0 --group=0 -czf "$stage/release.tgz" .
+    _pr_render_nginx "$panel_domain" "$miniapp_domain" "$bot_ip" "$stage/nginx.conf"
+
+    local sudo_r inc
+    sudo_r="$(_pr_sudo)"
+    inc="$(_pr_ssh "${sudo_r} sh -c 'umask 077; mkdir -p /var/lib/blinvpn-panel/incoming && chmod 700 /var/lib/blinvpn-panel /var/lib/blinvpn-panel/incoming && mktemp -d /var/lib/blinvpn-panel/incoming/rel.XXXXXX'" | tr -d '\r\n' || true)"
+    if [[ ! "$inc" =~ ^/var/lib/blinvpn-panel/incoming/rel\.[A-Za-z0-9]+$ ]]; then
+        sudo rm -rf "$stage"
+        log_error "Не удалось подготовить каталог на сервере панели."
+        return 1
+    fi
+    log_info "Загрузка на ${PR_HOST}..."
+    local ok=1
+    sudo cat "$stage/release.tgz" | _pr_ssh "${sudo_r} sh -c 'umask 077; cat > ${inc}/release.tgz'" || ok=0
+    [[ $ok -eq 1 ]] && { _pr_ssh "${sudo_r} sh -c 'umask 077; cat > ${inc}/nginx.conf'" < "$stage/nginx.conf" || ok=0; }
+    sudo rm -rf "$stage"
+    if [[ $ok -ne 1 ]]; then
+        _pr_ssh "${sudo_r} rm -rf ${inc}" >/dev/null 2>&1 || true
+        log_error "Не удалось загрузить файлы на сервер панели."
+        return 1
+    fi
+
+    log_info "Установка на сервере панели..."
+    local args out
+    args="$(printf '%q ' "$panel_domain" "$email" "$inc" "$bot_ip")"
+    if out="$(_pr_ssh "${sudo_r} bash -s -- ${args}" < docker/panel-remote/setup.sh 2>&1)" && [[ "$(printf '%s' "$out" | tail -n1)" == "OK" ]]; then
+        printf '%s\n' "$out" | sed '$d'
+        log_success "✔ Панель работает: https://${panel_domain}"
+        return 0
+    fi
+    printf '%s\n' "$out"
+    log_error "Установка панели на ${PR_HOST} не завершена."
+    return 1
+}
+
+# A-запись панели должна смотреть на сервер панели
+panel_remote_check_dns() {
+    local panel_domain="$1" pip host_ip
+    pip="$(resolve_domain_ip "$panel_domain" || true)"
+    host_ip="$PR_HOST"
+    [[ "$host_ip" =~ $PR_IPV4_RE ]] || host_ip="$(resolve_domain_ip "$PR_HOST" || true)"
+    if [[ -n "$pip" && -n "$host_ip" && "$pip" != "$host_ip" && "$pip" != "$PR_EGRESS_IP" ]]; then
+        log_warn "A-запись ${panel_domain} → ${pip}, а сервер панели — ${host_ip}."
+        confirm "Продолжить? (y/n): " || return 1
+    elif [[ -z "$pip" ]]; then
+        log_warn "У ${panel_domain} нет A-записи — сертификат не выпустится."
+        confirm "Продолжить? (y/n): " || return 1
+    fi
+}
+
+# применить nginx бота в нужном режиме
+apply_bot_nginx() {
+    local mini="$1" panel="$2"
+    if panel_is_remote && panel_remote_load; then
+        configure_nginx "$mini" "$panel" "$NGINX_CONF" "$NGINX_LINK" "$PR_EGRESS_IP" "$PR_SECRET"
+    else
+        configure_nginx "$mini" "$panel" "$NGINX_CONF" "$NGINX_LINK"
+    fi
+}
+
+# перенос существующей панели на отдельный сервер
+move_panel_to_remote_flow() {
+    section "Перенос панели на отдельный сервер"
+    local mini panel email
+    mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
+    panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+    email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
+    [[ -n "$mini" && -n "$panel" ]] || { log_error "В .env нет MINIAPP_DOMAIN/PANEL_DOMAIN."; exit 1; }
+    if [[ -z "$email" ]]; then
+        prompt "Email для Let's Encrypt: " email
+        set_env_var SSL_EMAIL "$email"
+    fi
+    log_info "Домен панели: ${panel}"
+    hint "Перед переносом направьте A-запись ${panel} на новый сервер панели."
+    panel_remote_collect || exit 1
+    panel_remote_check_dns "$panel" || exit 1
+    apply_bot_nginx "$mini" "$panel"
+    if ! panel_remote_deploy "$mini" "$panel" "$email"; then
+        log_warn "Сервер бота уже переключён на удалённую панель. Исправьте ошибку и запустите install.sh → «Панель на отдельном сервере» ещё раз."
+        exit 1
+    fi
+    dc stop panel >/dev/null 2>&1 || true
+    if [[ -d "/etc/letsencrypt/live/${panel}" ]] && confirm "Удалить сертификат ${panel} с этого сервера (он теперь на сервере панели)? (y/n): "; then
+        sudo certbot delete --cert-name "$panel" --non-interactive >/dev/null 2>&1 || true
+    fi
+    log_success "\nГотово: панель — https://${panel} (сервер ${PR_HOST})."
+}
+
 REPO_URL="${BLINVPN_REPO_URL:-https://github.com/Blin4Dev/listvpn.git}"
 REPO_BRANCH="${BLINVPN_BRANCH:-main}"
 PROJECT_DIR="blinvpn"
@@ -1104,9 +1669,18 @@ if [[ -f "$NGINX_CONF" ]]; then
             _upd_mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || get_env_var WEBHOOK_DOMAIN .env 2>/dev/null || true)"
             _upd_panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
             if [[ -n "$_upd_mini" && -n "$_upd_panel" ]]; then
-                configure_nginx "$_upd_mini" "$_upd_panel" "$NGINX_CONF" "$NGINX_LINK"
+                apply_bot_nginx "$_upd_mini" "$_upd_panel"
             else
                 sudo nginx -t && sudo systemctl reload nginx || true
+            fi
+        fi
+
+        # панель на отдельном сервере: выкатить новую версию туда
+        if panel_is_remote; then
+            dc stop panel >/dev/null 2>&1 || true
+            _upd_email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
+            if ! panel_remote_deploy "$_upd_mini" "$_upd_panel" "$_upd_email"; then
+                log_warn "Бот обновлён, но панель на отдельном сервере — нет. Повторите: install.sh → «Панель на отдельном сервере»."
             fi
         fi
 
@@ -1121,9 +1695,14 @@ if [[ -f "$NGINX_CONF" ]]; then
     section "Существующая установка — выберите действие"
     step "1)" "Обновить код и перезапустить контейнеры (по умолчанию)"
     step "2)" "Заменить домены"
-    step "3)" "Выход"
+    if panel_is_remote; then
+        step "3)" "Панель на отдельном сервере: переустановить / сменить сервер"
+    else
+        step "3)" "Перенести панель на отдельный сервер"
+    fi
+    step "4)" "Выход"
     echo
-    prompt "Ваш выбор [1-3] (Enter = 1): " ACTION_CHOICE
+    prompt "Ваш выбор [1-4] (Enter = 1): " ACTION_CHOICE
     ACTION_CHOICE="${ACTION_CHOICE:-1}"
 
     case "$ACTION_CHOICE" in
@@ -1132,6 +1711,24 @@ if [[ -f "$NGINX_CONF" ]]; then
             exit 0
             ;;
         3)
+            if panel_is_remote; then
+                _m_mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
+                _m_panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+                _m_email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
+                panel_remote_load || true
+                if confirm "Сменить сервер панели (сейчас ${PR_HOST:-?})? (y/n): "; then
+                    panel_remote_collect || exit 1
+                    panel_remote_check_dns "$_m_panel" || exit 1
+                fi
+                apply_bot_nginx "$_m_mini" "$_m_panel"
+                panel_remote_deploy "$_m_mini" "$_m_panel" "$_m_email" || exit 1
+                dc stop panel >/dev/null 2>&1 || true
+            else
+                move_panel_to_remote_flow
+            fi
+            exit 0
+            ;;
+        4)
             log_info "Выход без изменений."
             exit 0
             ;;
@@ -1187,6 +1784,17 @@ PANEL_DOMAIN=$(sanitize_domain "$USER_PANEL_DOMAIN_INPUT")
 prompt "Email для Let's Encrypt: " EMAIL
 [[ -n "$EMAIL" ]] || { log_error "Email обязателен."; exit 1; }
 
+PANEL_REMOTE=0
+echo
+hint "Панель можно поставить на отдельный сервер: установщик сам зайдёт туда по SSH."
+if confirm "Установить панель на ОТДЕЛЬНЫЙ сервер? (y/n): "; then
+    PANEL_REMOTE=1
+    hint "A-запись ${PANEL_DOMAIN} должна указывать на сервер панели, а не на этот."
+    panel_remote_collect || exit 1
+else
+    rm -f "$PANEL_REMOTE_FILE" 2>/dev/null || true
+fi
+
 SERVER_IP=$(get_server_ip || true)
 DOMAIN_IP=$(resolve_domain_ip "$DOMAIN" || true)
 PANEL_DOMAIN_IP=$(resolve_domain_ip "$PANEL_DOMAIN" || true)
@@ -1199,10 +1807,14 @@ if [[ -n "$SERVER_IP" && -n "$DOMAIN_IP" && "$SERVER_IP" != "$DOMAIN_IP" ]]; the
     log_warn "DNS ${DOMAIN} не совпадает с IP сервера."
     confirm "Продолжить? (y/n): " || exit 1
 fi
-if [[ -n "$SERVER_IP" && -n "$PANEL_DOMAIN_IP" && "$SERVER_IP" != "$PANEL_DOMAIN_IP" ]]; then
+if [[ $PANEL_REMOTE -eq 1 ]]; then
+    panel_remote_check_dns "$PANEL_DOMAIN" || exit 1
+elif [[ -n "$SERVER_IP" && -n "$PANEL_DOMAIN_IP" && "$SERVER_IP" != "$PANEL_DOMAIN_IP" ]]; then
     log_warn "DNS ${PANEL_DOMAIN} не совпадает с IP сервера."
     confirm "Продолжить? (y/n): " || exit 1
 fi
+LOCAL_CERT_DOMAINS=("$DOMAIN")
+[[ $PANEL_REMOTE -eq 1 ]] || LOCAL_CERT_DOMAINS+=("$PANEL_DOMAIN")
 
 if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active'; then
     log_warn "UFW активен — открываю порты 80 и 443, закрываю внутренние."
@@ -1219,7 +1831,7 @@ TEMP_CONF="/tmp/blinvpn_certbot.conf"
 sudo tee "$TEMP_CONF" >/dev/null <<EOF
 server {
     listen 80;
-    server_name ${DOMAIN} ${PANEL_DOMAIN};
+    server_name ${LOCAL_CERT_DOMAINS[*]};
     location /.well-known/acme-challenge/ {
         root /var/www/html;
     }
@@ -1235,11 +1847,12 @@ sudo ln -sf "$TEMP_CONF" "$NGINX_LINK"
 sudo nginx -t && sudo systemctl reload nginx
 sudo mkdir -p /var/www/html/.well-known/acme-challenge
 
-for d in "$DOMAIN" "$PANEL_DOMAIN"; do
+for d in "${LOCAL_CERT_DOMAINS[@]}"; do
     if [[ -d "/etc/letsencrypt/live/${d}" ]]; then
         log_success "✔ сертификат для ${d} уже есть."
     else
         log_info "Выпуск сертификата для ${d}..."
+        acme_preflight "$d" || exit 1
         sudo certbot certonly --webroot -w /var/www/html -d "$d" \
             --email "$EMAIL" --agree-tos --non-interactive
         log_success "✔ сертификат для ${d} получен."
@@ -1249,7 +1862,7 @@ done
 sudo rm -f "$TEMP_CONF"
 
 log_info "\nШаг 4: Nginx"
-configure_nginx "$DOMAIN" "$PANEL_DOMAIN" "$NGINX_CONF" "$NGINX_LINK"
+apply_bot_nginx "$DOMAIN" "$PANEL_DOMAIN"
 
 log_info "\nШаг 5: .env"
 if [[ -f ".env" ]]; then
@@ -1275,6 +1888,21 @@ dc up -d
 fix_container_data_permissions
 dc restart api webhook bot monitor 2>/dev/null || true
 install_host_runner
+
+PANEL_DEPLOY_FAILED=0
+if [[ $PANEL_REMOTE -eq 1 ]]; then
+    log_info "\nШаг 6.1: Панель на отдельном сервере"
+    dc stop panel >/dev/null 2>&1 || true
+    # API должен подняться: проверка шлюза ждёт ответ 401
+    for _i in $(seq 1 30); do
+        curl -fsS -m 3 "http://127.0.0.1:${API_PORT:-8000}/api/health" >/dev/null 2>&1 && break
+        sleep 2
+    done
+    if ! panel_remote_deploy "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL"; then
+        PANEL_DEPLOY_FAILED=1
+        log_warn "Бот установлен, но панель на отдельном сервере — нет. Исправьте ошибку выше и запустите install.sh → «Панель на отдельном сервере»."
+    fi
+fi
 
 log_info "\nШаг 7: Telegram Stars"
 TELEGRAM_STARS_DELIVERY="$(get_env_var TELEGRAM_STARS_DELIVERY || true)"
@@ -1305,6 +1933,11 @@ printf "${GREEN}┃${NC}    ${BOLD}Установка завершена${NC}   
 printf "\n"
 printf "${BOLD}  Адреса${NC}\n"
 printf "  Мини-приложение:  ${YELLOW}https://%s${NC}\n" "$DOMAIN"
-printf "  Панель:           ${YELLOW}https://%s${NC}\n" "$PANEL_DOMAIN"
+if [[ $PANEL_REMOTE -eq 1 ]]; then
+    printf "  Панель:           ${YELLOW}https://%s${NC}  (сервер %s)\n" "$PANEL_DOMAIN" "$PR_HOST"
+    [[ $PANEL_DEPLOY_FAILED -eq 1 ]] && printf "                    ${RED}не установлена — см. ошибку выше${NC}\n"
+else
+    printf "  Панель:           ${YELLOW}https://%s${NC}\n" "$PANEL_DOMAIN"
+fi
 printf "  API:              ${YELLOW}https://%s/api${NC}\n" "$DOMAIN"
 print_payment_webhooks "$DOMAIN"
