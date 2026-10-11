@@ -15,7 +15,7 @@ import { PaymentActions } from '../../components/PaymentActions';
 export interface UserDetailData {
   id: number; telegram_id: number | null; username: string | null;
   first_name: string | null; last_name: string | null; email: string | null;
-  registration_date: string | null; status: string; is_banned: boolean; key_blocked?: boolean; ban_reason?: string | null; blacklist_reason?: string | null; blacklist_ignored?: boolean;
+  registration_date: string | null; anti_key?: string | null; anti_expires_at?: string | null; status: string; is_banned: boolean; key_blocked?: boolean; ban_reason?: string | null; blacklist_reason?: string | null; blacklist_ignored?: boolean;
   subscriptions_history?: { id: number; status: string; type?: string; expiry_date?: string | null; created_at?: string | null; deleted_at?: string | null; devices_limit?: number; ban_reason?: string | null; banned_at?: string | null }[];
   banned_at?: string | null;
   moderation?: { id: number; kind: string; label: string; reason: string | null; sub_id: number | null; actor: string | null; actor_name: string | null; created_at: string | null }[];
@@ -235,6 +235,11 @@ export const UserDetailPage: React.FC<{
             )}
           </InfoRow>
           <InfoRow label="Регистрация"><span className="mono">{fmtDateTime(detail.registration_date)}</span></InfoRow>
+          <InfoRow label="Белые списки">
+            {detail.anti_key ? (
+              <span className="mono" style={{ wordBreak: 'break-all' }}>{detail.anti_key} · до {fmtDateTime(detail.anti_expires_at ?? null)}</span>
+            ) : <span className="mono">—</span>}
+          </InfoRow>
           <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
           {canEdit && (
             <div className="flex gap-2 mt-3">

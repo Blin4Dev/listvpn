@@ -800,6 +800,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         },
         "users": {
             "tracking_code": "ALTER TABLE users ADD COLUMN tracking_code TEXT",
+            # белые списки (анти-ключ FURK, как в старом боте): ссылка и срок
+            "anti_key": "ALTER TABLE users ADD COLUMN anti_key TEXT",
+            "anti_expires_at": "ALTER TABLE users ADD COLUMN anti_expires_at TEXT",
             # когда принял оферту и политику
             "terms_accepted_at": "ALTER TABLE users ADD COLUMN terms_accepted_at TEXT",
             "first_start_at": "ALTER TABLE users ADD COLUMN first_start_at TEXT",
@@ -913,6 +916,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         },
         "subscriptions": {
             # до какого момента подключены белые списки (отдельный сквад)
+            # устарело: белые списки теперь анти-ключом FURK (users.anti_key), колонка оставлена для совместимости
             "whitelist_until": "ALTER TABLE subscriptions ADD COLUMN whitelist_until TEXT",
             # заморозка (пауза отсчёта дней)
             "frozen_at": "ALTER TABLE subscriptions ADD COLUMN frozen_at TEXT",

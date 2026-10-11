@@ -23,7 +23,7 @@ import { N, NoirBack, NoirButton, NoirCard, NoirRow, NoirScreen, NoirSection, No
  *   bypass: { enabled: boolean; used_bytes?: number | null; limit_bytes?: number }
  * Нет поля / enabled=false → «не подключены».
  */
-type BypassInfo = { enabled?: boolean; until?: string | null; used_bytes?: number | null; limit_bytes?: number } | null;
+type BypassInfo = { enabled?: boolean; until?: string | null; key?: string | null; used_bytes?: number | null; limit_bytes?: number } | null;
 
 type SubResponse = {
   status?: string;
@@ -95,6 +95,7 @@ export default function ManageSubscription() {
   const [isTrial, setIsTrial] = useState(false);
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
   const [bypass, setBypass] = useState<BypassInfo>(null);
+  const [bypassCopied, setBypassCopied] = useState(false);
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
 
@@ -285,6 +286,20 @@ export default function ManageSubscription() {
           <TrafficRow label="Основной" value={mainTraffic} warn={mainOver} />
           <TrafficRow label="Обходы" value={bypassValue} warn={bypassOver} last />
         </NoirCard>
+        {bypassOn && bypass?.key ? (
+          <div style={{ marginTop: 12 }}>
+            <NoirRow
+              icon="content_copy"
+              title={bypassCopied ? "Ключ белых списков скопирован" : "Скопировать ключ белых списков"}
+              onClick={() => {
+                void copyText(String(bypass.key)).then(() => {
+                  setBypassCopied(true);
+                  window.setTimeout(() => setBypassCopied(false), 2000);
+                });
+              }}
+            />
+          </div>
+        ) : null}
         <div style={{ marginTop: 12 }}>
           <NoirRow title="Сбросить трафик" onClick={requestTrafficReset} />
         </div>

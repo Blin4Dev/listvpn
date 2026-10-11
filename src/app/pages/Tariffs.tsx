@@ -30,10 +30,10 @@ function devicesWord(n: number) {
 }
 
 const FALLBACK: TariffPeriod[] = [
-  { months: 1, days: 30, price: 99, whitelist_price: 200 },
-  { months: 3, days: 90, price: 249, whitelist_price: 500 },
-  { months: 6, days: 180, price: 449, whitelist_price: 900 },
-  { months: 12, days: 365, price: 799, whitelist_price: 1600 },
+  { months: 1, days: 30, price: 180, whitelist_price: 399, whitelist_devices: 2 },
+  { months: 3, days: 90, price: 470, whitelist_price: 1488, whitelist_devices: 5 },
+  { months: 6, days: 180, price: 900, whitelist_price: 2222, whitelist_devices: 5 },
+  { months: 12, days: 365, price: 1600, whitelist_price: 0 },
 ];
 
 function Switch({ on, onToggle }: { on: boolean; onToggle: () => void }) {
@@ -111,10 +111,9 @@ export default function Tariffs() {
     navigate(`/payment?${q.toString()}`);
   };
 
-  const wlPrices = Array.from(new Set(periods.map((p) => Math.round(p.whitelist_price))));
-  const wlText = wlPrices.length === 1
-    ? `К выбранному тарифу добавляется ${wlPrices[0]} ₽.`
-    : `К выбранному тарифу добавляется от ${Math.min(...wlPrices)} ₽ — зависит от срока.`;
+  // белые списки — отдельные тарифы (как в старом боте): полная цена, только сроки с ценой > 0
+  const wlPeriods = periods.filter((p) => Number(p.whitelist_price) > 0);
+  const shown = wl ? wlPeriods : periods;
 
   const rise = (i: number): React.CSSProperties => ({
     animation: loaded ? `blinvpnRise 0.55s var(--ease-out) ${0.05 * i}s both` : undefined,
@@ -132,8 +131,8 @@ export default function Tariffs() {
       <div style={{ margin: "22px 0 10px", fontSize: 14.5, color: N.muted }}>Выберите период</div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {periods.map((p, i) => {
-          const full = Math.round(p.price + (wl ? p.whitelist_price : 0));
+        {shown.map((p, i) => {
+          const full = Math.round(wl ? p.whitelist_price : p.price);
           const final = discount > 0 ? applyDiscount(full, discount) : full;
           return (
             <button
@@ -167,6 +166,7 @@ export default function Tariffs() {
                 </span>
                 <span style={{ display: "block", marginTop: 5, fontSize: 14, color: N.muted }}>
                   {p.days} {daysWord(p.days)}, {devices} {devicesWord(devices)}
+                  {wl ? ` + белые списки${p.whitelist_devices ? ` (${p.whitelist_devices} ${devicesWord(p.whitelist_devices)})` : ""}` : ""}
                 </span>
               </span>
               <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flex: "none" }}>
@@ -185,12 +185,12 @@ export default function Tariffs() {
         })}
       </div>
 
-      {wlAvailable ? (
-        <NoirCard style={{ ...rise(periods.length), marginTop: 18, padding: "18px 18px 20px", display: "flex", alignItems: "center", gap: 16 }}>
+      {wlAvailable && wlPeriods.length ? (
+        <NoirCard style={{ ...rise(shown.length), marginTop: 18, padding: "18px 18px 20px", display: "flex", alignItems: "center", gap: 16 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 17.5, fontWeight: 600, color: N.text, letterSpacing: "-0.01em" }}>Белые списки</div>
             <div style={{ marginTop: 8, fontSize: 14, lineHeight: 1.45, color: N.muted }}>
-              Это отдельная опция. {wlText} Срок и число устройств на эту сумму не влияют.
+              Отдельный ключ для обхода белых списков (500 ГБ). Включите, чтобы увидеть тарифы с ним: основная подписка продлевается на тот же срок.
             </div>
           </div>
           <Switch on={wl} onToggle={() => setWl((v) => !v)} />

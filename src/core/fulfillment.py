@@ -107,36 +107,67 @@ def vpn_squads() -> list[str]:
 # ── тарифы по периодам ──
 SUB_PERIODS = (1, 3, 6, 12)
 PERIOD_DAYS = {1: 30, 3: 90, 6: 180, 12: 365}
-PERIOD_DEFAULT_PRICE = {1: 99, 3: 249, 6: 449, 12: 799}
+# цены по умолчанию — из старого бота (vpn_1 180, vpn_2 340, vpn_4 600, vpn_6 900, vpn_12 1600);
+# 3 месяца в старом не было — середина между 2 и 4 мес.
+PERIOD_DEFAULT_PRICE = {1: 180, 3: 470, 6: 900, 12: 1600}
+PERIOD_DEFAULT_STARS = {1: 200, 3: 540, 6: 1000, 12: 2000}
+
+
+def _float_setting(key: str, default: float) -> float:
+    try:
+        return float(db.get_setting(key, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def period_price(months: int) -> float:
     m = int(months)
-    try:
-        return float(db.get_setting(f"period_price_{m}", str(PERIOD_DEFAULT_PRICE.get(m, 99 * m))))
-    except (TypeError, ValueError):
-        return float(PERIOD_DEFAULT_PRICE.get(m, 99 * m))
+    return _float_setting(f"period_price_{m}", PERIOD_DEFAULT_PRICE.get(m, 180 * m))
+
+
+def period_stars(months: int) -> int:
+    """цена тарифа в звёздах (отдельная, как в старом боте)."""
+    m = int(months)
+    return int(round(_float_setting(f"period_stars_{m}", PERIOD_DEFAULT_STARS.get(m, 200 * m))))
 
 
 def tariff_devices() -> int:
     return _int_setting("tariff_devices", 3, 1, 20)
 
 
-# ── белые списки: отдельный внутренний сквад ──
-def whitelist_squad() -> str:
-    return (db.get_setting("whitelist_squad_uuid", "") or "").strip()
+# ── белые списки: отдельный анти-ключ FURK, как в старом боте ──
+# Отдельные тарифы anti_1/anti_3/anti_6: цена — полная (ВПН + белые списки),
+# покупка продлевает основную подписку на тот же срок и выпускает/продлевает анти-ключ (500 ГБ).
+# Цена 0 = период для белых списков недоступен.
+WHITELIST_DEFAULT_PRICE = {1: 399, 3: 1488, 6: 2222, 12: 0}
+WHITELIST_DEFAULT_STARS = {1: 600, 3: 1800, 6: 2500, 12: 0}
+WHITELIST_DEFAULT_DEVICES = {1: 2, 3: 5, 6: 5, 12: 5}
 
-
-WHITELIST_DEFAULT_PRICE = {1: 200, 3: 500, 6: 900, 12: 1600}
+try:
+    import furk  # type: ignore  # src/api на PYTHONPATH
+except Exception:  # noqa: BLE001
+    furk = None  # type: ignore
 
 
 def whitelist_price(months: int = 1) -> float:
-    """доплата за белые списки к тарифу на months (своя для каждого периода)."""
+    """полная цена тарифа «ВПН + белые списки» на months (0 = нет такого периода)."""
     m = int(months or 1)
-    try:
-        return float(db.get_setting(f"whitelist_price_{m}", str(WHITELIST_DEFAULT_PRICE.get(m, 200 * m))))
-    except (TypeError, ValueError):
-        return float(WHITELIST_DEFAULT_PRICE.get(m, 200 * m))
+    return _float_setting(f"whitelist_price_{m}", WHITELIST_DEFAULT_PRICE.get(m, 0))
+
+
+def whitelist_stars(months: int = 1) -> int:
+    m = int(months or 1)
+    return int(round(_float_setting(f"whitelist_stars_{m}", WHITELIST_DEFAULT_STARS.get(m, 0))))
+
+
+def whitelist_devices(months: int = 1) -> int:
+    """сколько устройств в анти-ключе (подпись тарифа, как «(2 устройства) 1 месяц»)."""
+    m = int(months or 1)
+    return _int_setting(f"whitelist_devices_{m}", WHITELIST_DEFAULT_DEVICES.get(m, 5), 1, 50)
+
+
+def whitelist_period_available(months: int) -> bool:
+    return whitelist_available() and whitelist_price(months) > 0
 
 
 def period_days(months: int) -> int:
@@ -144,26 +175,56 @@ def period_days(months: int) -> int:
 
 
 def whitelist_available() -> bool:
-    return bool(whitelist_squad())
+    return bool(furk is not None and furk.is_configured())
+
+
+def user_whitelist(user: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """анти-ключ пользователя: ссылка, срок, активен ли."""
+    if not user:
+        return {"key": None, "until": None, "active": False}
+    row = db.fetchone("SELECT anti_key, anti_expires_at FROM users WHERE id = ?", (int(user["id"]),)) or {}
+    until = parse_iso(row.get("anti_expires_at"))
+    return {"key": row.get("anti_key"), "until": row.get("anti_expires_at"),
+            "active": bool(row.get("anti_key") and until and until > utcnow())}
+
+
+def grant_whitelist(user: dict[str, Any], months: int) -> dict[str, Any]:
+    """выпустить/продлить анти-ключ на months (логика старого process_payment для anti_*)."""
+    months = max(1, int(months or 1))
+    cur = user_whitelist(user)
+    out: dict[str, Any] = {"ok": False, "key": cur["key"], "until": cur["until"],
+                           "prev_key": cur["key"], "prev_until": cur["until"], "error": None}
+    if furk is None:
+        out["error"] = "furk_module_missing"
+        return out
+    try:
+        key = furk.issue_or_renew(cur["key"], months)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        return out
+    # срок: от текущего (если ещё идёт) или от сейчас + 30 дн × months
+    prev = parse_iso(cur["until"])
+    base = prev if (prev and prev > utcnow()) else utcnow()
+    until = iso(base + timedelta(days=DAYS_PER_MONTH * months))
+    db.execute("UPDATE users SET anti_key = ?, anti_expires_at = ? WHERE id = ?", (key, until, int(user["id"])))
+    out.update(ok=True, key=key, until=until)
+    return out
 
 
 def whitelist_active(sub: Optional[dict[str, Any]]) -> bool:
-    if not sub:
+    """совместимость: белые списки активны у владельца подписки."""
+    if not sub or not sub.get("user_id"):
         return False
-    until = parse_iso(sub.get("whitelist_until"))
-    return bool(until and until > utcnow())
+    return bool(user_whitelist({"id": sub["user_id"]})["active"])
 
 
-def squads_for(whitelist: bool) -> list[str]:
-    sq = list(vpn_squads())
-    wl = whitelist_squad()
-    if whitelist and wl and wl not in sq:
-        sq.append(wl)
-    return sq
+def squads_for(whitelist: bool = False) -> list[str]:
+    # белые списки — отдельный ключ FURK, в remnawave только обычные сквады
+    return list(vpn_squads())
 
 
 def squads_for_sub(sub: Optional[dict[str, Any]]) -> list[str]:
-    return squads_for(whitelist_active(sub))
+    return squads_for()
 
 
 def trial_squads() -> list[str]:
@@ -538,10 +599,11 @@ def expire_device_addons(log=print) -> int:
 
 
 def expire_whitelists(log=print) -> int:
-    """закончился срок белых списков → убрать сквад."""
+    """белые списки теперь — анти-ключ FURK: его срок истекает у провайдера, ключ остаётся
+    у пользователя для продления (как в старом боте). Здесь только снимаем сквад белых списков
+    с подписок, оформленных по старой схеме (whitelist_until в subscriptions)."""
     now = utcnow()
-    rows = db.fetchall(
-        "SELECT * FROM subscriptions WHERE whitelist_until IS NOT NULL AND whitelist_until <= ?", (iso(now),))
+    rows = db.fetchall("SELECT * FROM subscriptions WHERE whitelist_until IS NOT NULL")
     done = 0
     for sub in rows:
         claim = db.execute(
@@ -643,15 +705,7 @@ def grant_subscription(
         # trial→paid: число устройств как у платной, не max(старое, платное)
         new_devices = total_devices if upgrading_trial else max(int(target.get("devices_limit") or 1), total_devices)
         new_devices = max(1, new_devices)
-        # белые списки: куплены сейчас → до конца нового срока; иначе остаются до прежней даты
-        prev_wl_until = target.get("whitelist_until")
-        if whitelist:
-            # оплачен срок периода: от конца текущих белых списков (или от сейчас), но не дольше подписки
-            wl_base = parse_iso(prev_wl_until) if whitelist_active(target) else utcnow()
-            wl_until = iso(min(new_exp, (wl_base or utcnow()) + timedelta(days=added_days)))
-        else:
-            wl_until = prev_wl_until if whitelist_active(target) else None
-        squads = squads_for(bool(wl_until))
+        squads = squads_for()
         prov = provisioning.provision(
             user_id=int(user["id"]), telegram_id=telegram_id, username=username, expire_at=new_exp,
             devices=new_devices, squads=squads, email=email,
@@ -661,10 +715,11 @@ def grant_subscription(
         db.execute(
             "UPDATE subscriptions SET expires_at = ?, status = 'Active', devices_limit = ?, "
             "traffic_limit = ?, traffic_used = CASE WHEN ? THEN 0 ELSE traffic_used END, "
-            "type = 'vpn', squads_json = ?, whitelist_until = ? WHERE id = ?",
+            "type = 'vpn', squads_json = ? WHERE id = ?",
             (iso(new_exp), new_devices, paid_traffic_gb(), 1 if upgrading_trial else 0,
-             db.dumps(squads), wl_until, target["id"]),
+             db.dumps(squads), target["id"]),
         )
+        wl = _grant_whitelist_safe(user, months) if whitelist else None
         _apply_provision_to_sub(target, prov)
         _sync_user_status(int(user["id"]))
         if db.fetchone("SELECT id FROM subscriptions WHERE user_id = ? AND grace_until IS NOT NULL LIMIT 1", (int(user["id"]),)):
@@ -692,13 +747,13 @@ def grant_subscription(
                      "end_at": iso(new_exp),
                      "prev_traffic_limit": target.get("traffic_limit"),
                      "prev_squads_json": target.get("squads_json"),
-                     "whitelist": bool(whitelist),
-                     "prev_whitelist_until": prev_wl_until},
+                     **_wl_undo(wl)},
+            "whitelist": wl,
         }
 
     # новая подписка
     new_exp = utcnow() + timedelta(days=added_days)
-    squads = squads_for(bool(whitelist))
+    squads = squads_for()
     prov = provisioning.provision(
         user_id=int(user["id"]), telegram_id=telegram_id, username=username, expire_at=new_exp,
         devices=max(1, total_devices), squads=squads, email=email,
@@ -708,16 +763,38 @@ def grant_subscription(
         user=user, devices=max(1, total_devices), expire_at=new_exp, provision=prov,
         traffic_gb=paid_traffic_gb(), sub_type="vpn", squads=squads,
     )
-    if whitelist:
-        db.execute("UPDATE subscriptions SET whitelist_until = ? WHERE id = ?", (iso(new_exp), sub["id"]))
+    wl = _grant_whitelist_safe(user, months) if whitelist else None
     return {
         "subscription_id": sub["id"],
         "expires_at": sub.get("expires_at"),
         "devices": int(sub.get("devices_limit") or total_devices),
         "remnawave": prov,
         "undo": {"kind": "new", "sub_id": sub["id"], "added_seconds": int(added_days * 86400),
-                 "devices": max(1, total_devices), "end_at": iso(new_exp)},
+                 "devices": max(1, total_devices), "end_at": iso(new_exp), **_wl_undo(wl)},
+        "whitelist": wl,
     }
+
+
+def _grant_whitelist_safe(user: dict[str, Any], months: int) -> dict[str, Any]:
+    """анти-ключ после продления ВПН; ошибка FURK не отменяет подписку — алерт админу (как в старом боте)."""
+    res = grant_whitelist(user, months)
+    if not res.get("ok"):
+        try:
+            forum.report_error(
+                "Ошибка при работе с FURK API — белые списки НЕ выданы",
+                f"user id{user.get('id')}, {months} мес., ключ {res.get('prev_key') or '—'}: {res.get('error')}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return res
+
+
+def _wl_undo(wl: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not wl:
+        return {"whitelist": False}
+    return {"whitelist": bool(wl.get("ok")), "anti_key": wl.get("key"),
+            "prev_anti_key": wl.get("prev_key"), "prev_anti_until": wl.get("prev_until"),
+            "anti_until": wl.get("until")}
 
 
 def fulfill_payment(
@@ -798,7 +875,8 @@ def fulfill_payment(
                 from . import reflevels  # type: ignore
             except ImportError:
                 import reflevels  # type: ignore
-            gift_code = reflevels.create_bought_gift(int(user["id"]), int(payment.get("months") or 1), payment_id)
+            gift_code = reflevels.create_bought_gift(int(user["id"]), int(payment.get("months") or 1), payment_id,
+                                                     whitelist=bool(payment.get("whitelist")))
             grant = {"subscription_id": None, "remnawave": {"ok": True},
                      "undo": {"kind": "gift", "code": gift_code, "months": int(payment.get("months") or 1)}}
         else:

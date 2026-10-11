@@ -197,7 +197,11 @@ export type CreatePaymentRequest = {
 };
 
 // тарифы по периодам
-export type TariffPeriod = { months: number; days: number; price: number; whitelist_price: number };
+// whitelist_price — полная цена тарифа с белыми списками (ВПН + анти-ключ), 0 = на этот срок нельзя
+export type TariffPeriod = {
+  months: number; days: number; price: number; whitelist_price: number;
+  stars?: number; whitelist_stars?: number; whitelist_devices?: number;
+};
 export type TariffsResponse = { devices: number; periods: TariffPeriod[]; whitelist_available: boolean };
 
 export async function fetchTariffs(): Promise<TariffsResponse> {

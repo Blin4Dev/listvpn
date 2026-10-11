@@ -19,16 +19,19 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
     trialDays: '3', trialGb: '5', trialDevices: '1',
   });
   const [trialEnabled, setTrialEnabled] = useState(true);
-  // тарифы по периодам: цена и доплата за белые списки
+  // тарифы по периодам (₽ и ⭐) и отдельные тарифы с белыми списками (анти-ключ FURK, как в старом боте)
   const PERIODS = ['1', '3', '6', '12'] as const;
   const PERIOD_TITLE: Record<string, string> = { '1': '1 месяц', '3': '3 месяца', '6': '6 месяцев', '12': '1 год' };
-  const [periodPrices, setPeriodPrices] = useState<Record<string, string>>({ '1': '99', '3': '249', '6': '449', '12': '799' });
-  const [wlPrices, setWlPrices] = useState<Record<string, string>>({ '1': '200', '3': '500', '6': '900', '12': '1600' });
+  const [periodPrices, setPeriodPrices] = useState<Record<string, string>>({ '1': '180', '3': '470', '6': '900', '12': '1600' });
+  const [periodStars, setPeriodStars] = useState<Record<string, string>>({ '1': '200', '3': '540', '6': '1000', '12': '2000' });
+  const [wlPrices, setWlPrices] = useState<Record<string, string>>({ '1': '399', '3': '1488', '6': '2222', '12': '0' });
+  const [wlStars, setWlStars] = useState<Record<string, string>>({ '1': '600', '3': '1800', '6': '2500', '12': '0' });
+  const [wlDevices, setWlDevices] = useState<Record<string, string>>({ '1': '2', '3': '5', '6': '5', '12': '5' });
   const [tariffDevices, setTariffDevices] = useState('3');
-  const [wlSquad, setWlSquad] = useState('');
+  const [wlConfigured, setWlConfigured] = useState(false);
+  const [wlError, setWlError] = useState('');
   // способы оплаты: вкл/выкл и комиссия
   const [payMethods, setPayMethods] = useState<{ id: string; title: string; enabled: boolean }[]>([]);
-  const [squads, setSquads] = useState<{ squad_uuid: string; squad_name: string; is_active: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF((p) => ({ ...p, [k]: e.target.value }));
@@ -47,14 +50,17 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
         const toStr = (o: Record<string, number> | undefined, fb: Record<string, string>) =>
           Object.fromEntries(PERIODS.map((k) => [k, o && o[k] != null ? String(o[k]) : fb[k]]));
         setPeriodPrices((p) => toStr(m.period_prices, p));
+        setPeriodStars((p) => toStr(m.period_stars, p));
         setWlPrices((p) => toStr(m.whitelist_prices, p));
+        setWlStars((p) => toStr(m.whitelist_stars, p));
+        setWlDevices((p) => toStr(m.whitelist_devices, p));
         setTariffDevices(String(m.tariff_devices ?? 3));
-        setWlSquad(String(m.whitelist_squad_uuid || ''));
+        setWlConfigured(!!m.whitelist_configured);
+        setWlError(String(m.whitelist_error || ''));
         if (Array.isArray(m.pay_methods)) {
           setPayMethods(m.pay_methods.map((x: any) => ({ id: x.id, title: x.title, enabled: !!x.enabled })));
         }
       }
-      try { const d = await apiFetch('/panel/squads'); if (d?.squads) setSquads(d.squads); } catch { /* без списка */ }
     } catch { onToast('Ошибка', 'Не удалось загрузить настройки', 'error'); }
     finally { setLoading(false); }
   };
@@ -71,9 +77,11 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           trial_enabled: trialEnabled, trial_days: Number(f.trialDays),
           trial_traffic_gb: Number(f.trialGb), trial_devices: Number(f.trialDevices),
           period_prices: Object.fromEntries(PERIODS.map((k) => [k, Number(periodPrices[k])])),
+          period_stars: Object.fromEntries(PERIODS.map((k) => [k, Number(periodStars[k])])),
           whitelist_prices: Object.fromEntries(PERIODS.map((k) => [k, Number(wlPrices[k])])),
+          whitelist_stars: Object.fromEntries(PERIODS.map((k) => [k, Number(wlStars[k])])),
+          whitelist_devices: Object.fromEntries(PERIODS.map((k) => [k, Number(wlDevices[k])])),
           tariff_devices: Number(tariffDevices),
-          whitelist_squad_uuid: wlSquad,
           pay_methods: Object.fromEntries(payMethods.map((x) => [x.id, { enabled: x.enabled }])),
         }),
       });
@@ -89,31 +97,45 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
       <h3 className="h-sec" style={{ paddingBottom: 16, marginBottom: 4 }}>Цены и подписки</h3>
       {loading ? <div className="sub">Загрузка…</div> : (
         <div className="flex flex-col gap-6">
-          <Section title="Тарифы" sub="Цена за весь срок. Белые списки — отдельная опция: доплата прибавляется к цене тарифа.">
+          <Section title="Тарифы" sub="Цена за весь срок, отдельно в рублях и в звёздах.">
             <div className="flex flex-col gap-3">
               <div className="grid gap-3" style={{ gridTemplateColumns: '1.1fr 1fr 1fr' }}>
-                <div className="sub">Период</div><div className="sub">Цена, ₽</div><div className="sub">+ Белые списки, ₽</div>
+                <div className="sub">Период</div><div className="sub">Цена, ₽</div><div className="sub">Цена, ⭐</div>
               </div>
               {PERIODS.map((k) => (
                 <div key={k} className="grid gap-3 items-center" style={{ gridTemplateColumns: '1.1fr 1fr 1fr' }}>
                   <div style={{ fontWeight: 500 }}>{PERIOD_TITLE[k]}</div>
                   <input className="input" type="number" min={1} value={periodPrices[k]} onChange={(e) => setPeriodPrices((p) => ({ ...p, [k]: e.target.value }))} />
-                  <input className="input" type="number" min={0} value={wlPrices[k]} onChange={(e) => setWlPrices((p) => ({ ...p, [k]: e.target.value }))} />
+                  <input className="input" type="number" min={1} value={periodStars[k]} onChange={(e) => setPeriodStars((p) => ({ ...p, [k]: e.target.value }))} />
                 </div>
               ))}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div><label className="field-label">Устройств в тарифе</label><input className="input" type="number" min={1} max={20} value={tariffDevices} onChange={(e) => setTariffDevices(e.target.value)} /></div>
-              <div>
-                <label className="field-label">Сквад белых списков</label>
-                <select className="input" value={wlSquad} onChange={(e) => setWlSquad(e.target.value)}>
-                  <option value="">— не выбран (опция скрыта) —</option>
-                  {squads.filter((q) => q.is_active || q.squad_uuid === wlSquad).map((q) => (
-                    <option key={q.squad_uuid} value={q.squad_uuid}>{q.squad_name}</option>
-                  ))}
-                  {wlSquad && !squads.some((q) => q.squad_uuid === wlSquad) ? <option value={wlSquad}>{wlSquad}</option> : null}
-                </select>
+            </div>
+          </Section>
+
+          <Section
+            title="Белые списки"
+            sub="Отдельные тарифы, как в старом боте: полная цена (ВПН + анти-ключ FURK на 500 ГБ). Покупка продлевает основную подписку на тот же срок и выдаёт/продлевает анти-ключ. Цена 0 — срок недоступен."
+          >
+            <div className="inset" style={{ padding: '10px 14px', fontSize: 13.5 }}>
+              {wlConfigured
+                ? 'FURK API подключён — белые списки доступны в мини-приложении.'
+                : `FURK API не подключён — опция скрыта. Нужны FURK_API_KEY и FURK_BASE_URL в .env и файл src/api/furk_api.py из старого бота.${wlError ? ` (${wlError})` : ''}`}
+            </div>
+            <div className="flex flex-col gap-3">
+              <div className="grid gap-3" style={{ gridTemplateColumns: '1.1fr 1fr 1fr 0.8fr' }}>
+                <div className="sub">Период</div><div className="sub">Цена, ₽</div><div className="sub">Цена, ⭐</div><div className="sub">Устройств</div>
               </div>
+              {PERIODS.map((k) => (
+                <div key={k} className="grid gap-3 items-center" style={{ gridTemplateColumns: '1.1fr 1fr 1fr 0.8fr' }}>
+                  <div style={{ fontWeight: 500 }}>{PERIOD_TITLE[k]}</div>
+                  <input className="input" type="number" min={0} value={wlPrices[k]} onChange={(e) => setWlPrices((p) => ({ ...p, [k]: e.target.value }))} />
+                  <input className="input" type="number" min={0} value={wlStars[k]} onChange={(e) => setWlStars((p) => ({ ...p, [k]: e.target.value }))} />
+                  <input className="input" type="number" min={1} max={50} value={wlDevices[k]} onChange={(e) => setWlDevices((p) => ({ ...p, [k]: e.target.value }))} />
+                </div>
+              ))}
             </div>
           </Section>
 

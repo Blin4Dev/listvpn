@@ -225,8 +225,8 @@ def _grant_month(user: dict[str, Any], months: int = REWARD_MONTHS, whitelist: b
     )
 
 
-def create_bought_gift(user_id: int, months: int, payment_id: Optional[str]) -> str:
-    """подарок, купленный за деньги: код на тариф months (без белых списков)."""
+def create_bought_gift(user_id: int, months: int, payment_id: Optional[str], whitelist: bool = False) -> str:
+    """подарок, купленный за деньги: код на тариф months (с белыми списками — если купили анти-тариф)."""
     _ensure_schema()
     if payment_id:
         old = db.fetchone("SELECT code FROM referral_rewards WHERE payment_id = ? AND kind = 'bought'", (payment_id,))
@@ -235,8 +235,8 @@ def create_bought_gift(user_id: int, months: int, payment_id: Optional[str]) -> 
     code = GIFT_PREFIX + secrets.token_hex(4).upper()
     db.execute(
         "INSERT INTO referral_rewards (user_id, kind, code, status, created_at, months, whitelist, payment_id) "
-        "VALUES (?, 'bought', ?, 'issued', ?, ?, 0, ?)",
-        (int(user_id), code, _iso(_now()), int(months or 1), payment_id),
+        "VALUES (?, 'bought', ?, 'issued', ?, ?, ?, ?)",
+        (int(user_id), code, _iso(_now()), int(months or 1), 1 if whitelist else 0, payment_id),
     )
     return code
 

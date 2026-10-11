@@ -233,14 +233,67 @@ dc_build() {
     return 1
 }
 
+# кто держит порты 80/443 (nginx не стартует, если они заняты)
+_port_owners() {
+    sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print "   " $4 "  " $6}' || true
+}
+
+# nginx не стартует: показать причину, убрать битые конфиги прошлой установки, повторить
+start_nginx_safely() {
+    sudo systemctl enable nginx >/dev/null 2>&1 || true
+    if sudo systemctl start nginx 2>/dev/null; then
+        log_success "✔ nginx запущен."
+        return 0
+    fi
+
+    log_warn "nginx не запустился. Проверяю причину…"
+    local test_out
+    test_out="$(sudo nginx -t 2>&1 || true)"
+    echo "$test_out" | sed 's/^/   /'
+
+    if ! echo "$test_out" | grep -q "test is successful"; then
+        # конфиг сломан: чаще всего наш старый сайт ссылается на удалённые сертификаты
+        local f moved=0
+        for f in /etc/nginx/sites-enabled/*; do
+            [[ -e "$f" || -L "$f" ]] || continue
+            if echo "$test_out" | grep -qF "$(readlink -f "$f" 2>/dev/null || echo "$f")" \
+               || echo "$test_out" | grep -qF "$f"; then
+                log_warn "Отключаю битый конфиг: $f (копия в /etc/nginx/disabled-by-installer/)"
+                sudo mkdir -p /etc/nginx/disabled-by-installer
+                sudo mv "$f" /etc/nginx/disabled-by-installer/ && moved=1
+            fi
+        done
+        if [[ $moved -eq 1 ]] && sudo nginx -t >/dev/null 2>&1 && sudo systemctl start nginx; then
+            log_success "✔ nginx запущен после отключения битого конфига."
+            return 0
+        fi
+    fi
+
+    local owners
+    owners="$(_port_owners)"
+    if [[ -n "$owners" ]]; then
+        log_error "Порты 80/443 заняты другим процессом:"
+        echo "$owners"
+        hint "Остановите его (например: sudo systemctl disable --now apache2 / caddy) или перенесите Remnawave/Xray с 443, затем запустите установку снова."
+    else
+        log_error "nginx не стартует. Последние строки журнала:"
+        sudo journalctl -u nginx --no-pager -n 20 2>/dev/null | sed 's/^/   /' || true
+    fi
+    return 1
+}
+
 ensure_services() {
     for service in docker nginx; do
-        if ! sudo systemctl is-active --quiet "$service"; then
-            log_warn "Сервис $service не запущен — запускаем..."
+        if sudo systemctl is-active --quiet "$service"; then
+            log_success "✔ сервис $service активен."
+            continue
+        fi
+        log_warn "Сервис $service не запущен — запускаем..."
+        if [[ "$service" == "nginx" ]]; then
+            start_nginx_safely
+        else
             sudo systemctl enable "$service"
             sudo systemctl start "$service"
-        else
-            log_success "✔ сервис $service активен."
         fi
     done
 }

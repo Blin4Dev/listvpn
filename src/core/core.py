@@ -1490,8 +1490,13 @@ def get_plans_meta() -> dict[str, Any]:
         "trial_hwid_max": fulfillment._int_setting("trial_hwid_max", 2, 1, 10),
         "tariff_devices": fulfillment.tariff_devices(),
         "period_prices": {str(m): fulfillment.period_price(m) for m in fulfillment.SUB_PERIODS},
+        "period_stars": {str(m): fulfillment.period_stars(m) for m in fulfillment.SUB_PERIODS},
+        # белые списки — отдельные тарифы с анти-ключом FURK (полная цена, 0 = период недоступен)
         "whitelist_prices": {str(m): fulfillment.whitelist_price(m) for m in fulfillment.SUB_PERIODS},
-        "whitelist_squad_uuid": fulfillment.whitelist_squad(),
+        "whitelist_stars": {str(m): fulfillment.whitelist_stars(m) for m in fulfillment.SUB_PERIODS},
+        "whitelist_devices": {str(m): fulfillment.whitelist_devices(m) for m in fulfillment.SUB_PERIODS},
+        "whitelist_configured": fulfillment.whitelist_available(),
+        "whitelist_error": (fulfillment.furk.last_error() if fulfillment.furk is not None else "furk.py не найден"),
         "pay_methods": pay_methods(),
     }
 
@@ -2229,11 +2234,14 @@ class PlansUpdateBody(BaseModel):
     aa_warn_days: Optional[int] = Field(None, ge=1, le=60)
     trial_hwid_enabled: Optional[bool] = None
     trial_hwid_max: Optional[int] = Field(None, ge=1, le=10)
-    # тарифы по периодам: {"1": 99, "3": 249, ...} и доплата за белые списки
+    # тарифы по периодам: {"1": 180, "3": 470, ...}; белые списки — полная цена тарифа с анти-ключом
     period_prices: Optional[dict[str, float]] = None
+    period_stars: Optional[dict[str, float]] = None
     whitelist_prices: Optional[dict[str, float]] = None
+    whitelist_stars: Optional[dict[str, float]] = None
+    whitelist_devices: Optional[dict[str, float]] = None
     tariff_devices: Optional[int] = Field(None, ge=1, le=20)
-    whitelist_squad_uuid: Optional[str] = None
+    whitelist_squad_uuid: Optional[str] = None  # устарело, игнорируется
     # {"sbp": {"enabled": true}, ...}
     pay_methods: Optional[dict[str, dict[str, Any]]] = None
 
@@ -3518,15 +3526,19 @@ def _revoke_subscription_for_payment(payment: dict[str, Any]) -> None:
                 else:
                     db.execute("UPDATE subscriptions SET expires_at = ?, devices_limit = ? WHERE id = ?",
                                (iso(new_exp), new_dev, sub["id"]))
-                # белые списки этого платежа: вернуть прежний срок (или снять)
+                # белые списки этого платежа (анти-ключ FURK): вернуть прежний срок в базе,
+                # сам ключ у провайдера урезать нельзя — алерт админу
                 wl_squads: Optional[list[str]] = None
-                if plan.get("whitelist") and not later and not to_trial:
-                    prev_wl = plan.get("prev_whitelist_until")
-                    prev_dt = parse_iso(prev_wl)
-                    keep_wl = prev_wl if (prev_dt and prev_dt > now) else None
-                    wl_squads = fulfillment.squads_for(bool(keep_wl))
-                    db.execute("UPDATE subscriptions SET whitelist_until = ?, squads_json = ? WHERE id = ?",
-                               (keep_wl, db.dumps(wl_squads), sub["id"]))
+                if plan.get("whitelist") and "anti_key" in plan and not later and not to_trial:
+                    db.execute("UPDATE users SET anti_key = ?, anti_expires_at = ? WHERE id = ?",
+                               (plan.get("prev_anti_key") or plan.get("anti_key"), plan.get("prev_anti_until"),
+                                int(user["id"])))
+                    try:
+                        forum.report_error("Возврат платежа с белыми списками",
+                                           f"{payment.get('payment_id')}: анти-ключ {plan.get('anti_key')} продлён у FURK — "
+                                           f"при необходимости отключите/сократите его вручную")
+                    except Exception:  # noqa: BLE001
+                        pass
                 if client and rw:
                     patch: dict[str, Any] = {"id": _rw_num_id(rw), "expire_at": new_exp, "hwid_device_limit": new_dev}
                     if wl_squads is not None:
@@ -3941,6 +3953,9 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "last_name": user.get("last_name"),
         "email": user.get("email"),
         "registration_date": user.get("created_at"),
+        # белые списки: анти-ключ FURK («Ключ обхода» в старом боте)
+        "anti_key": user.get("anti_key"),
+        "anti_expires_at": user.get("anti_expires_at"),
         "status": subscription_status_for_user(user),  # trial|active|expired|lapsed|never|banned
         "is_banned": bool(user.get("is_banned")),
         "balance": user.get("balance", 0),
@@ -5783,7 +5798,9 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
             db.set_setting(k, str(int(v)))
     if body.trial_hwid_enabled is not None:
         db.set_setting("trial_hwid_enabled", "1" if body.trial_hwid_enabled else "0")
-    for key, prefix, lo in (("period_prices", "period_price_", 1), ("whitelist_prices", "whitelist_price_", 0)):
+    for key, prefix, lo in (("period_prices", "period_price_", 1), ("period_stars", "period_stars_", 1),
+                            ("whitelist_prices", "whitelist_price_", 0), ("whitelist_stars", "whitelist_stars_", 0),
+                            ("whitelist_devices", "whitelist_devices_", 1)):
         vals = getattr(body, key)
         if not vals:
             continue
@@ -5797,8 +5814,6 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
             db.set_setting(f"{prefix}{m}", f"{_num(v, lo, 1000000):g}")
     if body.tariff_devices is not None:
         db.set_setting("tariff_devices", str(int(body.tariff_devices)))
-    if body.whitelist_squad_uuid is not None:
-        db.set_setting("whitelist_squad_uuid", body.whitelist_squad_uuid.strip())
     if body.pay_methods is not None:
         cur = {m["id"]: {"enabled": m["enabled"]} for m in pay_methods()}
         for key, v in body.pay_methods.items():
@@ -6267,13 +6282,15 @@ def _trial_available_for(user_id: int) -> bool:
 
 
 def _bypass_info(user_id: int) -> dict[str, Any]:
-    sub = db.fetchone(
-        "SELECT whitelist_until FROM subscriptions WHERE user_id = ? AND status = 'Active' ORDER BY id DESC LIMIT 1",
-        (user_id,),
-    )
-    on = fulfillment.whitelist_active(sub)
-    return {"enabled": on, "until": (sub or {}).get("whitelist_until") if on else None,
-            "available": fulfillment.whitelist_available()}
+    """белые списки: анти-ключ FURK (ссылка, срок, трафик) — как «Ключ обхода» в старом боте."""
+    wl = fulfillment.user_whitelist({"id": user_id})
+    on = bool(wl["active"])
+    out: dict[str, Any] = {"enabled": on, "until": wl["until"] if on else None,
+                           "key": wl["key"] if on else None,
+                           "available": fulfillment.whitelist_available()}
+    if on and wl["key"] and fulfillment.furk is not None and fulfillment.whitelist_available():
+        out.update(fulfillment.furk.traffic(str(wl["key"])))
+    return out
 
 
 @app.get("/api/app/subscription")
@@ -6583,9 +6600,9 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     months = req_months if purpose != "traffic_reset" else 1
     if purpose not in ("subscription", "extend", "devices", "traffic_reset", "gift"):
         raise HTTPException(400, detail={"message": "Неизвестный тип платежа"})
-    whitelist = bool(body.whitelist) and purpose in ("subscription", "extend")
-    if whitelist and not fulfillment.whitelist_available():
-        raise HTTPException(400, detail={"message": "Белые списки сейчас недоступны"})
+    whitelist = bool(body.whitelist) and purpose in ("subscription", "extend", "gift")
+    if whitelist and not fulfillment.whitelist_period_available(months):
+        raise HTTPException(400, detail={"message": "Белые списки на этот срок сейчас недоступны"})
     plan_devices = fulfillment.tariff_devices() if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
     extra = min(50, max(0, int(body.extra_devices or 0)))
     extra_price = float(meta["extra_device_price"])
@@ -6599,10 +6616,14 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         price = tr_price
         stars = int(round(tr_price))
     elif purpose == "gift":
-        # подарок другу: тариф на период по обычной цене (белые списки не входят)
+        # подарок другу: тариф на период; с белыми списками — по цене анти-тарифа (как в старом боте)
         extra = 0
-        price = float(fulfillment.period_price(months))
-        stars = int(round(price))
+        if whitelist:
+            price = float(fulfillment.whitelist_price(months))
+            stars = int(fulfillment.whitelist_stars(months))
+        else:
+            price = float(fulfillment.period_price(months))
+            stars = int(fulfillment.period_stars(months))
     elif purpose == "devices":
         # доп. устройства со своим сроком: цена × кол-во × месяцы
         if extra <= 0:
@@ -6637,14 +6658,19 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         if target and target.get("no_renew"):
             raise HTTPException(400, detail={"message": "Продление этой подписки недоступно"})
         # тариф = период (фикс. число устройств); устройства сверх тарифа, что уже есть, — по цене доп.
-        base = fulfillment.period_price(months)
+        # белые списки — отдельный тариф (anti_N): его полная цена вместо обычной, как в старом боте
+        if whitelist:
+            base = fulfillment.whitelist_price(months)
+            base_stars = fulfillment.whitelist_stars(months)
+        else:
+            base = fulfillment.period_price(months)
+            base_stars = fulfillment.period_stars(months)
         total_devices = plan_devices + extra
         keep = fulfillment.retained_devices(
             int(user["id"]), purpose, body.subscription_id, total_devices)
-        price = float(base) + (extra + keep) * extra_price * months
-        if whitelist:
-            price += fulfillment.whitelist_price(months)
-        stars = int(round(price))  # курс 1 звезда = 1 рубль
+        devices_price = (extra + keep) * extra_price * months
+        price = float(base) + devices_price
+        stars = int(base_stars) + int(round(devices_price))  # доп. устройства: 1 звезда = 1 рубль
 
     # скидка: промо/акция + бонус опроса; reset трафика без скидки
     full_price = round(float(price), 2)
@@ -7292,7 +7318,11 @@ def app_plans() -> dict[str, Any]:
         "devices": fulfillment.tariff_devices(),
         "periods": [
             {"months": m, "days": fulfillment.period_days(m), "price": fulfillment.period_price(m),
-             "whitelist_price": fulfillment.whitelist_price(m)}
+             "stars": fulfillment.period_stars(m),
+             # белые списки: полная цена тарифа (ВПН + анти-ключ); 0 = на этот срок нельзя
+             "whitelist_price": fulfillment.whitelist_price(m),
+             "whitelist_stars": fulfillment.whitelist_stars(m),
+             "whitelist_devices": fulfillment.whitelist_devices(m)}
             for m in fulfillment.SUB_PERIODS
         ],
         "whitelist_available": fulfillment.whitelist_available(),

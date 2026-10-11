@@ -101,8 +101,8 @@ export default function Payment() {
   const monthsParam = parseInt(searchParams.get("months") || "0", 10);
   const hasPeriod = [1, 3, 6, 12].includes(monthsParam);
   const months = hasPeriod && flowType !== "traffic_reset" ? monthsParam : 1;
-  // опция «белые списки» (только подписка)
-  const whitelist = searchParams.get("wl") === "1" && !flowType;
+  // белые списки (отдельный тариф с анти-ключом): подписка или подарок
+  const whitelist = searchParams.get("wl") === "1" && (!flowType || flowType === "gift");
   const subParam = searchParams.get("sub");
   const isDevicesFlow = flowType === "devices";
   const isTrafficReset = flowType === "traffic_reset";
@@ -253,7 +253,7 @@ export default function Payment() {
   }
 
   const what = isGift
-    ? `Подарок другу: ${periodLabel(months)} · ${planDevices} ${deviceWord(planDevices)}`
+    ? `Подарок другу: ${periodLabel(months)} · ${planDevices} ${deviceWord(planDevices)}${whitelist ? " · белые списки" : ""}`
     : isTrafficReset
     ? `Досрочный сброс трафика${trafficNow?.available && trafficNow.used_bytes != null ? ` · потрачено ${formatBytesRu(trafficNow.used_bytes)}${trafficNow.limit_bytes ? ` из ${formatBytesRu(trafficNow.limit_bytes)}` : ""}` : ""}`
     : isDevicesFlow
