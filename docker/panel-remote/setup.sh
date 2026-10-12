@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Установка/обновление панели BatmanVPN на ОТДЕЛЬНОМ сервере.
-# Запускается install.sh с основного сервера по SSH (от root или через sudo -n):
+# Установка/обновление панели BatmanVPN на ОТДЕЛЬНОМ сервере (Caddy, сертификат выпускается автоматически).
+# Запускается install.sh с сервера бота по SSH (от root или через sudo -n):
 #   bash setup.sh <panel_domain> <email> <incoming_dir> <bot_server_ip>
 # В <incoming_dir> уже лежат:
-#   release.tgz  — статика панели (release/html, release/live/assets)
-#   nginx.conf   — готовый конфиг nginx (содержит секрет шлюза, права 600)
+#   release.tgz — статика панели (html/, live/assets/)
+#   site.caddy  — сайт Caddy (содержит секрет шлюза)
 set -Eeuo pipefail
 
 PANEL_DOMAIN="${1:?panel domain}"
@@ -13,11 +13,12 @@ INCOMING="${3:?incoming dir}"
 BOT_IP="${4:?bot server ip}"
 
 WWW_ROOT="/var/www/blinvpn-panel"
-ACME_ROOT="/var/www/blinvpn-acme"
-SITE_CONF="/etc/nginx/sites-available/blinvpn-panel.conf"
-SITE_LINK="/etc/nginx/sites-enabled/blinvpn-panel.conf"
-ACME_CONF="/etc/nginx/sites-available/blinvpn-panel-acme.conf"
-ACME_LINK="/etc/nginx/sites-enabled/blinvpn-panel-acme.conf"
+CADDY_MAIN="/etc/caddy/Caddyfile"
+CADDY_SITES="/etc/caddy/sites"
+SITE_FILE="${CADDY_SITES}/blinvpn-panel.caddy"
+MARKER="# managed-by-blinvpn"
+MIN_VER="2.7.0"
+FALLBACK_VER="2.8.4"
 KEEP_RELEASES=3
 
 say()  { printf '   [панель] %s\n' "$*"; }
@@ -26,35 +27,128 @@ trap 'fail "строка $LINENO: команда завершилась с ош�
 
 [[ "$(id -u)" -eq 0 ]] || fail "нужен root"
 [[ "$PANEL_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "некорректный домен"
+[[ "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || fail "некорректный email"
 [[ "$BOT_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "некорректный IP сервера бота"
 [[ "$INCOMING" == /var/lib/blinvpn-panel/incoming/* && -d "$INCOMING" ]] || fail "нет каталога с релизом"
-[[ -f "$INCOMING/release.tgz" && -f "$INCOMING/nginx.conf" ]] || fail "релиз неполный"
+[[ -f "$INCOMING/release.tgz" && -f "$INCOMING/site.caddy" ]] || fail "релиз неполный"
 command -v apt-get >/dev/null 2>&1 || fail "поддерживаются только Debian/Ubuntu (apt-get)"
 command -v systemctl >/dev/null 2>&1 || fail "нужен systemd"
 
-cleanup() { rm -rf "$INCOMING" "$ACME_LINK" "$ACME_CONF" 2>/dev/null || true; }
+cleanup() { rm -rf "$INCOMING" 2>/dev/null || true; }
 trap cleanup EXIT
 
-# ── пакеты ──
+ver_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]; }
+caddy_ver() { caddy version 2>/dev/null | awk '{print $1}' | sed 's/^v//'; }
+
+export DEBIAN_FRONTEND=noninteractive
+
+# ── базовые пакеты ──
 need=()
-for p in nginx certbot curl ca-certificates tar; do
-    dpkg -s "$p" >/dev/null 2>&1 || need+=("$p")
-done
+for p in curl ca-certificates tar gnupg; do dpkg -s "$p" >/dev/null 2>&1 || need+=("$p"); done
 if ((${#need[@]})); then
     say "устанавливаю: ${need[*]}"
-    export DEBIAN_FRONTEND=noninteractive
     apt-get update -q >/dev/null
     apt-get install -y -q --no-install-recommends "${need[@]}" >/dev/null
 fi
 
-# ── nginx запущен ──
-systemctl enable nginx >/dev/null 2>&1 || true
-if ! systemctl is-active --quiet nginx; then
-    if ! systemctl start nginx; then
-        nginx -t 2>&1 | sed 's/^/      /' || true
-        ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print "      занят " $4 "  " $6}' || true
-        fail "nginx не запускается (см. выше: битый конфиг или порт 80/443 занят)"
+# ── Caddy: официальный репозиторий, иначе бинарник с GitHub (sha512) ──
+install_caddy_binary() {
+    local arch tmp base want got
+    case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) fail "архитектура $(uname -m) не поддерживается" ;; esac
+    tmp="$(mktemp -d)"; base="https://github.com/caddyserver/caddy/releases/download/v${FALLBACK_VER}"
+    curl -fsSL -o "$tmp/c.tgz" "${base}/caddy_${FALLBACK_VER}_linux_${arch}.tar.gz" || fail "не удалось скачать Caddy"
+    curl -fsSL -o "$tmp/s.txt" "${base}/caddy_${FALLBACK_VER}_checksums.txt" || fail "не удалось скачать контрольные суммы Caddy"
+    want="$(awk -v f="caddy_${FALLBACK_VER}_linux_${arch}.tar.gz" '$2==f {print $1}' "$tmp/s.txt")"
+    got="$(sha512sum "$tmp/c.tgz" | awk '{print $1}')"
+    [[ -n "$want" && "$want" == "$got" ]] || fail "контрольная сумма Caddy не совпала"
+    tar -xzf "$tmp/c.tgz" -C "$tmp" caddy
+    install -m 755 -o root -g root "$tmp/caddy" /usr/bin/caddy
+    rm -rf "$tmp"
+    getent group caddy >/dev/null || groupadd --system caddy
+    id caddy >/dev/null 2>&1 || useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
+    mkdir -p /etc/caddy
+    cat > /etc/systemd/system/caddy.service <<'UNIT'
+[Unit]
+Description=Caddy
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+}
+
+v="$(caddy_ver || true)"
+if [[ -z "$v" ]] || ! ver_ge "$v" "$MIN_VER"; then
+    say "устанавливаю Caddy"
+    if apt-get install -y -q --no-install-recommends debian-keyring debian-archive-keyring apt-transport-https >/dev/null 2>&1 \
+        && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+        && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list \
+        && chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list \
+        && apt-get update -q >/dev/null 2>&1 && apt-get install -y -q caddy >/dev/null 2>&1; then
+        :
+    else
+        say "репозиторий Caddy недоступен — ставлю бинарник с GitHub"
+        rm -f /etc/apt/sources.list.d/caddy-stable.list
+        install_caddy_binary
     fi
+    v="$(caddy_ver || true)"
+    [[ -n "$v" ]] && ver_ge "$v" "$MIN_VER" || fail "нужен Caddy ≥ ${MIN_VER}, установлен: ${v:-нет}"
+fi
+
+# ── главный Caddyfile ──
+mkdir -p "$CADDY_SITES"
+if [[ -s "$CADDY_MAIN" ]] && ! grep -qF "$MARKER" "$CADDY_MAIN" && ! grep -q 'root \* /usr/share/caddy' "$CADDY_MAIN"; then
+    fail "в ${CADDY_MAIN} чужая конфигурация Caddy — перенесите свои сайты в ${CADDY_SITES}/*.caddy и удалите ${CADDY_MAIN}"
+fi
+cat > "$CADDY_MAIN" <<EOF
+${MARKER}
+# Главный файл Caddy. Сайты — в ${CADDY_SITES}/*.caddy (BatmanVPN: blinvpn-panel.caddy).
+{
+	email ${EMAIL}
+	servers {
+		protocols h1 h2
+	}
+}
+
+import ${CADDY_SITES}/*.caddy
+EOF
+chmod 644 "$CADDY_MAIN"
+
+# ── переход с nginx (прошлая версия установщика) ──
+nginx_stopped=0
+if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
+    others="$(ls -1 /etc/nginx/sites-enabled/ 2>/dev/null | grep -vxE 'default|blinvpn-panel\.conf|blinvpn-panel-acme\.conf' || true)"
+    others+="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | tr '\n' ' ' || true)"
+    [[ -z "${others// /}" ]] || fail "nginx на этом сервере обслуживает другие сайты (${others}) — Caddy не сможет занять порты 80/443"
+    say "останавливаю nginx (его место займёт Caddy)"
+    systemctl stop nginx; systemctl disable nginx >/dev/null 2>&1 || true
+    nginx_stopped=1
+fi
+restore_nginx() {
+    if [[ $nginx_stopped -eq 1 ]]; then
+        systemctl stop caddy >/dev/null 2>&1 || true
+        systemctl enable nginx >/dev/null 2>&1 || true
+        systemctl start nginx || true
+    fi
+}
+owners="$(ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print $4 " " $6}' | grep -v '"caddy"' || true)"
+if [[ -n "$owners" ]]; then
+    restore_nginx
+    fail "порты 80/443 заняты: ${owners}"
 fi
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -67,91 +161,58 @@ ts="$(date +%Y%m%d%H%M%S)"
 rel="$WWW_ROOT/releases/$ts"
 mkdir -p "$rel"
 tar -xzf "$INCOMING/release.tgz" -C "$rel" --no-same-owner --no-same-permissions
-[[ -f "$rel/html/index.html" ]] || { rm -rf "$rel"; fail "в релизе нет index.html"; }
+[[ -f "$rel/html/index.html" ]] || { rm -rf "$rel"; restore_nginx; fail "в релизе нет index.html"; }
 chown -R root:root "$rel"
 find "$rel" -type d -exec chmod 755 {} +
 find "$rel" -type f -exec chmod 644 {} +
+chmod 755 "$WWW_ROOT" "$WWW_ROOT/releases"
 prev_current="$(readlink -f "$WWW_ROOT/current" 2>/dev/null || true)"
 ln -sfn "$rel" "$WWW_ROOT/current.new" && mv -Tf "$WWW_ROOT/current.new" "$WWW_ROOT/current"
 say "статика панели обновлена ($ts)"
 
-# ── сертификат ──
-mkdir -p "$ACME_ROOT/.well-known/acme-challenge"
-chmod 755 "$ACME_ROOT" "$ACME_ROOT/.well-known" "$ACME_ROOT/.well-known/acme-challenge"
-if [[ ! -s "/etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem" ]]; then
-    say "выпускаю сертификат для ${PANEL_DOMAIN}"
-    cat > "$ACME_CONF" <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${PANEL_DOMAIN};
-    location /.well-known/acme-challenge/ { root ${ACME_ROOT}; }
-    location / { return 404; }
-}
-EOF
-    ln -sfn "$ACME_CONF" "$ACME_LINK"
-    # старый конфиг панели (если есть) может мешать — временно отключаем
-    had_site=0
-    if [[ -L "$SITE_LINK" ]]; then had_site=1; rm -f "$SITE_LINK"; fi
-    if ! nginx -t >/dev/null 2>&1; then
-        nginx -t 2>&1 | sed 's/^/      /' || true
-        [[ $had_site -eq 1 ]] && ln -sfn "$SITE_CONF" "$SITE_LINK"
-        fail "конфиг nginx на сервере панели сломан (см. выше)"
-    fi
-    systemctl reload nginx
-
-    # проверка: этот nginx отдаёт challenge и домен смотрит сюда
-    token="probe-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    echo "$token" > "$ACME_ROOT/.well-known/acme-challenge/$token"
-    local_ok="$(curl -s -m 10 --resolve "${PANEL_DOMAIN}:80:127.0.0.1" "http://${PANEL_DOMAIN}/.well-known/acme-challenge/$token" || true)"
-    public_ok="$(curl -s -m 10 "http://${PANEL_DOMAIN}/.well-known/acme-challenge/$token" || true)"
-    rm -f "$ACME_ROOT/.well-known/acme-challenge/$token"
-    if [[ "$local_ok" != "$token" ]]; then
-        [[ $had_site -eq 1 ]] && ln -sfn "$SITE_CONF" "$SITE_LINK"
-        fail "${PANEL_DOMAIN} на порту 80 обслуживает другой конфиг nginx на этом сервере (проверьте: nginx -T | grep server_name)"
-    fi
-    if [[ "$public_ok" != "$token" ]]; then
-        # запрос сервера к самому себе по внешнему IP работает не у всех хостеров — сверяем DNS
-        my_ip="$(curl -4 -s -m 8 https://api.ipify.org || true)"
-        dns_ip="$(getent ahostsv4 "$PANEL_DOMAIN" | awk 'NR==1{print $1}')"
-        if [[ -z "$dns_ip" || -z "$my_ip" || "$dns_ip" != "$my_ip" ]]; then
-            [[ $had_site -eq 1 ]] && ln -sfn "$SITE_CONF" "$SITE_LINK"
-            fail "домен ${PANEL_DOMAIN} не ведёт на этот сервер (A-запись: ${dns_ip:-нет}, IP сервера: ${my_ip:-?}). Если домен за Cloudflare — включите «DNS only»."
-        fi
-    fi
-
-    certbot certonly --webroot -w "$ACME_ROOT" -d "$PANEL_DOMAIN" \
-        --email "$EMAIL" --agree-tos --non-interactive \
-        --deploy-hook "systemctl reload nginx" \
-        || { [[ $had_site -eq 1 ]] && ln -sfn "$SITE_CONF" "$SITE_LINK"; fail "certbot не выдал сертификат"; }
-    rm -f "$ACME_LINK" "$ACME_CONF"
-fi
-
-# ── конфиг панели (с секретом шлюза → только root) ──
+# ── сайт Caddy (с секретом шлюза → читает только root и caddy) ──
 backup=""
-if [[ -f "$SITE_CONF" ]]; then
-    backup="$(mktemp /root/blinvpn-panel.conf.XXXXXX)"
-    cp -p "$SITE_CONF" "$backup"
-fi
-install -m 600 -o root -g root "$INCOMING/nginx.conf" "$SITE_CONF"
-ln -sfn "$SITE_CONF" "$SITE_LINK"
-rm -f "$ACME_LINK" "$ACME_CONF"
-if ! nginx -t >/dev/null 2>&1; then
-    nginx -t 2>&1 | sed 's/^/      /' || true
-    if [[ -n "$backup" ]]; then
-        install -m 600 "$backup" "$SITE_CONF"
-    else
-        rm -f "$SITE_LINK" "$SITE_CONF"
-    fi
+if [[ -f "$SITE_FILE" ]]; then backup="$(mktemp /root/blinvpn-panel.caddy.XXXXXX)"; cp -p "$SITE_FILE" "$backup"; fi
+install -m 640 -o root -g caddy "$INCOMING/site.caddy" "$SITE_FILE"
+vlog="$(mktemp)"
+if ! caddy validate --adapter caddyfile --config "$CADDY_MAIN" >"$vlog" 2>&1; then
+    tail -n 15 "$vlog" | sed 's/^/      /'
+    if [[ -n "$backup" ]]; then install -m 640 -o root -g caddy "$backup" "$SITE_FILE"; else rm -f "$SITE_FILE"; fi
     if [[ -n "$prev_current" && -d "$prev_current" ]]; then
         ln -sfn "$prev_current" "$WWW_ROOT/current.new" && mv -Tf "$WWW_ROOT/current.new" "$WWW_ROOT/current"
     fi
-    rm -f "$backup"
-    fail "новый конфиг nginx не прошёл проверку — откатил на прежний"
+    rm -f "$backup" "$vlog"
+    restore_nginx
+    fail "конфигурация Caddy не прошла проверку — откатил"
 fi
-rm -f "$backup"
-systemctl reload nginx
-say "nginx панели настроен"
+rm -f "$backup" "$vlog"
+systemctl enable caddy >/dev/null 2>&1 || true
+if systemctl is-active --quiet caddy; then systemctl reload caddy || systemctl restart caddy; else systemctl start caddy; fi
+say "Caddy настроен"
+
+# ── сертификат: Caddy выпускает сам, ждём ──
+ok=0
+for _ in $(seq 1 45); do
+    if curl -s --noproxy "*" -o /dev/null -m 5 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/"; then ok=1; break; fi
+    sleep 3
+done
+if [[ $ok -ne 1 ]]; then
+    journalctl -u caddy --no-pager -n 60 2>/dev/null | grep -iE 'error|acme|challenge|certificate' | tail -n 8 | sed 's/^/      /' || true
+    my_ip="$(curl -4 -s -m 8 https://api.ipify.org || true)"
+    dns_ip="$(getent ahostsv4 "$PANEL_DOMAIN" | awk 'NR==1{print $1}')"
+    restore_nginx
+    fail "Caddy не получил сертификат для ${PANEL_DOMAIN} (A-запись: ${dns_ip:-нет}, IP сервера: ${my_ip:-?}). Проверьте DNS, порты 80/443 и что домен не за Cloudflare-прокси."
+fi
+say "HTTPS работает"
+
+# ── уборка после nginx-версии ──
+if [[ $nginx_stopped -eq 1 ]]; then
+    rm -f /etc/nginx/sites-enabled/blinvpn-panel.conf /etc/nginx/sites-enabled/blinvpn-panel-acme.conf
+    mv -f /etc/nginx/sites-available/blinvpn-panel.conf /etc/nginx/sites-available/blinvpn-panel.conf.migrated-to-caddy 2>/dev/null || true
+    if command -v certbot >/dev/null 2>&1 && [[ -d "/etc/letsencrypt/live/${PANEL_DOMAIN}" ]]; then
+        certbot delete --cert-name "$PANEL_DOMAIN" --non-interactive >/dev/null 2>&1 || true
+    fi
+fi
 
 # ── старые релизы ──
 ls -1dt "$WWW_ROOT"/releases/*/ 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while read -r old; do
@@ -160,15 +221,14 @@ ls -1dt "$WWW_ROOT"/releases/*/ 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | 
 done
 
 # ── проверка: статика и шлюз до сервера бота ──
-sleep 1
-code_index="$(curl -s -o /dev/null -w '%{http_code}' -m 15 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/" || true)"
-code_api="$(curl -s -o /dev/null -w '%{http_code}' -m 20 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/api/panel/auth/me" || true)"
+code_index="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 15 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/" || true)"
+code_api="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 20 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/api/panel/auth/me" || true)"
 [[ "$code_index" == "200" ]] || fail "панель не отдаёт index.html (HTTP ${code_index})"
 case "$code_api" in
     401) say "шлюз до API работает" ;;
     403) fail "сервер бота отклонил панель по IP (HTTP 403). IP этого сервера для исходящих: $(curl -4 -s -m 8 https://api.ipify.org || echo ?)" ;;
-    404) fail "сервер бота не принял секрет шлюза (HTTP 404) — запустите установку на сервере бота ещё раз" ;;
-    502|504) fail "не удаётся подключиться к серверу бота ${BOT_IP}:443 по HTTPS (HTTP ${code_api}): проверьте фаервол и сертификат" ;;
+    404) fail "сервер бота не принял шлюз (HTTP 404): чужой IP или секрет — запустите установку на сервере бота ещё раз" ;;
+    502|504) fail "не удаётся подключиться к серверу бота ${BOT_IP}:443 по HTTPS (HTTP ${code_api}): фаервол или сертификат" ;;
     *) fail "неожиданный ответ API через шлюз: HTTP ${code_api}" ;;
 esac
 echo "OK"

@@ -1,24 +1,17 @@
-# белые списки (анти-ключ) через FURK API — как в старом боте.
-# Используется оригинальный furk_api.py из старого проекта (FURKAPI, async):
-# положите его рядом с этим файлом (src/api/furk_api.py).
-# Конфиг берётся из .env: FURK_API_KEY, FURK_BASE_URL (как в старом config.env).
+# белые списки (анти-ключ) через FurkVPN Partner API v2 — https://api.furkvpn.com/docs/v2
+# .env: FURK_API_KEY (ключ из @VPNpartenrsbot), FURK_BASE_URL (по умолч. https://api.furkvpn.com/api/v2)
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
+import json
 import os
-import sys
-import types
+import time
+import urllib.error
+import urllib.request
 from typing import Any, Optional
 
 ANTI_TRAFFIC_GB = 500  # лимит анти-ключа, как в старом боте
-# 499 ГиБ — признак ключа, который нужно переписать через edit_key (логика старого бота)
-EDIT_MARK_BYTES = 535797170176
-DEFAULT_KEY_URL_BASE = "https://fgn.great-connection.com"
-
-_FURK: Any = None
-_IMPORT_ERROR: Optional[str] = None
-_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="furk")
+DEFAULT_BASE_URL = "https://api.furkvpn.com/api/v2"
+TIMEOUT = 30.0
 
 
 def _env(*keys: str, default: str = "") -> str:
@@ -29,139 +22,194 @@ def _env(*keys: str, default: str = "") -> str:
     return default
 
 
-class _Secret(str):
-    """аналог pydantic SecretStr для старого кода (config.x.get_secret_value())."""
-
-    def get_secret_value(self) -> str:
-        return str(self)
-
-
-def _install_config_shim() -> None:
-    """старый furk_api делает `from config import config` — подставляем значения из .env."""
-    existing = sys.modules.get("config")
-    if existing is not None and hasattr(existing, "config"):
-        return
-    cfg = types.SimpleNamespace(
-        furk_api_key=_Secret(_env("FURK_API_KEY")),
-        furk_base_url=_env("FURK_BASE_URL"),
-        remna_api_key=_Secret(_env("REMWAVE_API_KEY", "REMNAWAVE_TOKEN", "REMNAWAVE_API_TOKEN", "REMAN_API_KEY")),
-        remnawave_base_url=_env("REMWAVE_BASE_URL", "REMNAWAVE_BASE_URL", "REMNAWAVE_URL"),
-        sub_base_url=_env("SUB_BASE_URL", "REMWAVE_SUB_PUBLIC_URL"),
-        telegram_token=_Secret(_env("TELEGRAM_BOT_TOKEN", "BOT_TOKEN", "TELEGRAM_TOKEN")),
-        yookassa_secret_key=_Secret(_env("YOOKASSA_SECRET_KEY")),
-        yookassa_account_id=_env("YOOKASSA_SHOP_ID"),
-        admin_id=int(_env("ADMIN_ID", default="0") or 0),
-        log_level=_env("LOG_LEVEL", default="INFO"),
-    )
-    mod = types.ModuleType("config")
-    mod.config = cfg  # type: ignore[attr-defined]
-    mod.Settings = type(cfg)  # type: ignore[attr-defined]
-    sys.modules["config"] = mod
+class FurkError(Exception):
+    def __init__(self, status: int, code: str, message: str = ""):
+        super().__init__(f"{status} {code}: {message}".strip())
+        self.status = status
+        self.code = code
+        self.message = message
 
 
-def _load() -> Any:
-    global _FURK, _IMPORT_ERROR
-    if _FURK is not None:
-        return _FURK
-    here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    try:
-        _install_config_shim()
-        import furk_api  # type: ignore  # noqa: WPS433
-
-        _FURK = getattr(furk_api, "FURKAPI")
-        _IMPORT_ERROR = None
-    except Exception as exc:  # noqa: BLE001
-        _IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
-        _FURK = None
-    return _FURK
-
-
-def last_error() -> Optional[str]:
-    return _IMPORT_ERROR
+def base_url() -> str:
+    return _env("FURK_BASE_URL", default=DEFAULT_BASE_URL).rstrip("/")
 
 
 def is_configured() -> bool:
-    """белые списки включены: есть ключ FURK и модуль furk_api."""
-    if not (_env("FURK_API_KEY") and _env("FURK_BASE_URL")):
-        return False
-    return _load() is not None
+    return bool(_env("FURK_API_KEY"))
 
 
-def key_url_base() -> str:
-    return _env("FURK_KEY_URL_BASE", default=DEFAULT_KEY_URL_BASE).rstrip("/")
+def last_error() -> Optional[str]:
+    return None if is_configured() else "нет FURK_API_KEY в .env"
 
 
-def key_url(key_id: str) -> str:
-    return f"{key_url_base()}/{key_id}"
+def _request(method: str, path: str, body: Optional[dict[str, Any]] = None,
+             idem: Optional[str] = None, retries: int = 2) -> dict[str, Any]:
+    """запрос к API v2; возвращает result или бросает FurkError."""
+    api_key = _env("FURK_API_KEY")
+    if not api_key:
+        raise FurkError(0, "NOT_CONFIGURED", "нет FURK_API_KEY")
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if idem:
+        # повтор с тем же ключом не спишет деньги второй раз (API хранит успешный ответ 24 ч)
+        headers["Idempotency-Key"] = idem[:128]
+    attempt = 0
+    while True:
+        attempt += 1
+        req = urllib.request.Request(base_url() + path, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode() or "{}")
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            try:
+                payload = json.loads(exc.read().decode() or "{}")
+            except Exception:  # noqa: BLE001
+                payload = {}
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            # 429/503/IDEMPOTENCY_IN_PROGRESS — подождать и повторить
+            code = ((payload.get("error") or {}).get("code") or "") if isinstance(payload, dict) else ""
+            if attempt <= retries and (status in (429, 503) or code == "IDEMPOTENCY_IN_PROGRESS"):
+                try:
+                    wait = min(10.0, float(retry_after)) if retry_after else 2.0
+                except ValueError:
+                    wait = 2.0
+                time.sleep(wait)
+                continue
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            # сетевой сбой: безопасно повторять только идемпотентные запросы
+            if attempt <= retries and (method == "GET" or idem):
+                time.sleep(2.0)
+                continue
+            raise FurkError(0, "NETWORK", str(exc)) from exc
+        if isinstance(payload, dict) and payload.get("ok"):
+            return payload.get("result") or {}
+        err = (payload.get("error") or {}) if isinstance(payload, dict) else {}
+        raise FurkError(status, str(err.get("code") or f"HTTP_{status}"), str(err.get("message") or ""))
+
+
+# ── операции ──
+def key_info(key_id: str) -> Optional[dict[str, Any]]:
+    """ключ или None, если его нет у провайдера."""
+    try:
+        res = _request("GET", f"/keys/{_safe_id(key_id)}")
+    except FurkError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    return res.get("key") if isinstance(res.get("key"), dict) else res
+
+
+def create_key(limit_gb: int, months: int, idem: Optional[str] = None) -> dict[str, Any]:
+    res = _request("POST", "/keys", {"limit_gb": int(limit_gb), "months": int(months)}, idem=idem)
+    return res.get("key") or {}
+
+
+def renew_key(key_id: str, months: int, idem: Optional[str] = None) -> dict[str, Any]:
+    res = _request("POST", f"/keys/{_safe_id(key_id)}/renew", {"months": int(months)}, idem=idem)
+    return res.get("key") or {}
+
+
+def expand_key(key_id: str, limit_gb: int, idem: Optional[str] = None) -> dict[str, Any]:
+    res = _request("POST", f"/keys/{_safe_id(key_id)}/expand", {"limit_gb": int(limit_gb)}, idem=idem)
+    return res.get("key") or {}
+
+
+def edit_key(key_id: str, limit_gb: int, months: int, idem: Optional[str] = None) -> dict[str, Any]:
+    res = _request("POST", f"/keys/{_safe_id(key_id)}/edit", {"limit_gb": int(limit_gb), "months": int(months)}, idem=idem)
+    return res.get("key") or {}
+
+
+def balance() -> dict[str, Any]:
+    """баланс партнёра (копейки → рубли)."""
+    res = _request("GET", "/balance")
+    out: dict[str, Any] = {}
+    for k in ("balance", "credit"):
+        if res.get(k) is not None:
+            try:
+                out[k] = round(int(res[k]) / 100, 2)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def _safe_id(key_id: str) -> str:
+    kid = str(key_id or "").strip()
+    if not kid or not all(c.isalnum() or c in "-_" for c in kid) or len(kid) > 64:
+        raise FurkError(400, "BAD_KEY_ID", "некорректный id ключа")
+    return kid
 
 
 def key_id_from_url(url: str) -> str:
+    """для ключей старого бота: id — последний сегмент ссылки."""
     return str(url or "").rstrip("/").rsplit("/", 1)[-1]
 
 
-def _call(method: str, *args: Any) -> Any:
-    """вызвать async-метод FURKAPI из синхронного кода (в отдельном потоке со своим loop)."""
-    api = _load()
-    if api is None:
-        raise RuntimeError(f"furk_api недоступен: {_IMPORT_ERROR or 'нет FURK_API_KEY/FURK_BASE_URL'}")
-    fn = getattr(api, method)
-
-    def _run() -> Any:
-        res = fn(*args)
-        if asyncio.iscoroutine(res):
-            return asyncio.run(res)
-        return res
-
-    return _POOL.submit(_run).result(timeout=60)
+def _limit_gb(key: dict[str, Any]) -> int:
+    tr = key.get("traffic") or {}
+    for v in (tr.get("base_limit_gb"), tr.get("limit_gb")):
+        try:
+            if v is not None:
+                return int(float(v))
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
-def info_key(key_id: str) -> dict[str, Any]:
-    res = _call("info_key", key_id)
-    return res if isinstance(res, dict) else {}
+def issue_or_renew(key_id: Optional[str], months: int, idem: Optional[str] = None) -> dict[str, Any]:
+    """логика старого бота: продлить анти-ключ или выпустить новый (500 ГБ).
+    Возвращает {"id", "subscription_url", "expires_at"}."""
+    months = max(1, min(36, int(months or 1)))
+    tag = (idem or "").strip()
+
+    def _k(step: str) -> Optional[str]:
+        return f"{tag}:{step}" if tag else None
+
+    key = key_info(key_id) if key_id else None
+    if key is None:
+        key = create_key(ANTI_TRAFFIC_GB, months, idem=_k("create"))
+    else:
+        tr = key.get("traffic") or {}
+        if key.get("is_trial") or tr.get("unlimited"):
+            # продление/расширение для пробных и безлимитных недоступно — меняем тариф
+            key = edit_key(key["id"], ANTI_TRAFFIC_GB, months, idem=_k("edit")) or key
+        else:
+            try:
+                key = renew_key(key["id"], months, idem=_k("renew")) or key
+            except FurkError as exc:
+                if exc.code != "KEY_NOT_ELIGIBLE":
+                    raise
+                key = edit_key(key["id"], ANTI_TRAFFIC_GB, months, idem=_k("edit")) or key
+            if _limit_gb(key) and _limit_gb(key) < ANTI_TRAFFIC_GB:
+                try:
+                    key = expand_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("expand")) or key
+                except FurkError as exc:
+                    if exc.code != "KEY_NOT_ELIGIBLE":
+                        raise
+    if not key.get("id"):
+        raise FurkError(0, "BAD_RESPONSE", "в ответе нет id ключа")
+    return {"id": str(key["id"]), "subscription_url": key.get("subscription_url"),
+            "expires_at": key.get("expires_at")}
 
 
-def issue_or_renew(current_url: Optional[str], months: int) -> str:
-    """логика старого бота: продлить существующий анти-ключ или выпустить новый. Возвращает url ключа."""
-    months = max(1, int(months or 1))
-    if current_url:
-        key_id = key_id_from_url(current_url)
-        info = info_key(key_id)
-        if info.get("error") == 500:
-            # ключ пропал у провайдера — выпускаем новый
-            resp = _call("create_key", ANTI_TRAFFIC_GB, months)
-            return key_url(str(resp["id"]))
-        if info.get("trafficLimitBytes") == EDIT_MARK_BYTES:
-            _call("edit_key", key_id, ANTI_TRAFFIC_GB, months)
-            return current_url
-        _call("renew_key", key_id, months)
-        _call("expand_limit", key_id, ANTI_TRAFFIC_GB)
-        return current_url
-    resp = _call("create_key", ANTI_TRAFFIC_GB, months)
-    return key_url(str(resp["id"]))
-
-
-def traffic(current_url: str) -> dict[str, Any]:
+def traffic(key_id: str) -> dict[str, Any]:
     """трафик анти-ключа для мини-приложения; пусто, если не узнали."""
     try:
-        info = info_key(key_id_from_url(current_url))
+        key = key_info(key_id)
     except Exception:  # noqa: BLE001
         return {}
-    if not info or info.get("error"):
+    if not key:
         return {}
-    ut = info.get("userTraffic") if isinstance(info.get("userTraffic"), dict) else {}
+    tr = key.get("traffic") or {}
 
-    def _n(*vals: Any) -> Optional[int]:
-        for v in vals:
-            try:
-                if v is not None:
-                    return int(float(v))
-            except (TypeError, ValueError):
-                continue
-        return None
+    def _n(v: Any) -> Optional[int]:
+        try:
+            return int(float(v)) if v is not None else None
+        except (TypeError, ValueError):
+            return None
 
-    return {
-        "used_bytes": _n(ut.get("usedTrafficBytes"), info.get("usedTrafficBytes"), info.get("used_traffic_bytes")),
-        "limit_bytes": _n(info.get("trafficLimitBytes"), info.get("traffic_limit_bytes")) or 0,
-    }
+    return {"used_bytes": _n(tr.get("used_bytes")),
+            "limit_bytes": 0 if tr.get("unlimited") else (_n(tr.get("limit_bytes")) or 0)}

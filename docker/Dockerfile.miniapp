@@ -11,7 +11,7 @@ COPY src/site ./src/site
 COPY assets ./assets
 RUN npm run build:miniapp
 
-FROM nginx:alpine
-COPY docker/nginx-spa.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/dist/miniapp /usr/share/nginx/html
+FROM caddy:2.8.4-alpine
+COPY docker/Caddyfile.spa /etc/caddy/Caddyfile
+COPY --from=build /app/dist/miniapp /srv/html
 EXPOSE 80

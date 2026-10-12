@@ -30,6 +30,7 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
   const [tariffDevices, setTariffDevices] = useState('3');
   const [wlConfigured, setWlConfigured] = useState(false);
   const [wlError, setWlError] = useState('');
+  const [furk, setFurk] = useState<{ configured?: boolean; ok?: boolean; balance?: number; credit?: number; error?: string } | null>(null);
   // способы оплаты: вкл/выкл и комиссия
   const [payMethods, setPayMethods] = useState<{ id: string; title: string; enabled: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,6 +58,7 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
         setTariffDevices(String(m.tariff_devices ?? 3));
         setWlConfigured(!!m.whitelist_configured);
         setWlError(String(m.whitelist_error || ''));
+        try { setFurk(await apiFetch('/panel/furk/status')); } catch { setFurk(null); }
         if (Array.isArray(m.pay_methods)) {
           setPayMethods(m.pay_methods.map((x: any) => ({ id: x.id, title: x.title, enabled: !!x.enabled })));
         }
@@ -120,9 +122,11 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
             sub="Отдельные тарифы, как в старом боте: полная цена (ВПН + анти-ключ FURK на 500 ГБ). Покупка продлевает основную подписку на тот же срок и выдаёт/продлевает анти-ключ. Цена 0 — срок недоступен."
           >
             <div className="inset" style={{ padding: '10px 14px', fontSize: 13.5 }}>
-              {wlConfigured
-                ? 'FURK API подключён — белые списки доступны в мини-приложении.'
-                : `FURK API не подключён — опция скрыта. Нужны FURK_API_KEY и FURK_BASE_URL в .env и файл src/api/furk_api.py из старого бота.${wlError ? ` (${wlError})` : ''}`}
+              {!wlConfigured
+                ? `FurkVPN API не подключён — опция скрыта. Добавьте FURK_API_KEY в .env (ключ из @VPNpartenrsbot).${wlError ? ` (${wlError})` : ''}`
+                : furk && furk.ok === false
+                  ? `FurkVPN API не отвечает или ключ неверный (${furk.error || 'ошибка'}).`
+                  : `FurkVPN API подключён${furk?.balance != null ? ` · баланс ${furk.balance} ₽${furk.credit ? ` (+ кредит ${furk.credit} ₽)` : ''}` : ''}. При нулевом балансе ключи не выдаются — админу придёт алерт.`}
             </div>
             <div className="flex flex-col gap-3">
               <div className="grid gap-3" style={{ gridTemplateColumns: '1.1fr 1fr 1fr 0.8fr' }}>

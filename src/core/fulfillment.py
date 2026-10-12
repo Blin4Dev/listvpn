@@ -182,32 +182,50 @@ def user_whitelist(user: Optional[dict[str, Any]]) -> dict[str, Any]:
     """анти-ключ пользователя: ссылка, срок, активен ли."""
     if not user:
         return {"key": None, "until": None, "active": False}
-    row = db.fetchone("SELECT anti_key, anti_expires_at FROM users WHERE id = ?", (int(user["id"]),)) or {}
+    row = db.fetchone("SELECT anti_key, anti_key_id, anti_expires_at FROM users WHERE id = ?", (int(user["id"]),)) or {}
     until = parse_iso(row.get("anti_expires_at"))
-    return {"key": row.get("anti_key"), "until": row.get("anti_expires_at"),
+    key_id = row.get("anti_key_id") or (furk.key_id_from_url(row["anti_key"]) if (furk and row.get("anti_key")) else None)
+    return {"key": row.get("anti_key"), "key_id": key_id, "until": row.get("anti_expires_at"),
             "active": bool(row.get("anti_key") and until and until > utcnow())}
 
 
-def grant_whitelist(user: dict[str, Any], months: int) -> dict[str, Any]:
-    """выпустить/продлить анти-ключ на months (логика старого process_payment для anti_*)."""
+def grant_whitelist(user: dict[str, Any], months: int, idem: Optional[str] = None) -> dict[str, Any]:
+    """выпустить/продлить анти-ключ FURK на months (логика старого process_payment для anti_*).
+    idem — ключ идемпотентности (id платежа): повторная обработка не спишет деньги у FURK дважды."""
     months = max(1, int(months or 1))
     cur = user_whitelist(user)
-    out: dict[str, Any] = {"ok": False, "key": cur["key"], "until": cur["until"],
-                           "prev_key": cur["key"], "prev_until": cur["until"], "error": None}
-    if furk is None:
-        out["error"] = "furk_module_missing"
+    out: dict[str, Any] = {"ok": False, "key": cur["key"], "key_id": cur["key_id"], "until": cur["until"],
+                           "prev_key": cur["key"], "prev_key_id": cur["key_id"], "prev_until": cur["until"],
+                           "error": None, "error_code": None}
+    if idem:
+        done = db.fetchone("SELECT anti_last_idem FROM users WHERE id = ?", (int(user["id"]),)) or {}
+        if done.get("anti_last_idem") == str(idem):
+            out.update(ok=True, already=True)
+            return out
+    if furk is None or not furk.is_configured():
+        out["error"] = "furk_not_configured"
         return out
     try:
-        key = furk.issue_or_renew(cur["key"], months)
+        res = furk.issue_or_renew(cur["key_id"], months, idem=f"blin-{idem}" if idem else None)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
+        out["error_code"] = getattr(exc, "code", None)
         return out
-    # срок: от текущего (если ещё идёт) или от сейчас + 30 дн × months
-    prev = parse_iso(cur["until"])
-    base = prev if (prev and prev > utcnow()) else utcnow()
-    until = iso(base + timedelta(days=DAYS_PER_MONTH * months))
-    db.execute("UPDATE users SET anti_key = ?, anti_expires_at = ? WHERE id = ?", (key, until, int(user["id"])))
-    out.update(ok=True, key=key, until=until)
+    # срок — как у провайдера; если не пришёл, считаем сами: от текущего (или сейчас) + 30 дн × months
+    until = None
+    try:
+        if res.get("expires_at"):
+            until = iso(datetime.fromtimestamp(int(res["expires_at"]), tz=timezone.utc))
+    except (TypeError, ValueError, OSError):
+        until = None
+    if not until:
+        prev = parse_iso(cur["until"])
+        base = prev if (prev and prev > utcnow()) else utcnow()
+        until = iso(base + timedelta(days=DAYS_PER_MONTH * months))
+    key_url = res.get("subscription_url") or cur["key"]
+    db.execute("UPDATE users SET anti_key = ?, anti_key_id = ?, anti_expires_at = ?, anti_last_idem = ? WHERE id = ?",
+               (key_url, res["id"], until, str(idem) if idem else None, int(user["id"])))
+    out.update(ok=True, key=key_url, key_id=res["id"], until=until)
     return out
 
 
@@ -654,6 +672,7 @@ def grant_subscription(
     extra_devices: int,
     subscription_id: Optional[int],
     whitelist: bool = False,
+    idem_key: Optional[str] = None,
 ) -> dict[str, Any]:
     months = max(1, int(months or 1))
     added_days = PERIOD_DAYS.get(months, DAYS_PER_MONTH * months)
@@ -719,7 +738,7 @@ def grant_subscription(
             (iso(new_exp), new_devices, paid_traffic_gb(), 1 if upgrading_trial else 0,
              db.dumps(squads), target["id"]),
         )
-        wl = _grant_whitelist_safe(user, months) if whitelist else None
+        wl = _grant_whitelist_safe(user, months, idem_key) if whitelist else None
         _apply_provision_to_sub(target, prov)
         _sync_user_status(int(user["id"]))
         if db.fetchone("SELECT id FROM subscriptions WHERE user_id = ? AND grace_until IS NOT NULL LIMIT 1", (int(user["id"]),)):
@@ -763,7 +782,7 @@ def grant_subscription(
         user=user, devices=max(1, total_devices), expire_at=new_exp, provision=prov,
         traffic_gb=paid_traffic_gb(), sub_type="vpn", squads=squads,
     )
-    wl = _grant_whitelist_safe(user, months) if whitelist else None
+    wl = _grant_whitelist_safe(user, months, idem_key) if whitelist else None
     return {
         "subscription_id": sub["id"],
         "expires_at": sub.get("expires_at"),
@@ -775,14 +794,18 @@ def grant_subscription(
     }
 
 
-def _grant_whitelist_safe(user: dict[str, Any], months: int) -> dict[str, Any]:
+def _grant_whitelist_safe(user: dict[str, Any], months: int, idem: Optional[str] = None) -> dict[str, Any]:
     """анти-ключ после продления ВПН; ошибка FURK не отменяет подписку — алерт админу (как в старом боте)."""
-    res = grant_whitelist(user, months)
+    res = grant_whitelist(user, months, idem=idem)
     if not res.get("ok"):
+        title = ("FURK: недостаточно средств на балансе партнёра — белые списки НЕ выданы"
+                 if res.get("error_code") == "INSUFFICIENT_FUNDS"
+                 else "Ошибка при работе с FURK API — белые списки НЕ выданы")
         try:
             forum.report_error(
-                "Ошибка при работе с FURK API — белые списки НЕ выданы",
-                f"user id{user.get('id')}, {months} мес., ключ {res.get('prev_key') or '—'}: {res.get('error')}",
+                title,
+                f"user id{user.get('id')}, {months} мес., ключ {res.get('prev_key_id') or '—'}: {res.get('error')}. "
+                f"Выдайте вручную после исправления.",
             )
         except Exception:  # noqa: BLE001
             pass
@@ -792,9 +815,9 @@ def _grant_whitelist_safe(user: dict[str, Any], months: int) -> dict[str, Any]:
 def _wl_undo(wl: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not wl:
         return {"whitelist": False}
-    return {"whitelist": bool(wl.get("ok")), "anti_key": wl.get("key"),
-            "prev_anti_key": wl.get("prev_key"), "prev_anti_until": wl.get("prev_until"),
-            "anti_until": wl.get("until")}
+    return {"whitelist": bool(wl.get("ok")), "anti_key": wl.get("key"), "anti_key_id": wl.get("key_id"),
+            "prev_anti_key": wl.get("prev_key"), "prev_anti_key_id": wl.get("prev_key_id"),
+            "prev_anti_until": wl.get("prev_until"), "anti_until": wl.get("until")}
 
 
 def fulfill_payment(
@@ -888,6 +911,7 @@ def fulfill_payment(
                 extra_devices=int(payment.get("extra_devices") or 0),
                 subscription_id=payment.get("subscription_id"),
                 whitelist=bool(payment.get("whitelist")),
+                idem_key=payment_id,
             )
     except Exception as exc:  # noqa: BLE001
         # выдача не удалась → снова pending для повтора

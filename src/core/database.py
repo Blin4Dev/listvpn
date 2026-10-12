@@ -803,6 +803,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             # белые списки (анти-ключ FURK, как в старом боте): ссылка и срок
             "anti_key": "ALTER TABLE users ADD COLUMN anti_key TEXT",
             "anti_expires_at": "ALTER TABLE users ADD COLUMN anti_expires_at TEXT",
+            "anti_key_id": "ALTER TABLE users ADD COLUMN anti_key_id TEXT",
+            # платёж, по которому анти-ключ уже выдан (повторная обработка не спишет у FURK второй раз)
+            "anti_last_idem": "ALTER TABLE users ADD COLUMN anti_last_idem TEXT",
             # когда принял оферту и политику
             "terms_accepted_at": "ALTER TABLE users ADD COLUMN terms_accepted_at TEXT",
             "first_start_at": "ALTER TABLE users ADD COLUMN first_start_at TEXT",

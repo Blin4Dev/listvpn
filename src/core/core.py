@@ -3530,9 +3530,10 @@ def _revoke_subscription_for_payment(payment: dict[str, Any]) -> None:
                 # сам ключ у провайдера урезать нельзя — алерт админу
                 wl_squads: Optional[list[str]] = None
                 if plan.get("whitelist") and "anti_key" in plan and not later and not to_trial:
-                    db.execute("UPDATE users SET anti_key = ?, anti_expires_at = ? WHERE id = ?",
-                               (plan.get("prev_anti_key") or plan.get("anti_key"), plan.get("prev_anti_until"),
-                                int(user["id"])))
+                    db.execute("UPDATE users SET anti_key = ?, anti_key_id = ?, anti_expires_at = ? WHERE id = ?",
+                               (plan.get("prev_anti_key") or plan.get("anti_key"),
+                                plan.get("prev_anti_key_id") or plan.get("anti_key_id"),
+                                plan.get("prev_anti_until"), int(user["id"])))
                     try:
                         forum.report_error("Возврат платежа с белыми списками",
                                            f"{payment.get('payment_id')}: анти-ключ {plan.get('anti_key')} продлён у FURK — "
@@ -3956,6 +3957,7 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         # белые списки: анти-ключ FURK («Ключ обхода» в старом боте)
         "anti_key": user.get("anti_key"),
         "anti_expires_at": user.get("anti_expires_at"),
+        "anti_key_id": user.get("anti_key_id"),
         "status": subscription_status_for_user(user),  # trial|active|expired|lapsed|never|banned
         "is_banned": bool(user.get("is_banned")),
         "balance": user.get("balance", 0),
@@ -5387,6 +5389,18 @@ def panel_remnawave_squads(_: dict = Depends(require_owner)) -> list[dict[str, A
     return [{"uuid": r["squad_uuid"], "name": r["squad_name"]} for r in rows]
 
 
+@app.get("/api/panel/furk/status")
+def panel_furk_status(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """белые списки (FurkVPN): подключён ли API и баланс партнёра."""
+    furk = fulfillment.furk
+    if furk is None or not furk.is_configured():
+        return {"configured": False, "error": "нет FURK_API_KEY в .env"}
+    try:
+        return {"configured": True, "ok": True, **furk.balance()}
+    except Exception as exc:  # noqa: BLE001
+        return {"configured": True, "ok": False, "error": str(getattr(exc, "code", "") or type(exc).__name__)}
+
+
 @app.get("/api/panel/squads")
 def panel_squads(_: dict = Depends(require_owner)) -> dict[str, Any]:
     rows = db.fetchall("SELECT * FROM squads ORDER BY priority DESC")
@@ -6288,8 +6302,8 @@ def _bypass_info(user_id: int) -> dict[str, Any]:
     out: dict[str, Any] = {"enabled": on, "until": wl["until"] if on else None,
                            "key": wl["key"] if on else None,
                            "available": fulfillment.whitelist_available()}
-    if on and wl["key"] and fulfillment.furk is not None and fulfillment.whitelist_available():
-        out.update(fulfillment.furk.traffic(str(wl["key"])))
+    if on and wl["key_id"] and fulfillment.whitelist_available():
+        out.update(fulfillment.furk.traffic(str(wl["key_id"])))
     return out
 
 

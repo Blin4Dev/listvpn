@@ -1,0 +1,57 @@
+# Статика мини-приложения / панели внутри контейнера (наружу — через Caddy на хосте)
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:80 {
+	header {
+		-Server
+		defer
+	}
+	route {
+		handle /node.sh {
+			root * /srv/html
+			header Content-Type "text/plain; charset=utf-8"
+			header Cache-Control "no-store"
+			header X-Content-Type-Options "nosniff"
+			file_server
+		}
+		handle /sw.js {
+			root * /srv/html
+			header Cache-Control "no-cache"
+			header Service-Worker-Allowed "/"
+			file_server
+		}
+		handle /manifest.webmanifest {
+			root * /srv/html
+			header Content-Type "application/manifest+json"
+			header Cache-Control "no-cache"
+			file_server
+		}
+		# assets: живые из ./assets (volume), иначе собранные
+		@live_asset {
+			path /assets/*
+			file {
+				root /srv/live
+			}
+		}
+		handle @live_asset {
+			root * /srv/live
+			header Cache-Control "public, max-age=600"
+			file_server
+		}
+		@static path *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.svg *.ico *.webp *.gif
+		handle @static {
+			root * /srv/html
+			header Cache-Control "public, max-age=604800"
+			file_server
+		}
+		handle {
+			root * /srv/html
+			try_files {path} {path}/ /index.html
+			file_server
+		}
+	}
+}

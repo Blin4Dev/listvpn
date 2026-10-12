@@ -1,5 +1,5 @@
 # blinvpn 2.0: оркестрация сервисов
-# api/webhook/bot в network_mode host (remnawave :3000, nginx на 127.0.0.1)
+# api/webhook/bot в network_mode host (remnawave :3000, caddy на хосте → 127.0.0.1)
 # miniapp/panel: spa на 127.0.0.1:{9741,9742}
 
 # ротация docker-логов: 50мб × 3 файла
@@ -86,7 +86,7 @@ services:
       - "127.0.0.1:${MINIAPP_PORT:-9741}:80"
     # живой mount assets/ (ro)
     volumes:
-      - ./assets:/usr/share/nginx/live/assets:ro
+      - ./assets:/srv/live/assets:ro
 
   panel:
     build:
@@ -101,7 +101,7 @@ services:
       - "127.0.0.1:${PANEL_PORT:-9742}:80"
     # живой mount assets/ (ro)
     volumes:
-      - ./assets:/usr/share/nginx/live/assets:ro
+      - ./assets:/srv/live/assets:ro
 
   # xbm: балансировщик подписки (см. xbm/NOTICE.md); ставится из панели
   # сеть remnawave; конфиг ./data/xbm/panel.json (на лету)

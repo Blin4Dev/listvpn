@@ -151,9 +151,7 @@ ensure_packages() {
     declare -A packages=(
         [git]='git'
         [docker]='docker.io'
-        [nginx]='nginx'
         [curl]='curl'
-        [certbot]='certbot'
         [dig]='dnsutils'
         [rsync]='rsync'
     )
@@ -233,317 +231,409 @@ dc_build() {
     return 1
 }
 
-# кто держит порты 80/443 (nginx не стартует, если они заняты)
+# ═══════════════ Caddy: reverse proxy + автоматический HTTPS ═══════════════
+CADDY_MAIN="/etc/caddy/Caddyfile"
+CADDY_SITES="/etc/caddy/sites"
+CADDY_SITE="${CADDY_SITES}/blinvpn.caddy"
+CADDY_MARKER="# managed-by-blinvpn"
+CADDY_MIN_VERSION="2.7.0"
+CADDY_FALLBACK_VERSION="2.8.4"
+
+# кто держит порты 80/443
 _port_owners() {
     sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print "   " $4 "  " $6}' || true
 }
 
-# nginx не стартует: показать причину, убрать битые конфиги прошлой установки, повторить
-start_nginx_safely() {
-    sudo systemctl enable nginx >/dev/null 2>&1 || true
-    if sudo systemctl start nginx 2>/dev/null; then
-        log_success "✔ nginx запущен."
+_ver_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]; }
+
+caddy_version() { caddy version 2>/dev/null | awk '{print $1}' | sed 's/^v//'; }
+
+# официальный apt-репозиторий Caddy; если недоступен — бинарник с GitHub (с проверкой sha512)
+install_caddy() {
+    local v
+    v="$(caddy_version || true)"
+    if [[ -n "$v" ]] && _ver_ge "$v" "$CADDY_MIN_VERSION"; then
+        log_success "✔ Caddy ${v} установлен."
         return 0
     fi
-
-    log_warn "nginx не запустился. Проверяю причину…"
-    local test_out
-    test_out="$(sudo nginx -t 2>&1 || true)"
-    echo "$test_out" | sed 's/^/   /'
-
-    if ! echo "$test_out" | grep -q "test is successful"; then
-        # конфиг сломан: чаще всего наш старый сайт ссылается на удалённые сертификаты
-        local f moved=0
-        for f in /etc/nginx/sites-enabled/*; do
-            [[ -e "$f" || -L "$f" ]] || continue
-            if echo "$test_out" | grep -qF "$(readlink -f "$f" 2>/dev/null || echo "$f")" \
-               || echo "$test_out" | grep -qF "$f"; then
-                log_warn "Отключаю битый конфиг: $f (копия в /etc/nginx/disabled-by-installer/)"
-                sudo mkdir -p /etc/nginx/disabled-by-installer
-                sudo mv "$f" /etc/nginx/disabled-by-installer/ && moved=1
-            fi
-        done
-        if [[ $moved -eq 1 ]] && sudo nginx -t >/dev/null 2>&1 && sudo systemctl start nginx; then
-            log_success "✔ nginx запущен после отключения битого конфига."
-            return 0
-        fi
+    log_info "Установка Caddy..."
+    export DEBIAN_FRONTEND=noninteractive
+    if sudo apt-get install -y --no-install-recommends debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1 \
+        && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+        && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null \
+        && sudo chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list \
+        && sudo apt-get update >/dev/null 2>&1 \
+        && sudo apt-get install -y caddy >/dev/null 2>&1; then
+        :
+    else
+        log_warn "Репозиторий Caddy недоступен — ставлю бинарник с GitHub."
+        sudo rm -f /etc/apt/sources.list.d/caddy-stable.list
+        _install_caddy_binary || { unset DEBIAN_FRONTEND; return 1; }
     fi
+    unset DEBIAN_FRONTEND
+    v="$(caddy_version || true)"
+    if [[ -z "$v" ]] || ! _ver_ge "$v" "$CADDY_MIN_VERSION"; then
+        log_error "Нужен Caddy ≥ ${CADDY_MIN_VERSION}, установлен: ${v:-нет}."
+        return 1
+    fi
+    log_success "✔ Caddy ${v} установлен."
+}
 
+_install_caddy_binary() {
+    local arch ver="$CADDY_FALLBACK_VERSION" tmp base
+    case "$(uname -m)" in
+        x86_64|amd64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) log_error "Архитектура $(uname -m) не поддерживается."; return 1 ;;
+    esac
+    tmp="$(mktemp -d)"
+    base="https://github.com/caddyserver/caddy/releases/download/v${ver}"
+    if ! curl -fsSL -o "$tmp/caddy.tgz" "${base}/caddy_${ver}_linux_${arch}.tar.gz" \
+       || ! curl -fsSL -o "$tmp/sums.txt" "${base}/caddy_${ver}_checksums.txt"; then
+        rm -rf "$tmp"; log_error "Не удалось скачать Caddy."; return 1
+    fi
+    local want got
+    want="$(awk -v f="caddy_${ver}_linux_${arch}.tar.gz" '$2==f {print $1}' "$tmp/sums.txt")"
+    got="$(sha512sum "$tmp/caddy.tgz" | awk '{print $1}')"
+    if [[ -z "$want" || "$want" != "$got" ]]; then
+        rm -rf "$tmp"; log_error "Контрольная сумма Caddy не совпала — установка остановлена."; return 1
+    fi
+    tar -xzf "$tmp/caddy.tgz" -C "$tmp" caddy
+    sudo install -m 755 -o root -g root "$tmp/caddy" /usr/bin/caddy
+    rm -rf "$tmp"
+    getent group caddy >/dev/null || sudo groupadd --system caddy
+    id caddy >/dev/null 2>&1 || sudo useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
+    sudo mkdir -p /etc/caddy
+    sudo tee /etc/systemd/system/caddy.service >/dev/null <<'UNIT'
+[Unit]
+Description=Caddy
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload
+}
+
+# главный Caddyfile: глобальные опции + сайты из /etc/caddy/sites/*.caddy
+caddy_prepare_main() {
+    local email="$1"
+    local email_re='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+    if [[ ! "$email" =~ $email_re ]]; then
+        log_error "Некорректный email для Let's Encrypt: ${email}"
+        return 1
+    fi
+    sudo mkdir -p "$CADDY_SITES"
+    if [[ -s "$CADDY_MAIN" ]] && ! sudo grep -qF "$CADDY_MARKER" "$CADDY_MAIN" \
+       && ! sudo grep -q 'root \* /usr/share/caddy' "$CADDY_MAIN"; then
+        log_error "В ${CADDY_MAIN} уже есть чужая конфигурация Caddy."
+        hint "Перенесите свои сайты в ${CADDY_SITES}/<имя>.caddy (без глобального блока { }) и удалите ${CADDY_MAIN}, затем запустите установку снова."
+        return 1
+    fi
+    local tmp; tmp="$(mktemp)"
+    cat > "$tmp" <<EOF
+${CADDY_MARKER}
+# Главный файл Caddy. Сайты — в ${CADDY_SITES}/*.caddy (BatmanVPN: blinvpn.caddy).
+{
+	email ${email}
+	servers {
+		protocols h1 h2
+	}
+}
+
+import ${CADDY_SITES}/*.caddy
+EOF
+    sudo install -m 644 -o root -g root "$tmp" "$CADDY_MAIN"
+    rm -f "$tmp"
+}
+
+# освободить 80/443 от нашего старого nginx; чужие сайты в nginx — стоп
+free_ports_for_caddy() {
+    NGINX_STOPPED_BY_US=0
+    if command -v nginx >/dev/null 2>&1 && sudo systemctl is-active --quiet nginx; then
+        local others
+        others="$(ls -1 /etc/nginx/sites-enabled/ 2>/dev/null | grep -vxE "default|${PROJECT_DIR}\.conf|blinvpn-acme\.conf" || true)"
+        others+="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | sed 's#.*/##' | tr '\n' ' ' || true)"
+        if [[ -n "${others// /}" ]]; then
+            log_error "На сервере nginx обслуживает другие сайты: ${others}"
+            hint "Caddy и nginx не могут одновременно занимать порты 80/443. Перенесите эти сайты в Caddy или на другой сервер."
+            return 1
+        fi
+        log_warn "Останавливаю nginx (его место займёт Caddy)…"
+        sudo systemctl stop nginx
+        sudo systemctl disable nginx >/dev/null 2>&1 || true
+        NGINX_STOPPED_BY_US=1
+    fi
     local owners
-    owners="$(_port_owners)"
+    owners="$(_port_owners | grep -v '"caddy"' || true)"
     if [[ -n "$owners" ]]; then
         log_error "Порты 80/443 заняты другим процессом:"
         echo "$owners"
-        hint "Остановите его (например: sudo systemctl disable --now apache2 / caddy) или перенесите Remnawave/Xray с 443, затем запустите установку снова."
-    else
-        log_error "nginx не стартует. Последние строки журнала:"
-        sudo journalctl -u nginx --no-pager -n 20 2>/dev/null | sed 's/^/   /' || true
+        hint "Остановите его (например: sudo systemctl disable --now apache2) и запустите установку снова."
+        return 1
     fi
-    return 1
 }
 
-ensure_services() {
-    for service in docker nginx; do
-        if sudo systemctl is-active --quiet "$service"; then
-            log_success "✔ сервис $service активен."
-            continue
-        fi
-        log_warn "Сервис $service не запущен — запускаем..."
-        if [[ "$service" == "nginx" ]]; then
-            start_nginx_safely
-        else
-            sudo systemctl enable "$service"
-            sudo systemctl start "$service"
-        fi
+# вернуть nginx, если переход на Caddy не удался
+rollback_to_nginx() {
+    if [[ "${NGINX_STOPPED_BY_US:-0}" == "1" ]]; then
+        log_warn "Возвращаю nginx…"
+        sudo systemctl stop caddy >/dev/null 2>&1 || true
+        sudo systemctl enable nginx >/dev/null 2>&1 || true
+        sudo systemctl start nginx || true
+    fi
+}
+
+# применить файл сайта: проверка конфигурации, при ошибке — откат
+caddy_apply_site() {
+    local src="$1" backup=""
+    sudo mkdir -p "$CADDY_SITES"
+    if sudo test -f "$CADDY_SITE"; then
+        backup="$(mktemp)"; sudo cp -p "$CADDY_SITE" "$backup"
+    fi
+    sudo install -m 640 -o root -g caddy "$src" "$CADDY_SITE"
+    local vlog; vlog="$(mktemp)"
+    if ! sudo caddy validate --adapter caddyfile --config "$CADDY_MAIN" >"$vlog" 2>&1; then
+        sed 's/^/   /' "$vlog" | tail -n 15
+        if [[ -n "$backup" ]]; then sudo install -m 640 -o root -g caddy "$backup" "$CADDY_SITE"; else sudo rm -f "$CADDY_SITE"; fi
+        rm -f "$backup" "$vlog"
+        log_error "Конфигурация Caddy не прошла проверку — откатил."
+        return 1
+    fi
+    rm -f "$backup" "$vlog"
+    sudo systemctl enable caddy >/dev/null 2>&1 || true
+    if sudo systemctl is-active --quiet caddy; then
+        sudo systemctl reload caddy || sudo systemctl restart caddy
+    else
+        sudo systemctl start caddy
+    fi
+    log_success "✔ конфигурация Caddy применена."
+}
+
+# дождаться валидного сертификата (Caddy выпускает его сам)
+caddy_wait_https() {
+    local d i
+    for d in "$@"; do
+        log_info "Жду сертификат для ${d}…"
+        for i in $(seq 1 45); do
+            if curl -s --noproxy "*" -o /dev/null -m 5 --resolve "${d}:443:127.0.0.1" "https://${d}/" 2>/dev/null; then
+                log_success "✔ HTTPS для ${d} работает."
+                continue 2
+            fi
+            sleep 3
+        done
+        log_error "Caddy не получил сертификат для ${d}."
+        sudo journalctl -u caddy --no-pager -n 60 2>/dev/null | grep -iE 'error|acme|challenge|certificate' | tail -n 8 | sed 's/^/   /' || true
+        hint "Проверьте: A-запись ${d} указывает на этот сервер, порты 80 и 443 открыты, домен не проксируется через Cloudflare."
+        return 1
     done
 }
 
-ensure_certbot_nginx() {
-    log_info "\nПроверка плагина Certbot"
-
-    local has_nginx_plugin=0
-    if command -v certbot >/dev/null 2>&1; then
-        if certbot plugins 2>/dev/null | grep -qi 'nginx'; then
-            has_nginx_plugin=1
-        fi
+# A-запись домена должна вести на этот сервер (иначе Caddy не получит сертификат)
+dns_preflight() {
+    local d="$1" my_ip dip
+    my_ip="$(get_server_ip || true)"
+    dip="$(resolve_domain_ip "$d" || true)"
+    if [[ -z "$dip" ]]; then
+        log_warn "У ${d} нет A-записи — сертификат не выпустится."
+        confirm "Продолжить? (y/n): " || return 1
+    elif [[ -n "$my_ip" && "$dip" != "$my_ip" ]]; then
+        log_warn "A-запись ${d} → ${dip}, а IP сервера — ${my_ip}."
+        confirm "Продолжить? (y/n): " || return 1
     fi
-
-    if [[ $has_nginx_plugin -eq 1 ]]; then
-        log_success "✔ плагин nginx для Certbot найден."
-        return
-    fi
-
-    if command -v apt-get >/dev/null 2>&1; then
-        log_info "Устанавливаю python3-certbot-nginx..."
-        export DEBIAN_FRONTEND=noninteractive
-        export DEBCONF_NONINTERACTIVE_SEEN=true
-        sudo apt-get update
-        if sudo apt-get install -y --no-install-recommends python3-certbot-nginx; then
-            if certbot plugins 2>/dev/null | grep -qi 'nginx'; then
-                log_success "✔ плагин nginx для Certbot установлен (apt)."
-                unset DEBIAN_FRONTEND
-                unset DEBCONF_NONINTERACTIVE_SEEN
-                return
-            fi
-        fi
-        unset DEBIAN_FRONTEND
-        unset DEBCONF_NONINTERACTIVE_SEEN
-    fi
-
-    log_warn "Пробую установить Certbot через snap..."
-    if ! command -v snap >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends snapd
-        unset DEBIAN_FRONTEND
-    fi
-    sudo snap install core || true
-    sudo snap refresh core || true
-    sudo snap install --classic certbot
-    sudo ln -sf /snap/bin/certbot /usr/bin/certbot
-
-    if certbot plugins 2>/dev/null | grep -qi 'nginx'; then
-        log_success "✔ плагин nginx для Certbot доступен (snap)."
-        return
-    fi
-
-    log_error "Плагин nginx для Certbot недоступен."
-    exit 1
 }
 
-# прокси webhook → 127.0.0.1:5000
-_webhook_location() {
-    local path="$1"
-    cat <<EOF
-    location ${path} {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-EOF
-}
-
-# заголовки к API: реальный IP клиента ставит только наш nginx (подделку CF-/True-Client-IP режем)
-_api_proxy_headers() {
+# заголовки к API: реальный IP клиента ставит только наш прокси (подделку CF-/True-Client-IP режем)
+_caddy_api_headers() {
     cat <<'EOF'
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header True-Client-IP "";
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-For {client_ip}
+			header_up -CF-Connecting-IP
+			header_up -True-Client-IP
+			header_up -X-Panel-Gateway
 EOF
 }
 
-# configure_nginx <miniapp> <panel> <conf> <link> [<ip_сервера_панели> <секрет_шлюза>]
+# configure_caddy <miniapp> <panel> [<ip_сервера_панели> <секрет_шлюза>]
 # с двумя последними аргументами панель живёт на отдельном сервере: здесь её нет,
 # а /api/panel открыт только для IP сервера панели с секретным заголовком.
-configure_nginx() {
-    local miniapp_domain="$1"
-    local panel_domain="$2"
-    local nginx_conf="$3"
-    local nginx_link="$4"
-    local remote_ip="${5:-}"
-    local gw_secret="${6:-}"
+configure_caddy() {
+    local miniapp_domain="$1" panel_domain="$2" remote_ip="${3:-}" gw_secret="${4:-}"
     local remote=0
     [[ -n "$remote_ip" && -n "$gw_secret" ]] && remote=1
+    log_info "\nНастройка Caddy (HTTPS)"
 
-    log_info "\nНастройка Nginx (HTTPS :443)"
-    sudo rm -f /etc/nginx/sites-enabled/default
-
-    local http_names="${miniapp_domain} ${panel_domain}"
-    [[ $remote -eq 1 ]] && http_names="${miniapp_domain}"
-
-    local api_panel_block
+    local gw_block
     if [[ $remote -eq 1 ]]; then
-        api_panel_block="    # /api/panel — только шлюз панели (отдельный сервер ${remote_ip}) с секретным заголовком
-    location /api/panel {
-        allow ${remote_ip};
-        deny all;
-        if (\$http_x_panel_gateway != \"${gw_secret}\") {
-            return 404;
-        }
-        client_max_body_size 55m;
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Connection \"\";
-        proxy_set_header Host \$host;
-        # IP клиента передаёт шлюз (доверяем только ему — см. allow выше)
-        proxy_set_header X-Real-IP \$http_x_real_ip;
-        proxy_set_header X-Forwarded-For \$http_x_real_ip;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Panel-Gateway \"\";
-        proxy_set_header CF-Connecting-IP \"\";
-        proxy_set_header True-Client-IP \"\";
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-        proxy_buffering off;
-    }"
+        gw_block="		# /api/panel — только шлюз панели (отдельный сервер ${remote_ip}) с секретным заголовком
+		@panel_gw {
+			path /api/panel /api/panel/*
+			remote_ip ${remote_ip}
+			header X-Panel-Gateway ${gw_secret}
+		}
+		handle @panel_gw {
+			reverse_proxy 127.0.0.1:8000 {
+				# IP клиента передаёт шлюз (доверяем только ему — см. remote_ip выше)
+				header_up X-Real-IP {http.request.header.X-Real-IP}
+				header_up X-Forwarded-For {http.request.header.X-Real-IP}
+				header_up -CF-Connecting-IP
+				header_up -True-Client-IP
+				header_up -X-Panel-Gateway
+				flush_interval -1
+			}
+		}"
     else
-        api_panel_block="    # /api/panel только на домене панели
-    location /api/panel {
-        return 404;
-    }"
+        gw_block="		# /api/panel только на домене панели"
     fi
 
-    local tmp_conf
-    tmp_conf="$(mktemp)"
-    chmod 600 "$tmp_conf"
-    cat > "$tmp_conf" <<EOF
-# редирект http → https
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${http_names};
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
+    local tmp; tmp="$(mktemp)"; chmod 600 "$tmp"
+    cat > "$tmp" <<EOF
+# BatmanVPN — сгенерировано install.sh (правки затрутся при обновлении)
+
+(blin_sec) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+		defer
+	}
 }
 
 # мини-приложение + api + webhooks
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${miniapp_domain};
-
-    ssl_certificate /etc/letsencrypt/live/${miniapp_domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${miniapp_domain}/privkey.pem;
-
-    # вложения поддержки: до 50 мб
-    client_max_body_size 55m;
-
-    # security headers (без x-frame-options: telegram webview)
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-    location / {
-        proxy_pass http://127.0.0.1:9741;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 60s;
-        proxy_connect_timeout 15s;
-    }
-
-    # /api/internal недоступен снаружи
-    location /api/internal {
-        return 404;
-    }
-
-${api_panel_block}
-
-    # deep-link redirect: не пишем в access_log
-    location = /redirect.html {
-        access_log off;
-        proxy_pass http://127.0.0.1:9741;
-        proxy_set_header Host \$host;
-    }
-
-    location /api {
-        proxy_pass http://127.0.0.1:8000;
-$(_api_proxy_headers)
-    }
-
-$(_webhook_location /yookassa)
+${miniapp_domain} {
+	import blin_sec
+	# вложения поддержки: до 50 мб
+	request_body {
+		max_size 55MB
+	}
+	route {
+		# /api/internal недоступен снаружи
+		handle /api/internal* {
+			respond 404
+		}
+${gw_block}
+		handle /api/panel* {
+			respond 404
+		}
+		handle /api* {
+			reverse_proxy 127.0.0.1:8000 {
+$(_caddy_api_headers)
+			}
+		}
+		handle /yookassa* {
+			reverse_proxy 127.0.0.1:5000 {
+$(_caddy_api_headers)
+			}
+		}
+		handle {
+			reverse_proxy 127.0.0.1:9741 {
+				header_up X-Real-IP {client_ip}
+				header_up X-Forwarded-For {client_ip}
+			}
+		}
+	}
 }
 EOF
-
     if [[ $remote -eq 0 ]]; then
-        cat >> "$tmp_conf" <<EOF
+        cat >> "$tmp" <<EOF
 
 # панель
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${panel_domain};
-
-    ssl_certificate /etc/letsencrypt/live/${panel_domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${panel_domain}/privkey.pem;
-
-    # вложения поддержки: до 50 мб
-    client_max_body_size 55m;
-
-    # security headers панели
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-    location /api/internal {
-        return 404;
-    }
-
-    location /api {
-        proxy_pass http://127.0.0.1:8000;
-$(_api_proxy_headers)
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:9742;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
+${panel_domain} {
+	import blin_sec
+	header X-Frame-Options "DENY"
+	request_body {
+		max_size 55MB
+	}
+	route {
+		handle /api/internal* {
+			respond 404
+		}
+		handle /api* {
+			reverse_proxy 127.0.0.1:8000 {
+$(_caddy_api_headers)
+				flush_interval -1
+			}
+		}
+		handle {
+			reverse_proxy 127.0.0.1:9742 {
+				header_up X-Real-IP {client_ip}
+			}
+		}
+	}
 }
 EOF
     fi
+    if ! caddy_apply_site "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+}
 
-    # конфиг может содержать секрет шлюза — только root
-    sudo install -m 600 -o root -g root "$tmp_conf" "$nginx_conf"
-    rm -f "$tmp_conf"
-    sudo rm -f "$nginx_link"
-    sudo ln -s "$nginx_conf" "$nginx_link"
-    sudo nginx -t
-    sudo systemctl reload nginx
-    log_success "✔ конфигурация Nginx обновлена."
+ensure_services() {
+    if sudo systemctl is-active --quiet docker; then
+        log_success "✔ сервис docker активен."
+    else
+        log_warn "Сервис docker не запущен — запускаем..."
+        sudo systemctl enable docker
+        sudo systemctl start docker
+    fi
+}
+
+# старые сертификаты certbot для наших доменов больше не нужны (Caddy выпускает свои)
+cleanup_legacy_certbot() {
+    command -v certbot >/dev/null 2>&1 || return 0
+    local d
+    for d in "$@"; do
+        [[ -n "$d" && -d "/etc/letsencrypt/live/${d}" ]] || continue
+        sudo certbot delete --cert-name "$d" --non-interactive >/dev/null 2>&1 \
+            && log_info "Удалён старый сертификат certbot: ${d}" || true
+    done
+}
+
+# прокси сервера бота в нужном режиме (панель здесь или на отдельном сервере)
+apply_bot_proxy() {
+    local mini="$1" panel="$2"
+    if panel_is_remote && panel_remote_load; then
+        configure_caddy "$mini" "$panel" "$PR_EGRESS_IP" "$PR_SECRET"
+    else
+        configure_caddy "$mini" "$panel"
+    fi
+}
+
+# полный подъём прокси: Caddy, главный файл, порты, сайт, сертификаты. При ошибке nginx возвращается.
+proxy_up() {
+    local mini="$1" panel="$2" email="$3"
+    local -a domains=("$mini")
+    panel_is_remote || domains+=("$panel")
+    install_caddy || return 1
+    caddy_prepare_main "$email" || return 1
+    free_ports_for_caddy || return 1
+    if ! apply_bot_proxy "$mini" "$panel" || ! caddy_wait_https "${domains[@]}"; then
+        rollback_to_nginx
+        return 1
+    fi
+    # переход с nginx завершён: убрать наш старый конфиг и сертификаты certbot
+    if [[ -f "$NGINX_CONF" ]]; then
+        sudo rm -f "$NGINX_LINK" /etc/nginx/sites-enabled/blinvpn-acme.conf
+        sudo mv -f "$NGINX_CONF" "${NGINX_CONF}.migrated-to-caddy" 2>/dev/null || true
+        cleanup_legacy_certbot "$mini" "$panel"
+        log_success "✔ переход с nginx на Caddy завершён."
+    fi
 }
 
 section() {
@@ -596,6 +686,11 @@ create_env_file() {
     prompt_valid "  ${BOLD}API Token${NC}  (из панели Remnawave): " REMWAVE_API_KEY \
         '^[!-~]{10,}$' "Токен — латинские символы без пробелов (Remnawave → API Tokens)"
 
+    section "Белые списки · FurkVPN"
+    hint "Ключ партнёра из @VPNpartenrsbot (карточка приложения). Пусто — белые списки будут скрыты, ключ можно добавить в .env позже."
+    prompt_valid "  ${BOLD}FURK API-ключ${NC} (Enter — пропустить): " FURK_API_KEY \
+        '^[!-~]{10,}$' "Ключ — латинские символы без пробелов" 1
+
     TELEGRAM_WEBHOOK_SECRET="$(gen_secret_hex)"
     PANEL_SETUP_TOKEN="$(gen_secret_hex)"
     INTERNAL_API_SECRET="$(gen_secret_hex)"
@@ -616,6 +711,10 @@ VITE_BOT_USERNAME=${BOT_USERNAME}
 # панель remnawave
 REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
+
+# белые списки: FurkVPN Partner API v2 (https://api.furkvpn.com/docs/v2)
+FURK_API_KEY=${FURK_API_KEY}
+FURK_BASE_URL=https://api.furkvpn.com/api/v2
 
 # платежи: ЮKassa / telegram stars (ключи позже в .env)
 
@@ -903,98 +1002,6 @@ migrate_security_update() {
     log_success "✔ миграция завершена."
 }
 
-# перед certbot: проверить, что http://домен/.well-known/acme-challenge/ отдаётся ЭТИМ nginx
-acme_preflight() {
-    local d="$1" token body my_ip dns_ip headers others
-    token="blinvpn-probe-$RANDOM$RANDOM"
-    sudo mkdir -p /var/www/html/.well-known/acme-challenge
-    echo "$token" | sudo tee "/var/www/html/.well-known/acme-challenge/${token}" >/dev/null
-    body="$(curl -s -m 10 "http://${d}/.well-known/acme-challenge/${token}" 2>/dev/null || true)"
-    headers="$(curl -sI -m 10 "http://${d}/.well-known/acme-challenge/${token}" 2>/dev/null || true)"
-    sudo rm -f "/var/www/html/.well-known/acme-challenge/${token}"
-    if [[ "$body" == "$token" ]]; then
-        return 0
-    fi
-
-    log_error "Домен ${d} не отдаёт проверочный файл с этого сервера — Let's Encrypt не сможет выдать сертификат."
-    my_ip="$(curl -s -m 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
-    dns_ip="$(getent ahostsv4 "$d" 2>/dev/null | awk 'NR==1{print $1}')"
-    echo "   IP сервера:      ${my_ip:-?}"
-    echo "   A-запись ${d}: ${dns_ip:-нет}"
-    if echo "$headers" | grep -qi '^server: *cloudflare'; then
-        hint "Домен проксируется через Cloudflare (оранжевое облако). Выключите прокси (DNS only) на время выпуска сертификата или отключите «Always Use HTTPS»."
-    elif [[ -n "$dns_ip" && -n "$my_ip" && "$dns_ip" != "$my_ip" ]]; then
-        hint "A-запись ${d} указывает на другой сервер (${dns_ip}). Направьте её на ${my_ip} и подождите обновления DNS."
-    else
-        others="$(sudo nginx -T 2>/dev/null | awk -v d="$d" '/^# configuration file/{f=$4} $1=="server_name" && index($0, d){print "   " f}' | sort -u | grep -v blinvpn_certbot || true)"
-        if [[ -n "$others" ]]; then
-            hint "Домен ${d} уже занят другим конфигом nginx (он перехватывает запросы и редиректит на https):"
-            echo "$others"
-            hint "Удалите/отключите этот конфиг (или уберите из него ${d}), выполните sudo nginx -t && sudo systemctl reload nginx и запустите установку снова."
-        else
-            echo "$headers" | head -n 5 | sed 's/^/   /'
-            hint "Порт 80 этого домена обслуживает не этот nginx (другой прокси/панель на сервере или перед ним)."
-        fi
-    fi
-    return 1
-}
-
-obtain_certificates() {
-    local email="$1"; shift
-    local domains=("$@")
-    ((${#domains[@]})) || return 0
-
-    local temp_conf="/tmp/blinvpn_certbot_renew.conf"
-    local temp_link="/etc/nginx/sites-enabled/blinvpn-acme.conf"
-
-    log_info "Временная Nginx-конфигурация для ACME (порт 80)..."
-    sudo mkdir -p /var/www/html/.well-known/acme-challenge
-
-    local blocks="" d
-    for d in "${domains[@]}"; do
-        blocks+="server {
-    listen 80;
-    server_name ${d};
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-}
-"
-    done
-    printf '%s' "$blocks" | sudo tee "$temp_conf" >/dev/null
-    sudo ln -sf "$temp_conf" "$temp_link"
-
-    if ! sudo nginx -t; then
-        log_error "Ошибка проверки Nginx. Замена доменов прервана."
-        sudo rm -f "$temp_link" "$temp_conf"
-        sudo systemctl reload nginx || true
-        exit 1
-    fi
-    sudo systemctl reload nginx
-
-    for d in "${domains[@]}"; do
-        log_info "Выпуск сертификата для ${d}..."
-        if ! acme_preflight "$d"; then
-            sudo rm -f "$temp_link" "$temp_conf"
-            sudo systemctl reload nginx || true
-            exit 1
-        fi
-        if sudo certbot certonly --webroot -w /var/www/html -d "$d" \
-            --email "$email" --agree-tos --non-interactive --keep-until-expiring; then
-            log_success "✔ Сертификат для ${d} получен."
-        else
-            log_error "Не удалось получить сертификат для ${d}."
-            log_error "Проверьте A-запись ${d} и что порт 80 открыт."
-            sudo rm -f "$temp_link" "$temp_conf"
-            sudo systemctl reload nginx || true
-            exit 1
-        fi
-    done
-
-    sudo rm -f "$temp_link" "$temp_conf"
-    sudo systemctl reload nginx || true
-}
-
 update_env_domains() {
     local miniapp="$1"
     local panel="$2"
@@ -1099,11 +1106,9 @@ replace_domains_flow() {
         sudo ufw allow 443/tcp || true
     fi
 
-    section "Выпуск сертификатов Let's Encrypt"
-    ((${#local_changed[@]})) && obtain_certificates "$cur_email" "${local_changed[@]}"
-
-    section "Обновление Nginx"
-    apply_bot_nginx "$new_miniapp" "$new_panel"
+    section "Caddy и сертификаты"
+    # новые домены в .env раньше прокси: proxy_up смотрит на режим панели
+    proxy_up "$new_miniapp" "$new_panel" "$cur_email" || exit 1
 
     section "Обновление .env"
     update_env_domains "$new_miniapp" "$new_panel"
@@ -1133,22 +1138,8 @@ replace_domains_flow() {
         print_payment_webhooks "$new_miniapp"
     fi
 
-    if ((${#old_domains[@]})) && confirm "Удалить сертификаты заменённых доменов? (y/n): "; then
-        local od
-        for od in "${old_domains[@]}"; do
-            [[ -n "$od" ]] || continue
-            if [[ "$od" == "$new_miniapp" || "$od" == "$new_panel" ]]; then
-                continue
-            fi
-            if [[ -d "/etc/letsencrypt/live/${od}" ]]; then
-                if sudo certbot delete --cert-name "$od" --non-interactive 2>/dev/null; then
-                    log_info "Сертификат ${od} удалён."
-                else
-                    log_warn "Не удалось удалить сертификат ${od}."
-                fi
-            fi
-        done
-    fi
+    # старые certbot-сертификаты прежних доменов (если остались от nginx-версии)
+    ((${#old_domains[@]})) && cleanup_legacy_certbot "${old_domains[@]}"
 
     section "Замена доменов завершена"
     printf "  Мини-приложение : ${YELLOW}https://%s${NC}\n" "$new_miniapp"
@@ -1307,7 +1298,7 @@ _pr_install_key() {
 
 panel_remote_collect() {
     section "Панель на отдельном сервере · SSH"
-    hint "Установщик подключится по SSH, поставит nginx + сертификат и разместит там панель."
+    hint "Установщик подключится по SSH, поставит Caddy (сам выпускает сертификат) и разместит там панель."
     hint "Пароль никуда не сохраняется: он нужен один раз, чтобы добавить на сервер отдельный ключ."
     local v
     prompt_valid "  ${BOLD}IP или домен сервера панели${NC}: " PR_HOST \
@@ -1385,119 +1376,87 @@ panel_remote_collect() {
     log_success "✔ сервер панели подключён."
 }
 
-# nginx-конфиг для сервера панели: статика + шлюз только на /api/panel/
-_pr_render_nginx() {
+# сайт Caddy для сервера панели: статика + шлюз только на /api/panel
+_pr_render_caddy() {
     local panel_domain="$1" miniapp_domain="$2" bot_ip="$3" out="$4"
-    local sec='        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-        add_header X-Frame-Options "DENY" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;'
     ( umask 077; cat > "$out" <<EOF
 # BatmanVPN — панель (сгенерировано install.sh на сервере бота; правки затрутся при обновлении)
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${panel_domain};
-    location /.well-known/acme-challenge/ {
-        root /var/www/blinvpn-acme;
-    }
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${panel_domain};
-
-    ssl_certificate /etc/letsencrypt/live/${panel_domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${panel_domain}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    server_tokens off;
-
-    root /var/www/blinvpn-panel/current/html;
-    index index.html;
-
-    # вложения поддержки: до 50 мб
-    client_max_body_size 55m;
-
-    location / {
-${sec}
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    # API панели → сервер бота по HTTPS (сертификат проверяется), с секретом шлюза
-    location /api/panel {
-${sec}
-        proxy_pass https://${bot_ip};
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_ssl_server_name on;
-        proxy_ssl_name ${miniapp_domain};
-        proxy_ssl_verify on;
-        proxy_ssl_verify_depth 3;
-        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
-        proxy_set_header Host ${miniapp_domain};
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Panel-Gateway "${PR_SECRET}";
-        proxy_set_header CF-Connecting-IP "";
-        proxy_set_header True-Client-IP "";
-        proxy_connect_timeout 15s;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-        proxy_buffering off;
-        proxy_request_buffering on;
-    }
-
-    # остальное API панели не нужно
-    location /api/ {
-${sec}
-        return 404;
-    }
-
-    location = /node.sh {
-${sec}
-        default_type text/plain;
-        charset utf-8;
-        add_header Cache-Control "no-store" always;
-        try_files /node.sh =404;
-    }
-
-    location = /sw.js {
-${sec}
-        add_header Cache-Control "no-cache" always;
-        add_header Service-Worker-Allowed "/" always;
-        try_files /sw.js =404;
-    }
-
-    location = /manifest.webmanifest {
-${sec}
-        default_type application/manifest+json;
-        add_header Cache-Control "no-cache" always;
-        try_files /manifest.webmanifest =404;
-    }
-
-    # assets: свежие из проекта, иначе собранные
-    location ^~ /assets/ {
-${sec}
-        root /var/www/blinvpn-panel/current/live;
-        add_header Cache-Control "public, max-age=600" always;
-        try_files \$uri @built_assets;
-    }
-    location @built_assets {
-${sec}
-        root /var/www/blinvpn-panel/current/html;
-        add_header Cache-Control "public, max-age=604800" always;
-    }
-
-    location ~* \.(js|css|woff2?|png|jpg|jpeg|svg|ico|webp|gif)\$ {
-${sec}
-        add_header Cache-Control "public, max-age=604800" always;
-        try_files \$uri =404;
-    }
+${panel_domain} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+		defer
+	}
+	# вложения поддержки: до 50 мб
+	request_body {
+		max_size 55MB
+	}
+	route {
+		# API панели → сервер бота по HTTPS (сертификат проверяется), с секретом шлюза
+		handle /api/panel* {
+			reverse_proxy https://${bot_ip} {
+				header_up Host ${miniapp_domain}
+				header_up X-Real-IP {client_ip}
+				header_up X-Forwarded-For {client_ip}
+				header_up X-Panel-Gateway "${PR_SECRET}"
+				header_up -CF-Connecting-IP
+				header_up -True-Client-IP
+				flush_interval -1
+				transport http {
+					tls_server_name ${miniapp_domain}
+					dial_timeout 15s
+				}
+			}
+		}
+		# остальное API панели не нужно
+		handle /api* {
+			respond 404
+		}
+		handle /node.sh {
+			root * /var/www/blinvpn-panel/current/html
+			header Content-Type "text/plain; charset=utf-8"
+			header Cache-Control "no-store"
+			file_server
+		}
+		handle /sw.js {
+			root * /var/www/blinvpn-panel/current/html
+			header Cache-Control "no-cache"
+			header Service-Worker-Allowed "/"
+			file_server
+		}
+		handle /manifest.webmanifest {
+			root * /var/www/blinvpn-panel/current/html
+			header Content-Type "application/manifest+json"
+			header Cache-Control "no-cache"
+			file_server
+		}
+		# assets: свежие из проекта, иначе собранные
+		@live_asset {
+			path /assets/*
+			file {
+				root /var/www/blinvpn-panel/current/live
+			}
+		}
+		handle @live_asset {
+			root * /var/www/blinvpn-panel/current/live
+			header Cache-Control "public, max-age=600"
+			file_server
+		}
+		@static path *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.svg *.ico *.webp *.gif
+		handle @static {
+			root * /var/www/blinvpn-panel/current/html
+			header Cache-Control "public, max-age=604800"
+			file_server
+		}
+		handle {
+			root * /var/www/blinvpn-panel/current/html
+			try_files {path} /index.html
+			file_server
+		}
+	}
 }
 EOF
     )
@@ -1534,7 +1493,7 @@ panel_remote_deploy() {
     chmod 700 "$stage"
     mkdir -p "$stage/release/live"
     cid="$(sudo docker create blinvpn-panel-static:latest)"
-    if ! sudo docker cp "${cid}:/usr/share/nginx/html" "$stage/release/html"; then
+    if ! sudo docker cp "${cid}:/srv/html" "$stage/release/html"; then
         sudo docker rm -f "$cid" >/dev/null 2>&1 || true
         sudo rm -rf "$stage"
         log_error "Не удалось извлечь статику панели из образа."
@@ -1547,7 +1506,7 @@ panel_remote_deploy() {
         mkdir -p "$stage/release/live/assets"
     fi
     sudo tar -C "$stage/release" --owner=0 --group=0 -czf "$stage/release.tgz" .
-    _pr_render_nginx "$panel_domain" "$miniapp_domain" "$bot_ip" "$stage/nginx.conf"
+    _pr_render_caddy "$panel_domain" "$miniapp_domain" "$bot_ip" "$stage/site.caddy"
 
     local sudo_r inc
     sudo_r="$(_pr_sudo)"
@@ -1560,7 +1519,7 @@ panel_remote_deploy() {
     log_info "Загрузка на ${PR_HOST}..."
     local ok=1
     sudo cat "$stage/release.tgz" | _pr_ssh "${sudo_r} sh -c 'umask 077; cat > ${inc}/release.tgz'" || ok=0
-    [[ $ok -eq 1 ]] && { _pr_ssh "${sudo_r} sh -c 'umask 077; cat > ${inc}/nginx.conf'" < "$stage/nginx.conf" || ok=0; }
+    [[ $ok -eq 1 ]] && { _pr_ssh "${sudo_r} sh -c 'umask 077; cat > ${inc}/site.caddy'" < "$stage/site.caddy" || ok=0; }
     sudo rm -rf "$stage"
     if [[ $ok -ne 1 ]]; then
         _pr_ssh "${sudo_r} rm -rf ${inc}" >/dev/null 2>&1 || true
@@ -1596,16 +1555,6 @@ panel_remote_check_dns() {
     fi
 }
 
-# применить nginx бота в нужном режиме
-apply_bot_nginx() {
-    local mini="$1" panel="$2"
-    if panel_is_remote && panel_remote_load; then
-        configure_nginx "$mini" "$panel" "$NGINX_CONF" "$NGINX_LINK" "$PR_EGRESS_IP" "$PR_SECRET"
-    else
-        configure_nginx "$mini" "$panel" "$NGINX_CONF" "$NGINX_LINK"
-    fi
-}
-
 # перенос существующей панели на отдельный сервер
 move_panel_to_remote_flow() {
     section "Перенос панели на отдельный сервер"
@@ -1622,15 +1571,13 @@ move_panel_to_remote_flow() {
     hint "Перед переносом направьте A-запись ${panel} на новый сервер панели."
     panel_remote_collect || exit 1
     panel_remote_check_dns "$panel" || exit 1
-    apply_bot_nginx "$mini" "$panel"
+    proxy_up "$mini" "$panel" "$email" || exit 1
     if ! panel_remote_deploy "$mini" "$panel" "$email"; then
         log_warn "Сервер бота уже переключён на удалённую панель. Исправьте ошибку и запустите install.sh → «Панель на отдельном сервере» ещё раз."
         exit 1
     fi
     dc stop panel >/dev/null 2>&1 || true
-    if [[ -d "/etc/letsencrypt/live/${panel}" ]] && confirm "Удалить сертификат ${panel} с этого сервера (он теперь на сервере панели)? (y/n): "; then
-        sudo certbot delete --cert-name "$panel" --non-interactive >/dev/null 2>&1 || true
-    fi
+    cleanup_legacy_certbot "$panel"
     log_success "\nГотово: панель — https://${panel} (сервер ${PR_HOST})."
 }
 
@@ -1643,10 +1590,11 @@ NGINX_LINK="/etc/nginx/sites-enabled/${PROJECT_DIR}.conf"
 log_success "--- Установка / обновление BatmanVPN ---"
 
 # обновление существующей установки
-if [[ -f "$NGINX_CONF" ]]; then
+# установка до перехода на Caddy определяется по конфигу nginx
+if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     log_info "\nОбнаружена существующая конфигурация BatmanVPN."
     if [[ ! -d "$PROJECT_DIR" ]]; then
-        log_error "Nginx-конфиг есть, но каталог «${PROJECT_DIR}» отсутствует. Удалите $NGINX_CONF и повторите установку."
+        log_error "Конфиг BatmanVPN есть (${CADDY_SITE} или ${NGINX_CONF}), но каталог «${PROJECT_DIR}» отсутствует. Удалите конфиг и повторите установку."
         exit 1
     fi
     cd "$PROJECT_DIR"
@@ -1665,20 +1613,26 @@ if [[ -f "$NGINX_CONF" ]]; then
         dc restart api webhook bot monitor 2>/dev/null || true
         install_host_runner
 
-        if [[ -f "$NGINX_CONF" ]]; then
-            _upd_mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || get_env_var WEBHOOK_DOMAIN .env 2>/dev/null || true)"
-            _upd_panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
-            if [[ -n "$_upd_mini" && -n "$_upd_panel" ]]; then
-                apply_bot_nginx "$_upd_mini" "$_upd_panel"
-            else
-                sudo nginx -t && sudo systemctl reload nginx || true
+        _upd_mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || get_env_var WEBHOOK_DOMAIN .env 2>/dev/null || true)"
+        _upd_panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+        _upd_email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
+        if [[ -n "$_upd_mini" && -n "$_upd_panel" ]]; then
+            # с nginx-версии переезжаем на Caddy автоматически (при ошибке nginx возвращается)
+            if [[ -z "$_upd_email" ]]; then
+                prompt "Email для Let's Encrypt: " _upd_email
+                set_env_var SSL_EMAIL "$_upd_email"
             fi
+            if ! proxy_up "$_upd_mini" "$_upd_panel" "$_upd_email"; then
+                log_error "Не удалось применить Caddy. Контейнеры обновлены; прокси оставлен как был."
+                exit 1
+            fi
+        else
+            log_warn "В .env нет MINIAPP_DOMAIN/PANEL_DOMAIN — прокси не перенастроен."
         fi
 
         # панель на отдельном сервере: выкатить новую версию туда
         if panel_is_remote; then
             dc stop panel >/dev/null 2>&1 || true
-            _upd_email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
             if ! panel_remote_deploy "$_upd_mini" "$_upd_panel" "$_upd_email"; then
                 log_warn "Бот обновлён, но панель на отдельном сервере — нет. Повторите: install.sh → «Панель на отдельном сервере»."
             fi
@@ -1720,7 +1674,7 @@ if [[ -f "$NGINX_CONF" ]]; then
                     panel_remote_collect || exit 1
                     panel_remote_check_dns "$_m_panel" || exit 1
                 fi
-                apply_bot_nginx "$_m_mini" "$_m_panel"
+                proxy_up "$_m_mini" "$_m_panel" "$_m_email" || exit 1
                 panel_remote_deploy "$_m_mini" "$_m_panel" "$_m_email" || exit 1
                 dc stop panel >/dev/null 2>&1 || true
             else
@@ -1760,7 +1714,6 @@ log_info "\nСуществующая конфигурация не найден�
 ensure_packages
 ensure_services
 ensure_compose
-ensure_certbot_nginx
 
 log_info "\nШаг 2: клонирование репозитория"
 if [[ ! -d "$PROJECT_DIR/.git" ]]; then
@@ -1781,8 +1734,7 @@ prompt "Домен панели (например panel.example.com): " USER_PAN
 PANEL_DOMAIN=$(sanitize_domain "$USER_PANEL_DOMAIN_INPUT")
 [[ -n "$PANEL_DOMAIN" ]] || { log_error "Некорректный домен панели."; exit 1; }
 
-prompt "Email для Let's Encrypt: " EMAIL
-[[ -n "$EMAIL" ]] || { log_error "Email обязателен."; exit 1; }
+prompt_valid "Email для Let's Encrypt: " EMAIL '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' "Email вида name@example.com"
 
 PANEL_REMOTE=0
 echo
@@ -1813,8 +1765,7 @@ elif [[ -n "$SERVER_IP" && -n "$PANEL_DOMAIN_IP" && "$SERVER_IP" != "$PANEL_DOMA
     log_warn "DNS ${PANEL_DOMAIN} не совпадает с IP сервера."
     confirm "Продолжить? (y/n): " || exit 1
 fi
-LOCAL_CERT_DOMAINS=("$DOMAIN")
-[[ $PANEL_REMOTE -eq 1 ]] || LOCAL_CERT_DOMAINS+=("$PANEL_DOMAIN")
+
 
 if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active'; then
     log_warn "UFW активен — открываю порты 80 и 443, закрываю внутренние."
@@ -1825,44 +1776,9 @@ if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active';
     sudo ufw deny "${WEBHOOK_PORT:-5000}/tcp" 2>/dev/null || true
 fi
 
-log_info "\nПолучение SSL-сертификатов..."
-
-TEMP_CONF="/tmp/blinvpn_certbot.conf"
-sudo tee "$TEMP_CONF" >/dev/null <<EOF
-server {
-    listen 80;
-    server_name ${LOCAL_CERT_DOMAINS[*]};
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-EOF
-
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo rm -f "$NGINX_LINK"
-sudo ln -sf "$TEMP_CONF" "$NGINX_LINK"
-sudo nginx -t && sudo systemctl reload nginx
-sudo mkdir -p /var/www/html/.well-known/acme-challenge
-
-for d in "${LOCAL_CERT_DOMAINS[@]}"; do
-    if [[ -d "/etc/letsencrypt/live/${d}" ]]; then
-        log_success "✔ сертификат для ${d} уже есть."
-    else
-        log_info "Выпуск сертификата для ${d}..."
-        acme_preflight "$d" || exit 1
-        sudo certbot certonly --webroot -w /var/www/html -d "$d" \
-            --email "$EMAIL" --agree-tos --non-interactive
-        log_success "✔ сертификат для ${d} получен."
-    fi
-done
-
-sudo rm -f "$TEMP_CONF"
-
-log_info "\nШаг 4: Nginx"
-apply_bot_nginx "$DOMAIN" "$PANEL_DOMAIN"
+log_info "\nШаг 4: Caddy и SSL-сертификаты"
+# сертификаты Caddy выпускает и продлевает сам
+proxy_up "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" || exit 1
 
 log_info "\nШаг 5: .env"
 if [[ -f ".env" ]]; then
@@ -1895,7 +1811,7 @@ if [[ $PANEL_REMOTE -eq 1 ]]; then
     dc stop panel >/dev/null 2>&1 || true
     # API должен подняться: проверка шлюза ждёт ответ 401
     for _i in $(seq 1 30); do
-        curl -fsS -m 3 "http://127.0.0.1:${API_PORT:-8000}/api/health" >/dev/null 2>&1 && break
+        curl -fsS --noproxy "*" -m 3 "http://127.0.0.1:${API_PORT:-8000}/api/health" >/dev/null 2>&1 && break
         sleep 2
     done
     if ! panel_remote_deploy "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL"; then
