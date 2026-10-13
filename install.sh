@@ -504,20 +504,19 @@ _caddy_api_headers() {
 EOF
 }
 
-# порт не 443: проверка TLS-ALPN идёт только на 443 (там может быть, например, Xray) — оставляем HTTP-01 через порт 80
+# порт не 443: проверка TLS-ALPN идёт только на 443 (там может быть, например, Xray) — сертификат через HTTP-01 на порту 80
 _caddy_tls_block() {
     [[ "$HTTPS_PORT" == "443" ]] && return 0
     printf '\ttls {\n\t\tissuer acme {\n\t\t\tdisable_tlsalpn_challenge\n\t\t}\n\t}\n'
 }
 
-# configure_caddy <miniapp> <panel> [<ip_сервера_панели> <секрет_шлюза>]
 # с двумя последними аргументами панель живёт на отдельном сервере: здесь её нет,
 # а /api/panel открыт только для IP сервера панели с секретным заголовком.
-configure_caddy() {
-    local miniapp_domain="$1" panel_domain="$2" remote_ip="${3:-}" gw_secret="${4:-}"
+# render_bot_caddy <файл> <miniapp> <panel> [<ip_сервера_панели> <секрет_шлюза>]
+render_bot_caddy() {
+    local tmp="$1" miniapp_domain="$2" panel_domain="$3" remote_ip="${4:-}" gw_secret="${5:-}"
     local remote=0
     [[ -n "$remote_ip" && -n "$gw_secret" ]] && remote=1
-    log_info "\nНастройка Caddy (HTTPS)"
 
     local gw_block
     if [[ $remote -eq 1 ]]; then
@@ -542,9 +541,8 @@ configure_caddy() {
         gw_block="		# /api/panel только на домене панели"
     fi
 
-    local tmp; tmp="$(mktemp)"; chmod 600 "$tmp"
     local tls_block; tls_block="$(_caddy_tls_block)"
-    cat > "$tmp" <<EOF
+    ( umask 077; cat > "$tmp" <<EOF
 # BatmanVPN — сгенерировано install.sh (правки затрутся при обновлении)
 
 (blin_sec) {
@@ -593,6 +591,7 @@ $(_caddy_api_headers)
 	}
 }
 EOF
+    )
     if [[ $remote -eq 0 ]]; then
         cat >> "$tmp" <<EOF
 
@@ -623,6 +622,13 @@ $(_caddy_api_headers)
 }
 EOF
     fi
+}
+
+# configure_caddy <miniapp> <panel> [<ip_сервера_панели> <секрет_шлюза>]
+configure_caddy() {
+    log_info "\nНастройка Caddy (HTTPS)"
+    local tmp; tmp="$(mktemp)"; chmod 600 "$tmp"
+    render_bot_caddy "$tmp" "$@"
     if ! caddy_apply_site "$tmp"; then
         rm -f "$tmp"
         return 1
@@ -661,8 +667,167 @@ apply_bot_proxy() {
     fi
 }
 
-# полный подъём прокси: Caddy, главный файл, порты, сайт, сертификаты. При ошибке nginx возвращается.
+# ── режим прокси: caddy (автонастройка) | manual (настраиваете сами по инструкции) ──
+PROXY_MODE="${PROXY_MODE:-caddy}"
+PROXY_DIR="proxy"
+
+load_proxy_mode() {
+    local m
+    m="$(get_env_var PROXY_MODE .env 2>/dev/null || true)"
+    PROXY_MODE="${m:-caddy}"
+    [[ "$PROXY_MODE" == "manual" ]] || PROXY_MODE="caddy"
+}
+
+ask_proxy_mode() {
+    echo
+    hint "Установщик может сам поставить и настроить Caddy (HTTPS, сертификаты, маршруты)."
+    hint "Если у вас свой прокси (nginx, Caddy, Traefik…) — пропустите: будет инструкция и готовый пример конфига."
+    if confirm "Настроить Caddy автоматически? (y — да, n — настрою сам): "; then
+        PROXY_MODE="caddy"
+    else
+        PROXY_MODE="manual"
+    fi
+}
+
+# прокси: автонастройка Caddy или инструкция для ручной настройки
 proxy_up() {
+    if [[ "$PROXY_MODE" == "manual" ]]; then
+        manual_proxy_instructions "$@"
+        return 0
+    fi
+    caddy_proxy_up "$@"
+}
+
+# инструкция + пример конфига для ручной настройки прокси
+manual_proxy_instructions() {
+    local mini="$1" panel="$2" remote=0 example readme
+    panel_is_remote && panel_remote_load && remote=1
+    mkdir -p "$PROXY_DIR"; chmod 700 "$PROXY_DIR"
+    example="${PROXY_DIR}/blinvpn.caddy.example"
+    readme="${PROXY_DIR}/README.txt"
+    if [[ $remote -eq 1 ]]; then
+        render_bot_caddy "$example" "$mini" "$panel" "$PR_EGRESS_IP" "$PR_SECRET"
+    else
+        render_bot_caddy "$example" "$mini" "$panel"
+    fi
+    chmod 600 "$example"
+
+    local mini_url panel_url
+    mini_url="$(pub_url "$mini")"; panel_url="$(pub_url "$panel")"
+    ( umask 077; {
+cat <<EOF
+BatmanVPN — ручная настройка прокси (HTTPS)
+===========================================
+Установщик Caddy не трогал. Настройте свой прокси по правилам ниже.
+Готовый пример для Caddy: ${PWD}/${example}
+(для nginx/Traefik — те же правила)$( [[ "$HTTPS_PORT" != "443" ]] && printf '\nПорт не 443: сертификат получается через порт 80 (он должен быть свободен), либо укажите свои файлы в «tls …».' )
+
+Адреса (должны совпадать с .env: MINIAPP_URL, PANEL_URL, HTTPS_PORT=${HTTPS_PORT}):
+  мини-приложение: ${mini_url}
+  панель:          ${panel_url}$( [[ $remote -eq 1 ]] && printf ' (на отдельном сервере %s — там установщик настроит всё сам)' "$PR_HOST" )
+
+Сервисы BatmanVPN слушают только 127.0.0.1:
+  127.0.0.1:9741  мини-приложение (статика)
+  127.0.0.1:8000  API
+  127.0.0.1:5000  уведомления ЮKassa
+  127.0.0.1:9742  панель (статика)
+
+1) Домен мини-приложения (${mini}), HTTPS на порту ${HTTPS_PORT}:
+   /api/internal*  → 404 (служебное, наружу не открывать)
+   /api/panel*     → 404$( [[ $remote -eq 1 ]] && printf ' (кроме шлюза панели, п.3)' )
+   /api*           → 127.0.0.1:8000
+   /yookassa*      → 127.0.0.1:5000
+   всё остальное   → 127.0.0.1:9741
+   НЕ ставить X-Frame-Options (мини-приложение открывается внутри Telegram).
+EOF
+if [[ $remote -eq 0 ]]; then
+cat <<EOF
+
+2) Домен панели (${panel}), HTTPS на порту ${HTTPS_PORT}:
+   /api/internal*  → 404
+   /api*           → 127.0.0.1:8000
+   всё остальное   → 127.0.0.1:9742
+   Заголовок ответа: X-Frame-Options: DENY
+EOF
+else
+cat <<EOF
+
+2) Панель — на отдельном сервере ${PR_HOST}; на этом сервере её домен не нужен.
+
+3) Шлюз панели на домене мини-приложения (ОБЯЗАТЕЛЬНО до /api/panel → 404):
+   пропускать /api/panel* на 127.0.0.1:8000, только если ОДНОВРЕМЕННО:
+     - запрос пришёл с IP ${PR_EGRESS_IP} (адрес соединения, не заголовок);
+     - заголовок X-Panel-Gateway равен секрету PANEL_GATEWAY_SECRET из ${PWD}/${PANEL_REMOTE_FILE}.
+   Для таких запросов: X-Real-IP и X-Forwarded-For = значение входящего X-Real-IP,
+   X-Panel-Gateway к API не передавать. Остальным — 404.
+   Сервер панели ходит сюда по https://<IP этого сервера>:${HTTPS_PORT} c Host: ${mini} — сертификат должен быть валидным.
+EOF
+fi
+cat <<EOF
+
+Для всех запросов к API (8000) и ЮKassa (5000) — обязательно:
+   X-Real-IP        = IP клиента (перезаписать, не доверять входящему)
+   X-Forwarded-For  = IP клиента (перезаписать)
+   CF-Connecting-IP, True-Client-IP, X-Panel-Gateway — удалить
+   (по ним API считает IP для лимитов входа: без этого лимиты можно обойти)
+Размер тела запроса: до 55 МБ (вложения поддержки).
+Рекомендуется: Strict-Transport-Security, X-Content-Type-Options: nosniff, Referrer-Policy.
+
+Проверка после настройки:
+   curl -sI ${mini_url}/                      → 200
+   curl -s  -o /dev/null -w '%{http_code}' ${mini_url}/api/internal/x   → 404
+   curl -s  -o /dev/null -w '%{http_code}' ${mini_url}/api/panel/auth/me → 404
+EOF
+cat <<EOF
+   curl -s  -o /dev/null -w '%{http_code}' ${panel_url}/api/panel/auth/me → 401$( [[ $remote -eq 1 ]] && printf '  (через сервер панели — значит шлюз работает)' )
+EOF
+cat <<EOF
+
+ЮKassa — адрес уведомлений: ${mini_url}/yookassa (только порты 443/8443).
+Вернуться к автонастройке: install.sh → «Режим прокси».
+EOF
+    } > "$readme" )
+    section "Прокси — ручная настройка"
+    sed 's/^/  /' "$readme"
+    echo
+    log_success "✔ Инструкция: ${PWD}/${readme}"
+    log_success "✔ Пример для Caddy: ${PWD}/${example}"
+    hint "Пример содержит секрет шлюза (если панель на отдельном сервере) — права 600, не публикуйте."
+}
+
+# переключение режима прокси у готовой установки
+switch_proxy_mode_flow() {
+    section "Режим прокси"
+    local mini panel email
+    mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
+    panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+    email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
+    [[ -n "$mini" && -n "$panel" ]] || { log_error "В .env нет MINIAPP_DOMAIN/PANEL_DOMAIN."; exit 1; }
+    if [[ "$PROXY_MODE" == "manual" ]]; then
+        log_info "Сейчас: ручная настройка."
+        confirm "Перейти на автонастройку Caddy? Свой прокси на портах 80/${HTTPS_PORT} нужно будет остановить. (y/n): " || return 0
+        if [[ -z "$email" ]]; then prompt "Email для Let's Encrypt: " email; set_env_var SSL_EMAIL "$email"; fi
+        PROXY_MODE="caddy"
+        caddy_proxy_up "$mini" "$panel" "$email" || { PROXY_MODE="manual"; exit 1; }
+        set_env_var PROXY_MODE caddy
+    else
+        log_info "Сейчас: автонастройка Caddy."
+        confirm "Перейти на ручную настройку? Сайт BatmanVPN будет убран из Caddy. (y/n): " || return 0
+        PROXY_MODE="manual"
+        set_env_var PROXY_MODE manual
+        if sudo test -f "$CADDY_SITE"; then
+            sudo rm -f "$CADDY_SITE"
+            if sudo systemctl is-active --quiet caddy; then
+                sudo systemctl reload caddy || true
+            fi
+            log_info "Сайт BatmanVPN убран из Caddy (сам Caddy не удалён: sudo systemctl disable --now caddy, если не нужен)."
+        fi
+        manual_proxy_instructions "$mini" "$panel"
+    fi
+}
+
+# полный подъём прокси: Caddy, главный файл, порты, сайт, сертификаты. При ошибке nginx возвращается.
+caddy_proxy_up() {
     local mini="$1" panel="$2" email="$3"
     local -a domains=("$mini")
     panel_is_remote || domains+=("$panel")
@@ -790,6 +955,8 @@ WEBHOOK_URL=$(pub_url "$domain")
 API_URL=$(pub_url "$domain")/api
 # порт HTTPS (Caddy); смена — install.sh → «Сменить порт»
 HTTPS_PORT=${HTTPS_PORT}
+# прокси: caddy — настраивает установщик, manual — вручную (инструкция в proxy/README.txt)
+PROXY_MODE=${PROXY_MODE}
 
 # порты сервисов
 API_PORT=8000
@@ -1584,7 +1751,10 @@ panel_remote_deploy() {
 
     log_info "Установка на сервере панели..."
     local args out
-    args="$(printf '%q ' "$panel_domain" "$email" "$inc" "$bot_ip" "$HTTPS_PORT")"
+    # ручной прокси на сервере бота: шлюз может быть ещё не настроен — его проверка не роняет установку
+    local gw_check="strict"
+    [[ "$PROXY_MODE" == "manual" ]] && gw_check="soft"
+    args="$(printf '%q ' "$panel_domain" "$email" "$inc" "$bot_ip" "$HTTPS_PORT" "$gw_check")"
     if out="$(_pr_ssh "${sudo_r} bash -s -- ${args}" < docker/panel-remote/setup.sh 2>&1)" && [[ "$(printf '%s' "$out" | tail -n1)" == "OK" ]]; then
         printf '%s\n' "$out" | sed '$d'
         log_success "✔ Панель работает: $(pub_url "$panel_domain")"
@@ -1689,8 +1859,8 @@ NGINX_LINK="/etc/nginx/sites-enabled/${PROJECT_DIR}.conf"
 log_success "--- Установка / обновление BatmanVPN ---"
 
 # обновление существующей установки
-# установка до перехода на Caddy определяется по конфигу nginx
-if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
+# установка до перехода на Caddy определяется по конфигу nginx; при ручном прокси — по .env
+if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]] || grep -qs '^PROXY_MODE=manual' "${PROJECT_DIR}/.env"; then
     log_info "\nОбнаружена существующая конфигурация BatmanVPN."
     if [[ ! -d "$PROJECT_DIR" ]]; then
         log_error "Конфиг BatmanVPN есть (${CADDY_SITE} или ${NGINX_CONF}), но каталог «${PROJECT_DIR}» отсутствует. Удалите конфиг и повторите установку."
@@ -1699,6 +1869,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     cd "$PROJECT_DIR"
     ensure_compose
     load_https_port
+    load_proxy_mode
 
     if [[ "${BLINVPN_POST_UPDATE:-}" == "1" ]]; then
         unset BLINVPN_POST_UPDATE
@@ -1722,7 +1893,10 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
                 prompt "Email для Let's Encrypt: " _upd_email
                 set_env_var SSL_EMAIL "$_upd_email"
             fi
-            if ! proxy_up "$_upd_mini" "$_upd_panel" "$_upd_email"; then
+            if [[ "$PROXY_MODE" == "manual" ]]; then
+                manual_proxy_instructions "$_upd_mini" "$_upd_panel" >/dev/null
+                log_info "Прокси настраивается вручную — инструкция обновлена: ${PWD}/${PROXY_DIR}/README.txt"
+            elif ! proxy_up "$_upd_mini" "$_upd_panel" "$_upd_email"; then
                 log_error "Не удалось применить Caddy. Контейнеры обновлены; прокси оставлен как был."
                 exit 1
             fi
@@ -1755,9 +1929,14 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
         step "3)" "Перенести панель на отдельный сервер"
     fi
     step "4)" "Сменить порт HTTPS (сейчас ${HTTPS_PORT})"
-    step "5)" "Выход"
+    if [[ "$PROXY_MODE" == "manual" ]]; then
+        step "5)" "Режим прокси: сейчас вручную → автонастройка Caddy / показать инструкцию"
+    else
+        step "5)" "Режим прокси: сейчас Caddy автоматически → настраивать вручную"
+    fi
+    step "6)" "Выход"
     echo
-    prompt "Ваш выбор [1-5] (Enter = 1): " ACTION_CHOICE
+    prompt "Ваш выбор [1-6] (Enter = 1): " ACTION_CHOICE
     ACTION_CHOICE="${ACTION_CHOICE:-1}"
 
     case "$ACTION_CHOICE" in
@@ -1788,6 +1967,10 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
             exit 0
             ;;
         5)
+            switch_proxy_mode_flow
+            exit 0
+            ;;
+        6)
             log_info "Выход без изменений."
             exit 0
             ;;
@@ -1841,6 +2024,7 @@ PANEL_DOMAIN=$(sanitize_domain "$USER_PANEL_DOMAIN_INPUT")
 
 prompt_valid "Email для Let's Encrypt: " EMAIL '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' "Email вида name@example.com"
 ask_https_port 443
+ask_proxy_mode
 
 PANEL_REMOTE=0
 echo
@@ -1882,9 +2066,13 @@ if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active';
     sudo ufw deny "${WEBHOOK_PORT:-5000}/tcp" 2>/dev/null || true
 fi
 
-log_info "\nШаг 4: Caddy и SSL-сертификаты"
-# сертификаты Caddy выпускает и продлевает сам
-proxy_up "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" || exit 1
+if [[ "$PROXY_MODE" == "caddy" ]]; then
+    log_info "\nШаг 4: Caddy и SSL-сертификаты"
+    # сертификаты Caddy выпускает и продлевает сам
+    proxy_up "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" || exit 1
+else
+    log_info "\nШаг 4: прокси — вручную (инструкция будет в конце установки)"
+fi
 
 log_info "\nШаг 5: .env"
 if [[ -f ".env" ]]; then
@@ -1892,6 +2080,8 @@ if [[ -f ".env" ]]; then
     if ! confirm "Перезаписать .env? (y/n): "; then
         log_info "Используется существующий .env."
         migrate_security_update ".env"
+        set_env_var PROXY_MODE "$PROXY_MODE"
+        set_env_var HTTPS_PORT "$HTTPS_PORT"
     else
         create_env_file "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL"
     fi
@@ -1963,3 +2153,8 @@ else
 fi
 printf "  API:              ${YELLOW}%s/api${NC}\n" "$(pub_url "$DOMAIN")"
 print_payment_webhooks "$DOMAIN"
+
+if [[ "$PROXY_MODE" == "manual" ]]; then
+    manual_proxy_instructions "$DOMAIN" "$PANEL_DOMAIN"
+    log_warn "Пока прокси не настроен, мини-приложение и панель снаружи недоступны."
+fi

@@ -12,6 +12,7 @@ EMAIL="${2:?email}"
 INCOMING="${3:?incoming dir}"
 BOT_IP="${4:?bot server ip}"
 PORT="${5:-443}"
+GW_CHECK="${6:-strict}"   # soft — прокси на сервере бота настраивают вручную: ошибка шлюза = предупреждение
 
 WWW_ROOT="/var/www/blinvpn-panel"
 CADDY_MAIN="/etc/caddy/Caddyfile"
@@ -227,6 +228,11 @@ done
 code_index="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 15 --resolve "${PANEL_DOMAIN}:${PORT}:127.0.0.1" "${PANEL_URL}/" || true)"
 code_api="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 20 --resolve "${PANEL_DOMAIN}:${PORT}:127.0.0.1" "${PANEL_URL}/api/panel/auth/me" || true)"
 [[ "$code_index" == "200" ]] || fail "панель не отдаёт index.html (HTTP ${code_index})"
+if [[ "$GW_CHECK" == "soft" && "$code_api" != "401" ]]; then
+    say "ВНИМАНИЕ: шлюз до API пока не отвечает (HTTP ${code_api}) — настройте шлюз панели в прокси сервера бота по инструкции (proxy/README.txt)"
+    echo "OK"
+    exit 0
+fi
 case "$code_api" in
     401) say "шлюз до API работает" ;;
     403) fail "сервер бота отклонил панель по IP (HTTP 403). IP этого сервера для исходящих: $(curl -4 -s -m 8 https://api.ipify.org || echo ?)" ;;
