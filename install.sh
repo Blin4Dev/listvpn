@@ -239,9 +239,46 @@ CADDY_MARKER="# managed-by-blinvpn"
 CADDY_MIN_VERSION="2.7.0"
 CADDY_FALLBACK_VERSION="2.8.4"
 
-# кто держит порты 80/443
+# ── порт HTTPS (по умолчанию 443) ──
+HTTPS_PORT="${HTTPS_PORT:-443}"
+# порты, занятые сервисами BatmanVPN на 127.0.0.1 (+80 для сертификатов/редиректа)
+RESERVED_PORTS="80 3000 4100 5000 8000 9741 9742"
+
+# https://host или https://host:порт
+pub_url() { if [[ "$HTTPS_PORT" == "443" ]]; then printf 'https://%s' "$1"; else printf 'https://%s:%s' "$1" "$HTTPS_PORT"; fi; }
+# адрес сайта для Caddy: host или host:порт
+site_addr() { if [[ "$HTTPS_PORT" == "443" ]]; then printf '%s' "$1"; else printf '%s:%s' "$1" "$HTTPS_PORT"; fi; }
+
+load_https_port() {
+    local p
+    p="$(get_env_var HTTPS_PORT .env 2>/dev/null || true)"
+    HTTPS_PORT="${p:-443}"
+}
+
+# спросить порт HTTPS; Enter — 443
+ask_https_port() {
+    local p
+    while true; do
+        prompt_valid "Порт HTTPS для сайта и панели (Enter = ${1:-443}): " p '^[0-9]{1,5}$' "Порт — число" 1
+        p="${p:-${1:-443}}"
+        if (( p < 1 || p > 65535 )); then log_warn "Порт должен быть от 1 до 65535."; continue; fi
+        if [[ " $RESERVED_PORTS " == *" $p "* ]]; then log_warn "Порт ${p} занят сервисами BatmanVPN, выберите другой."; continue; fi
+        break
+    done
+    HTTPS_PORT="$p"
+    if [[ "$p" != "443" ]]; then
+        log_warn "Порт ${p}: адреса будут вида https://домен:${p}"
+        hint "Порт 80 всё равно должен быть свободен и открыт — через него Caddy получает сертификат."
+        if [[ "$p" != "8443" && "$p" != "88" ]]; then
+            hint "ЮKassa шлёт уведомления только на 443 или 8443, Telegram webhook — только на 443/80/88/8443. С этим портом оплаты через ЮKassa не подтвердятся автоматически."
+            confirm "Всё равно использовать порт ${p}? (y/n): " || { ask_https_port "$@"; return; }
+        fi
+    fi
+}
+
+# кто держит порт 80 и порт HTTPS
 _port_owners() {
-    sudo ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print "   " $4 "  " $6}' || true
+    sudo ss -ltnpH 2>/dev/null | awk -v p="$HTTPS_PORT" '$4 ~ ("[:.](80|" p ")$") {print "   " $4 "  " $6}' || true
 }
 
 _ver_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]; }
@@ -369,7 +406,7 @@ free_ports_for_caddy() {
         others+="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | sed 's#.*/##' | tr '\n' ' ' || true)"
         if [[ -n "${others// /}" ]]; then
             log_error "На сервере nginx обслуживает другие сайты: ${others}"
-            hint "Caddy и nginx не могут одновременно занимать порты 80/443. Перенесите эти сайты в Caddy или на другой сервер."
+            hint "Caddy и nginx не могут одновременно занимать порты 80/${HTTPS_PORT}. Перенесите эти сайты в Caddy или на другой сервер."
             return 1
         fi
         log_warn "Останавливаю nginx (его место займёт Caddy)…"
@@ -380,7 +417,7 @@ free_ports_for_caddy() {
     local owners
     owners="$(_port_owners | grep -v '"caddy"' || true)"
     if [[ -n "$owners" ]]; then
-        log_error "Порты 80/443 заняты другим процессом:"
+        log_error "Порты 80/${HTTPS_PORT} заняты другим процессом:"
         echo "$owners"
         hint "Остановите его (например: sudo systemctl disable --now apache2) и запустите установку снова."
         return 1
@@ -429,7 +466,7 @@ caddy_wait_https() {
     for d in "$@"; do
         log_info "Жду сертификат для ${d}…"
         for i in $(seq 1 45); do
-            if curl -s --noproxy "*" -o /dev/null -m 5 --resolve "${d}:443:127.0.0.1" "https://${d}/" 2>/dev/null; then
+            if curl -s --noproxy "*" -o /dev/null -m 5 --resolve "${d}:${HTTPS_PORT}:127.0.0.1" "$(pub_url "$d")/" 2>/dev/null; then
                 log_success "✔ HTTPS для ${d} работает."
                 continue 2
             fi
@@ -437,7 +474,7 @@ caddy_wait_https() {
         done
         log_error "Caddy не получил сертификат для ${d}."
         sudo journalctl -u caddy --no-pager -n 60 2>/dev/null | grep -iE 'error|acme|challenge|certificate' | tail -n 8 | sed 's/^/   /' || true
-        hint "Проверьте: A-запись ${d} указывает на этот сервер, порты 80 и 443 открыты, домен не проксируется через Cloudflare."
+        hint "Проверьте: A-запись ${d} указывает на этот сервер, порты 80 и ${HTTPS_PORT} открыты, домен не проксируется через Cloudflare."
         return 1
     done
 }
@@ -465,6 +502,12 @@ _caddy_api_headers() {
 			header_up -True-Client-IP
 			header_up -X-Panel-Gateway
 EOF
+}
+
+# порт не 443: проверка TLS-ALPN идёт только на 443 (там может быть, например, Xray) — оставляем HTTP-01 через порт 80
+_caddy_tls_block() {
+    [[ "$HTTPS_PORT" == "443" ]] && return 0
+    printf '\ttls {\n\t\tissuer acme {\n\t\t\tdisable_tlsalpn_challenge\n\t\t}\n\t}\n'
 }
 
 # configure_caddy <miniapp> <panel> [<ip_сервера_панели> <секрет_шлюза>]
@@ -500,6 +543,7 @@ configure_caddy() {
     fi
 
     local tmp; tmp="$(mktemp)"; chmod 600 "$tmp"
+    local tls_block; tls_block="$(_caddy_tls_block)"
     cat > "$tmp" <<EOF
 # BatmanVPN — сгенерировано install.sh (правки затрутся при обновлении)
 
@@ -514,8 +558,9 @@ configure_caddy() {
 }
 
 # мини-приложение + api + webhooks
-${miniapp_domain} {
+$(site_addr "$miniapp_domain") {
 	import blin_sec
+${tls_block}
 	# вложения поддержки: до 50 мб
 	request_body {
 		max_size 55MB
@@ -552,8 +597,9 @@ EOF
         cat >> "$tmp" <<EOF
 
 # панель
-${panel_domain} {
+$(site_addr "$panel_domain") {
 	import blin_sec
+${tls_block}
 	header X-Frame-Options "DENY"
 	request_body {
 		max_size 55MB
@@ -738,10 +784,12 @@ TELEGRAM_STARS_DELIVERY=bot
 MAIL_ENABLED=0
 
 # публичные url
-MINIAPP_URL=https://${domain}
-PANEL_URL=https://${panel_domain}
-WEBHOOK_URL=https://${domain}
-API_URL=https://${domain}/api
+MINIAPP_URL=$(pub_url "$domain")
+PANEL_URL=$(pub_url "$panel_domain")
+WEBHOOK_URL=$(pub_url "$domain")
+API_URL=$(pub_url "$domain")/api
+# порт HTTPS (Caddy); смена — install.sh → «Сменить порт»
+HTTPS_PORT=${HTTPS_PORT}
 
 # порты сервисов
 API_PORT=8000
@@ -754,7 +802,7 @@ DB_PATH=data/data.db
 
 # безопасность
 ENV=production
-CORS_ORIGINS=https://${domain},https://${panel_domain},https://web.telegram.org
+CORS_ORIGINS=$(pub_url "$domain"),$(pub_url "$panel_domain"),https://web.telegram.org
 # лендинг в cors не добавляем
 TELEGRAM_INITDATA_MAX_AGE=86400
 TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET}
@@ -794,7 +842,12 @@ register_telegram_webhook() {
         return 0
     fi
 
-    local webhook_url="https://${domain}/api/telegram/webhook"
+    local webhook_url; webhook_url="$(pub_url "$domain")/api/telegram/webhook"
+    case "$HTTPS_PORT" in 443|80|88|8443) ;; *)
+        log_warn "Telegram принимает webhook только на портах 443/80/88/8443 — с портом ${HTTPS_PORT} регистрация не пройдёт."
+        hint "Оставьте TELEGRAM_STARS_DELIVERY=bot (polling) — с ним порт не важен."
+        return 0 ;;
+    esac
     local allowed_updates='["message","callback_query","pre_checkout_query","shipping_query"]'
     local secret_token
     secret_token="$(get_env_var TELEGRAM_WEBHOOK_SECRET .env 2>/dev/null || true)"
@@ -833,7 +886,7 @@ print_payment_webhooks() {
     printf "${GREEN}───────────────────────────────────────────────────────────────${NC}\n"
     printf "${BOLD}  Payment webhooks${NC}\n"
     printf "${GREEN}───────────────────────────────────────────────────────────────${NC}\n"
-    printf "  ЮKassa:           ${YELLOW}https://%s/yookassa${NC}\n" "$domain"
+    printf "  ЮKassa:           ${YELLOW}%s/yookassa${NC}\n" "$(pub_url "$domain")"
     printf "                    события: payment.succeeded, payment.canceled\n"
     printf "  Telegram Stars:   ${YELLOW}bot polling${NC} (или /api/telegram/webhook)\n"
     printf "\n"
@@ -1010,11 +1063,12 @@ update_env_domains() {
     set_env_var WEBHOOK_DOMAIN "$miniapp"
     set_env_var PANEL_DOMAIN   "$panel"
 
-    set_env_var MINIAPP_URL         "https://${miniapp}"
-    set_env_var WEBHOOK_URL         "https://${miniapp}"
-    set_env_var API_URL             "https://${miniapp}/api"
-    set_env_var PANEL_URL           "https://${panel}"
-    set_env_var CORS_ORIGINS        "https://${miniapp},https://${panel},https://web.telegram.org"
+    set_env_var MINIAPP_URL         "$(pub_url "$miniapp")"
+    set_env_var WEBHOOK_URL         "$(pub_url "$miniapp")"
+    set_env_var API_URL             "$(pub_url "$miniapp")/api"
+    set_env_var PANEL_URL           "$(pub_url "$panel")"
+    set_env_var CORS_ORIGINS        "$(pub_url "$miniapp"),$(pub_url "$panel"),https://web.telegram.org"
+    set_env_var HTTPS_PORT          "$HTTPS_PORT"
 
     log_success "✔ .env обновлён."
 }
@@ -1101,9 +1155,9 @@ replace_domains_flow() {
     fi
 
     if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active'; then
-        log_warn "UFW активен — открываю 80 и 443."
+        log_warn "UFW активен — открываю 80 и ${HTTPS_PORT}."
         sudo ufw allow 80/tcp || true
-        sudo ufw allow 443/tcp || true
+        sudo ufw allow "${HTTPS_PORT}/tcp" || true
     fi
 
     section "Caddy и сертификаты"
@@ -1142,12 +1196,12 @@ replace_domains_flow() {
     ((${#old_domains[@]})) && cleanup_legacy_certbot "${old_domains[@]}"
 
     section "Замена доменов завершена"
-    printf "  Мини-приложение : ${YELLOW}https://%s${NC}\n" "$new_miniapp"
-    printf "  Панель          : ${YELLOW}https://%s${NC}\n" "$new_panel"
+    printf "  Мини-приложение : ${YELLOW}%s${NC}\n" "$(pub_url "$new_miniapp")"
+    printf "  Панель          : ${YELLOW}%s${NC}\n" "$(pub_url "$new_panel")"
     if [[ "$new_miniapp" != "$cur_miniapp" ]]; then
         echo
         log_warn "Обновите Web App URL в @BotFather:"
-        printf "     ${CYAN}https://%s${NC}\n" "$new_miniapp"
+        printf "     ${CYAN}%s${NC}\n" "$(pub_url "$new_miniapp")"
     fi
 }
 
@@ -1381,7 +1435,8 @@ _pr_render_caddy() {
     local panel_domain="$1" miniapp_domain="$2" bot_ip="$3" out="$4"
     ( umask 077; cat > "$out" <<EOF
 # BatmanVPN — панель (сгенерировано install.sh на сервере бота; правки затрутся при обновлении)
-${panel_domain} {
+$(site_addr "$panel_domain") {
+$(_caddy_tls_block)
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Frame-Options "DENY"
@@ -1397,7 +1452,7 @@ ${panel_domain} {
 	route {
 		# API панели → сервер бота по HTTPS (сертификат проверяется), с секретом шлюза
 		handle /api/panel* {
-			reverse_proxy https://${bot_ip} {
+			reverse_proxy https://${bot_ip}:${HTTPS_PORT} {
 				header_up Host ${miniapp_domain}
 				header_up X-Real-IP {client_ip}
 				header_up X-Forwarded-For {client_ip}
@@ -1529,10 +1584,10 @@ panel_remote_deploy() {
 
     log_info "Установка на сервере панели..."
     local args out
-    args="$(printf '%q ' "$panel_domain" "$email" "$inc" "$bot_ip")"
+    args="$(printf '%q ' "$panel_domain" "$email" "$inc" "$bot_ip" "$HTTPS_PORT")"
     if out="$(_pr_ssh "${sudo_r} bash -s -- ${args}" < docker/panel-remote/setup.sh 2>&1)" && [[ "$(printf '%s' "$out" | tail -n1)" == "OK" ]]; then
         printf '%s\n' "$out" | sed '$d'
-        log_success "✔ Панель работает: https://${panel_domain}"
+        log_success "✔ Панель работает: $(pub_url "$panel_domain")"
         return 0
     fi
     printf '%s\n' "$out"
@@ -1578,7 +1633,51 @@ move_panel_to_remote_flow() {
     fi
     dc stop panel >/dev/null 2>&1 || true
     cleanup_legacy_certbot "$panel"
-    log_success "\nГотово: панель — https://${panel} (сервер ${PR_HOST})."
+    log_success "\nГотово: панель — $(pub_url "$panel") (сервер ${PR_HOST})."
+}
+
+# смена порта HTTPS у готовой установки
+change_port_flow() {
+    section "Смена порта HTTPS"
+    local mini panel email old="$HTTPS_PORT"
+    mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
+    panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+    email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
+    [[ -n "$mini" && -n "$panel" ]] || { log_error "В .env нет MINIAPP_DOMAIN/PANEL_DOMAIN."; exit 1; }
+    if [[ -z "$email" ]]; then
+        prompt "Email для Let's Encrypt: " email
+        set_env_var SSL_EMAIL "$email"
+    fi
+    log_info "Сейчас: порт ${old}"
+    ask_https_port "$old"
+    if [[ "$HTTPS_PORT" == "$old" ]]; then log_info "Порт не изменился."; return 0; fi
+    if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active'; then
+        sudo ufw allow "${HTTPS_PORT}/tcp" || true
+    fi
+    if ! proxy_up "$mini" "$panel" "$email"; then
+        HTTPS_PORT="$old"
+        log_warn "Возвращаю порт ${old}…"
+        proxy_up "$mini" "$panel" "$email" || true
+        exit 1
+    fi
+    update_env_domains "$mini" "$panel"
+    ensure_env_utf8 .env
+    dc up -d
+    if panel_is_remote; then
+        dc stop panel >/dev/null 2>&1 || true
+        panel_remote_deploy "$mini" "$panel" "$email" \
+            || log_warn "Панель на отдельном сервере не обновлена — повторите: install.sh → «Панель на отдельном сервере»."
+    fi
+    TELEGRAM_STARS_DELIVERY="$(get_env_var TELEGRAM_STARS_DELIVERY || true)"
+    register_telegram_webhook "$(get_env_var TELEGRAM_BOT_TOKEN || true)" "$mini"
+    if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active' && [[ "$old" != "443" ]]; then
+        sudo ufw delete allow "${old}/tcp" >/dev/null 2>&1 || true
+    fi
+    section "Порт изменён: ${old} → ${HTTPS_PORT}"
+    printf "  Мини-приложение : ${YELLOW}%s${NC}\n" "$(pub_url "$mini")"
+    printf "  Панель          : ${YELLOW}%s${NC}\n" "$(pub_url "$panel")"
+    log_warn "Обновите Web App URL в @BotFather и адрес уведомлений в ЮKassa:"
+    printf "     ${CYAN}%s${NC}   и   ${CYAN}%s/yookassa${NC}\n" "$(pub_url "$mini")" "$(pub_url "$mini")"
 }
 
 REPO_URL="${BLINVPN_REPO_URL:-https://github.com/Blin4Dev/listvpn.git}"
@@ -1599,6 +1698,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     fi
     cd "$PROJECT_DIR"
     ensure_compose
+    load_https_port
 
     if [[ "${BLINVPN_POST_UPDATE:-}" == "1" ]]; then
         unset BLINVPN_POST_UPDATE
@@ -1654,9 +1754,10 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     else
         step "3)" "Перенести панель на отдельный сервер"
     fi
-    step "4)" "Выход"
+    step "4)" "Сменить порт HTTPS (сейчас ${HTTPS_PORT})"
+    step "5)" "Выход"
     echo
-    prompt "Ваш выбор [1-4] (Enter = 1): " ACTION_CHOICE
+    prompt "Ваш выбор [1-5] (Enter = 1): " ACTION_CHOICE
     ACTION_CHOICE="${ACTION_CHOICE:-1}"
 
     case "$ACTION_CHOICE" in
@@ -1683,6 +1784,10 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
             exit 0
             ;;
         4)
+            change_port_flow
+            exit 0
+            ;;
+        5)
             log_info "Выход без изменений."
             exit 0
             ;;
@@ -1735,6 +1840,7 @@ PANEL_DOMAIN=$(sanitize_domain "$USER_PANEL_DOMAIN_INPUT")
 [[ -n "$PANEL_DOMAIN" ]] || { log_error "Некорректный домен панели."; exit 1; }
 
 prompt_valid "Email для Let's Encrypt: " EMAIL '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' "Email вида name@example.com"
+ask_https_port 443
 
 PANEL_REMOTE=0
 echo
@@ -1768,9 +1874,9 @@ fi
 
 
 if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active'; then
-    log_warn "UFW активен — открываю порты 80 и 443, закрываю внутренние."
+    log_warn "UFW активен — открываю порты 80 и ${HTTPS_PORT}, закрываю внутренние."
     sudo ufw allow 80/tcp
-    sudo ufw allow 443/tcp
+    sudo ufw allow "${HTTPS_PORT}/tcp"
     # api/webhook только на 127.0.0.1; ufw deny снаружи на всякий случай
     sudo ufw deny "${API_PORT:-8000}/tcp" 2>/dev/null || true
     sudo ufw deny "${WEBHOOK_PORT:-5000}/tcp" 2>/dev/null || true
@@ -1848,12 +1954,12 @@ printf "\n"
 printf "${GREEN}┃${NC}    ${BOLD}Установка завершена${NC}                              ${GREEN}┃${NC}\n"
 printf "\n"
 printf "${BOLD}  Адреса${NC}\n"
-printf "  Мини-приложение:  ${YELLOW}https://%s${NC}\n" "$DOMAIN"
+printf "  Мини-приложение:  ${YELLOW}%s${NC}\n" "$(pub_url "$DOMAIN")"
 if [[ $PANEL_REMOTE -eq 1 ]]; then
-    printf "  Панель:           ${YELLOW}https://%s${NC}  (сервер %s)\n" "$PANEL_DOMAIN" "$PR_HOST"
+    printf "  Панель:           ${YELLOW}%s${NC}  (сервер %s)\n" "$(pub_url "$PANEL_DOMAIN")" "$PR_HOST"
     [[ $PANEL_DEPLOY_FAILED -eq 1 ]] && printf "                    ${RED}не установлена — см. ошибку выше${NC}\n"
 else
-    printf "  Панель:           ${YELLOW}https://%s${NC}\n" "$PANEL_DOMAIN"
+    printf "  Панель:           ${YELLOW}%s${NC}\n" "$(pub_url "$PANEL_DOMAIN")"
 fi
-printf "  API:              ${YELLOW}https://%s/api${NC}\n" "$DOMAIN"
+printf "  API:              ${YELLOW}%s/api${NC}\n" "$(pub_url "$DOMAIN")"
 print_payment_webhooks "$DOMAIN"

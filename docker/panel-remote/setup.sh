@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Установка/обновление панели BatmanVPN на ОТДЕЛЬНОМ сервере (Caddy, сертификат выпускается автоматически).
 # Запускается install.sh с сервера бота по SSH (от root или через sudo -n):
-#   bash setup.sh <panel_domain> <email> <incoming_dir> <bot_server_ip>
+#   bash setup.sh <panel_domain> <email> <incoming_dir> <bot_server_ip> [<https_port>=443]
 # В <incoming_dir> уже лежат:
 #   release.tgz — статика панели (html/, live/assets/)
 #   site.caddy  — сайт Caddy (содержит секрет шлюза)
@@ -11,6 +11,7 @@ PANEL_DOMAIN="${1:?panel domain}"
 EMAIL="${2:?email}"
 INCOMING="${3:?incoming dir}"
 BOT_IP="${4:?bot server ip}"
+PORT="${5:-443}"
 
 WWW_ROOT="/var/www/blinvpn-panel"
 CADDY_MAIN="/etc/caddy/Caddyfile"
@@ -29,6 +30,8 @@ trap 'fail "строка $LINENO: команда завершилась с ош�
 [[ "$PANEL_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "некорректный домен"
 [[ "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || fail "некорректный email"
 [[ "$BOT_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "некорректный IP сервера бота"
+[[ "$PORT" =~ ^[0-9]{1,5}$ ]] && (( PORT >= 1 && PORT <= 65535 )) && [[ "$PORT" != "80" ]] || fail "некорректный порт"
+if [[ "$PORT" == "443" ]]; then PANEL_URL="https://${PANEL_DOMAIN}"; else PANEL_URL="https://${PANEL_DOMAIN}:${PORT}"; fi
 [[ "$INCOMING" == /var/lib/blinvpn-panel/incoming/* && -d "$INCOMING" ]] || fail "нет каталога с релизом"
 [[ -f "$INCOMING/release.tgz" && -f "$INCOMING/site.caddy" ]] || fail "релиз неполный"
 command -v apt-get >/dev/null 2>&1 || fail "поддерживаются только Debian/Ubuntu (apt-get)"
@@ -133,7 +136,7 @@ nginx_stopped=0
 if command -v nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
     others="$(ls -1 /etc/nginx/sites-enabled/ 2>/dev/null | grep -vxE 'default|blinvpn-panel\.conf|blinvpn-panel-acme\.conf' || true)"
     others+="$(ls -1 /etc/nginx/conf.d/*.conf 2>/dev/null | tr '\n' ' ' || true)"
-    [[ -z "${others// /}" ]] || fail "nginx на этом сервере обслуживает другие сайты (${others}) — Caddy не сможет занять порты 80/443"
+    [[ -z "${others// /}" ]] || fail "nginx на этом сервере обслуживает другие сайты (${others}) — Caddy не сможет занять порты 80/${PORT}"
     say "останавливаю nginx (его место займёт Caddy)"
     systemctl stop nginx; systemctl disable nginx >/dev/null 2>&1 || true
     nginx_stopped=1
@@ -145,15 +148,15 @@ restore_nginx() {
         systemctl start nginx || true
     fi
 }
-owners="$(ss -ltnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print $4 " " $6}' | grep -v '"caddy"' || true)"
+owners="$(ss -ltnpH 2>/dev/null | awk -v p="$PORT" '$4 ~ ("[:.](80|" p ")$") {print $4 " " $6}' | grep -v '"caddy"' || true)"
 if [[ -n "$owners" ]]; then
     restore_nginx
-    fail "порты 80/443 заняты: ${owners}"
+    fail "порты 80/${PORT} заняты: ${owners}"
 fi
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
     ufw allow 80/tcp >/dev/null || true
-    ufw allow 443/tcp >/dev/null || true
+    ufw allow "${PORT}/tcp" >/dev/null || true
 fi
 
 # ── релиз статики: атомарная замена через симлинк ──
@@ -193,7 +196,7 @@ say "Caddy настроен"
 # ── сертификат: Caddy выпускает сам, ждём ──
 ok=0
 for _ in $(seq 1 45); do
-    if curl -s --noproxy "*" -o /dev/null -m 5 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/"; then ok=1; break; fi
+    if curl -s --noproxy "*" -o /dev/null -m 5 --resolve "${PANEL_DOMAIN}:${PORT}:127.0.0.1" "${PANEL_URL}/"; then ok=1; break; fi
     sleep 3
 done
 if [[ $ok -ne 1 ]]; then
@@ -201,7 +204,7 @@ if [[ $ok -ne 1 ]]; then
     my_ip="$(curl -4 -s -m 8 https://api.ipify.org || true)"
     dns_ip="$(getent ahostsv4 "$PANEL_DOMAIN" | awk 'NR==1{print $1}')"
     restore_nginx
-    fail "Caddy не получил сертификат для ${PANEL_DOMAIN} (A-запись: ${dns_ip:-нет}, IP сервера: ${my_ip:-?}). Проверьте DNS, порты 80/443 и что домен не за Cloudflare-прокси."
+    fail "Caddy не получил сертификат для ${PANEL_DOMAIN} (A-запись: ${dns_ip:-нет}, IP сервера: ${my_ip:-?}). Проверьте DNS, порты 80/${PORT} и что домен не за Cloudflare-прокси."
 fi
 say "HTTPS работает"
 
@@ -221,14 +224,14 @@ ls -1dt "$WWW_ROOT"/releases/*/ 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | 
 done
 
 # ── проверка: статика и шлюз до сервера бота ──
-code_index="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 15 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/" || true)"
-code_api="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 20 --resolve "${PANEL_DOMAIN}:443:127.0.0.1" "https://${PANEL_DOMAIN}/api/panel/auth/me" || true)"
+code_index="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 15 --resolve "${PANEL_DOMAIN}:${PORT}:127.0.0.1" "${PANEL_URL}/" || true)"
+code_api="$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -m 20 --resolve "${PANEL_DOMAIN}:${PORT}:127.0.0.1" "${PANEL_URL}/api/panel/auth/me" || true)"
 [[ "$code_index" == "200" ]] || fail "панель не отдаёт index.html (HTTP ${code_index})"
 case "$code_api" in
     401) say "шлюз до API работает" ;;
     403) fail "сервер бота отклонил панель по IP (HTTP 403). IP этого сервера для исходящих: $(curl -4 -s -m 8 https://api.ipify.org || echo ?)" ;;
     404) fail "сервер бота не принял шлюз (HTTP 404): чужой IP или секрет — запустите установку на сервере бота ещё раз" ;;
-    502|504) fail "не удаётся подключиться к серверу бота ${BOT_IP}:443 по HTTPS (HTTP ${code_api}): фаервол или сертификат" ;;
+    502|504) fail "не удаётся подключиться к серверу бота ${BOT_IP}:${PORT} по HTTPS (HTTP ${code_api}): фаервол или сертификат" ;;
     *) fail "неожиданный ответ API через шлюз: HTTP ${code_api}" ;;
 esac
 echo "OK"
