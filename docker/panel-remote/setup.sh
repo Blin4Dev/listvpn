@@ -13,7 +13,7 @@ INCOMING="${3:?incoming dir}"
 BOT_IP="${4:?bot server ip}"
 PORT="${5:-443}"
 GW_CHECK="${6:-strict}"
-PROXY_MODE="${7:-caddy}"  # manual — Caddy/сертификаты не трогаем: только файлы панели + инструкция   # soft — прокси на сервере бота настраивают вручную: ошибка шлюза = предупреждение
+PROXY_MODE="${7:-caddy}"  # manual — Caddy/сертификаты не трогаем: только файлы панели + инструкция
 
 WWW_ROOT="/var/www/blinvpn-panel"
 CADDY_MAIN="/etc/caddy/Caddyfile"

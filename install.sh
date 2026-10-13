@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
+INSTALLER_VERSION="2026.10.13-2"
+
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'
@@ -1873,6 +1876,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
         fi
 
         log_success "\nОбновление завершено."
+        hint "Код обновлён. Если нужно другое действие (домены, панель, порт) — запустите install.sh ещё раз и выберите пункт."
         _upd_pst="$(get_env_var PANEL_SETUP_TOKEN .env 2>/dev/null || true)"
         if [[ -n "$_upd_pst" ]]; then
             log_info "PANEL_SETUP_TOKEN в .env (сброс пароля панели)."
@@ -1893,6 +1897,17 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     echo
     prompt "Ваш выбор [1-5] (Enter = 1): " ACTION_CHOICE
     ACTION_CHOICE="${ACTION_CHOICE:-1}"
+
+    # запущен свежий install.sh (например, через curl), а код в папке старый → сначала обновить
+    if [[ "$ACTION_CHOICE" =~ ^[234]$ ]] && ! grep -qF "INSTALLER_VERSION=\"${INSTALLER_VERSION}\"" ./install.sh 2>/dev/null; then
+        log_warn "Код в $(pwd) старее этого установщика — без обновления выбранное действие сработает неправильно."
+        if confirm "Обновить код сейчас (как пункт 1), затем повторить выбор? (y/n): "; then
+            ACTION_CHOICE=1
+        else
+            log_error "Отменено. Сначала выполните пункт 1 «Обновить код»."
+            exit 1
+        fi
+    fi
 
     case "$ACTION_CHOICE" in
         2)
