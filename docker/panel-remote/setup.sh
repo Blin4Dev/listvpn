@@ -12,7 +12,8 @@ EMAIL="${2:?email}"
 INCOMING="${3:?incoming dir}"
 BOT_IP="${4:?bot server ip}"
 PORT="${5:-443}"
-GW_CHECK="${6:-strict}"   # soft — прокси на сервере бота настраивают вручную: ошибка шлюза = предупреждение
+GW_CHECK="${6:-strict}"
+PROXY_MODE="${7:-caddy}"  # manual — Caddy/сертификаты не трогаем: только файлы панели + инструкция   # soft — прокси на сервере бота настраивают вручную: ошибка шлюза = предупреждение
 
 WWW_ROOT="/var/www/blinvpn-panel"
 CADDY_MAIN="/etc/caddy/Caddyfile"
@@ -53,6 +54,36 @@ if ((${#need[@]})); then
     say "устанавливаю: ${need[*]}"
     apt-get update -q >/dev/null
     apt-get install -y -q --no-install-recommends "${need[@]}" >/dev/null
+fi
+
+# ── ручной прокси: выкладываем только статику и примеры конфигов ──
+if [[ "$PROXY_MODE" == "manual" ]]; then
+    for f in PROXY-README.txt panel.caddy.example panel.nginx.example; do
+        [[ -f "$INCOMING/$f" ]] || fail "в релизе нет $f"
+    done
+    ts="$(date +%Y%m%d%H%M%S)"
+    rel="$WWW_ROOT/releases/$ts"
+    mkdir -p "$rel"
+    tar -xzf "$INCOMING/release.tgz" -C "$rel" --no-same-owner --no-same-permissions
+    [[ -f "$rel/html/index.html" ]] || { rm -rf "$rel"; fail "в релизе нет index.html"; }
+    chown -R root:root "$rel"
+    find "$rel" -type d -exec chmod 755 {} +
+    find "$rel" -type f -exec chmod 644 {} +
+    chmod 755 "$WWW_ROOT" "$WWW_ROOT/releases"
+    ln -sfn "$rel" "$WWW_ROOT/current.new" && mv -Tf "$WWW_ROOT/current.new" "$WWW_ROOT/current"
+    # примеры содержат секрет шлюза — только root
+    install -d -m 700 -o root -g root "$WWW_ROOT/proxy"
+    for f in PROXY-README.txt panel.caddy.example panel.nginx.example; do
+        install -m 600 -o root -g root "$INCOMING/$f" "$WWW_ROOT/proxy/$f"
+    done
+    ls -1dt "$WWW_ROOT"/releases/*/ 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while read -r old; do
+        [[ "$(readlink -f "$old")" == "$(readlink -f "$WWW_ROOT/current")" ]] && continue
+        rm -rf "$old"
+    done
+    say "файлы панели выложены: ${WWW_ROOT}/current/html ($ts)"
+    say "Caddy и сертификаты не трогал — инструкция и примеры: ${WWW_ROOT}/proxy/"
+    echo "OK"
+    exit 0
 fi
 
 # ── Caddy: официальный репозиторий, иначе бинарник с GitHub (sha512) ──
