@@ -709,12 +709,18 @@ class RemnawaveAPI:
         short = user.get("shortUuid") or user.get("short_uuid")
         if not short:
             return None
+        try:
+            import subdomain  # type: ignore  # домен ссылки из .env (VPN_SUB_DOMAIN)
+        except Exception:  # noqa: BLE001
+            subdomain = None  # type: ignore
         # иногда панель уже отдаёт готовый URL
         for key in ("subscriptionUrl", "subscription_url", "happUrl", "happ_url"):
             if user.get(key):
-                return str(user[key])
+                url = str(user[key])
+                return subdomain.vpn(url) if subdomain else url
         base = (public_base or self.base_url).rstrip("/")
-        return f"{base}/api/sub/{short}"
+        url = f"{base}/api/sub/{short}"
+        return subdomain.vpn(url) if subdomain else url
 
     def ping(self) -> bool:
         try:

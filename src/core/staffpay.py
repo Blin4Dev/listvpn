@@ -431,3 +431,68 @@ def add_payout(staff_id: int, amount: Any, note: Any, paid_on: Any) -> dict[str,
 
 def delete_payout(payout_id: int) -> None:
     db.execute("DELETE FROM staff_payouts WHERE id = ?", (int(payout_id),))
+
+
+# ── рабочие минуты (для автоштрафов) ──
+def _abs_shifts(staff_id: int, a: datetime, b: datetime) -> list[tuple[datetime, datetime, dict[str, Any]]]:
+    """смены сотрудника, пересекающие [a, b): (начало, конец, строка дня). Время — МСК."""
+    a, b = a.astimezone(MSK), b.astimezone(MSK)
+    rows = db.fetchall("SELECT * FROM staff_days WHERE staff_id = ? AND day >= ? AND day <= ? ORDER BY day",
+                       (int(staff_id), (a.date() - timedelta(days=1)).isoformat(), b.date().isoformat()))
+    out = []
+    for raw in rows:
+        r = _row(raw)
+        d0 = datetime.combine(date.fromisoformat(r["day"]), datetime.min.time(), tzinfo=MSK)
+        for iv in r["intervals"]:
+            try:
+                ma, mb = _minutes(iv[0]), _minutes(iv[1])
+            except (ValueError, IndexError, AttributeError):
+                continue
+            if mb <= ma:
+                mb += 24 * 60
+            s, e = d0 + timedelta(minutes=ma), d0 + timedelta(minutes=mb)
+            if e > a and s < b:
+                out.append((s, e, r))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def day_hours(r: dict[str, Any]) -> float:
+    total = 0
+    for iv in r.get("intervals") or []:
+        try:
+            total += _duration(iv[0], iv[1])
+        except (PayError, ValueError, IndexError, AttributeError):
+            continue
+    return total / 60
+
+
+def work_minutes(staff_id: int, a: datetime, b: datetime, need: Optional[float] = None
+                 ) -> tuple[float, Optional[dict[str, Any]]]:
+    """сколько минут смены прошло в [a, b) и (если набрали need) строка дня, на который пришлась need-я минута."""
+    if b <= a:
+        return 0.0, None
+    a = max(a, b - timedelta(days=3))
+    total, hit, cursor = 0.0, None, a
+    for s, e, r in _abs_shifts(staff_id, a, b):
+        lo, hi = max(s, cursor), min(e, b)
+        if hi <= lo:
+            continue
+        part = (hi - lo).total_seconds() / 60
+        if need is not None and hit is None and total + part >= need:
+            hit = r
+        total += part
+        cursor = hi
+    return total, hit
+
+
+def hour_rate(r: dict[str, Any]) -> float:
+    """оплата одного рабочего часа в этот день."""
+    h = day_hours(r)
+    return round(float(r.get("pay") or 0) / h, 2) if h > 0 else 0.0
+
+
+def add_auto_fine_tx(tx, staff_id: int, amount: float, reason: str) -> int:
+    cur = tx.execute("INSERT INTO staff_fines (staff_id, amount, reason, issued_by, issued_name, created_at) "
+                     "VALUES (?, ?, ?, 'auto', 'Автоштраф', ?)", (int(staff_id), round(float(amount), 2), reason[:300], _iso_now()))
+    return int(cur.lastrowid)

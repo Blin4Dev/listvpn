@@ -35,3 +35,10 @@ Telegram webhook — только на 443/80/88/8443, поэтому, если 
 Если там уже есть свой прокси (например, Remnawave занимает порты 80/443) — ответьте `n`: установщик выложит только файлы панели
 в `/var/www/blinvpn-panel/current/html` и даст инструкцию с примерами для Caddy и nginx (`/var/www/blinvpn-panel/proxy/`).
 Поменять выбор: `install.sh` → пункт 3. На сервере бота Caddy всегда настраивается автоматически.
+
+
+## Домены ссылок подписки
+
+В `.env`: `VPN_SUB_DOMAIN` — домен обычного VPN, `WHITELIST_SUB_DOMAIN` — домен белых списков.
+Бот берёт ссылку из Remnawave / FurkVPN и меняет в ней только домен: `https://domain1.com/hIeb` + `VPN_SUB_DOMAIN=domain2.com` → `https://domain2.com/hIeb`.
+Пусто — ссылка без изменений. Действует сразу для всех ссылок, в том числе уже выданных (после `docker compose up -d`).

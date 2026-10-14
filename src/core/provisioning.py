@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import urllib.parse
 import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -24,6 +25,115 @@ def is_configured() -> bool:
     if remnawave is None:
         return False
     return bool(_env("REMWAVE_API_KEY", "REMNAWAVE_TOKEN", "REMNAWAVE_API_TOKEN"))
+
+
+USERNAME_PREFIX = "batman_"
+
+
+def rw_username(user_id: int) -> str:
+    """имя пользователя в Remnawave: batman_<id пользователя в боте>."""
+    return f"{USERNAME_PREFIX}{int(user_id)}"
+
+
+def _local_user_id(telegram_id: Optional[int], email: Optional[str]) -> Optional[int]:
+    """id пользователя бота по telegram_id / email (для вызовов, где id не передали)."""
+    try:
+        try:
+            from . import database as db  # type: ignore
+        except ImportError:
+            import database as db  # type: ignore
+        row = None
+        if telegram_id:
+            row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? ORDER BY id LIMIT 1", (int(telegram_id),))
+        if not row and email:
+            row = db.fetchone("SELECT id FROM users WHERE lower(email) = lower(?) ORDER BY id LIMIT 1", (str(email),))
+        return int(row["id"]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# пользователи старого бота в Remnawave: user_<12 символов>. Других (чужие проекты на той же панели) не трогаем.
+LEGACY_PREFIX = "user_"
+
+
+def _as_list(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, dict) and "response" in data:
+        data = data["response"]
+    if isinstance(data, dict):
+        for key in ("users", "items", "data"):
+            if isinstance(data.get(key), list):
+                return [u for u in data[key] if isinstance(u, dict)]
+        return [data] if (data.get("uuid") or data.get("id")) else []
+    if isinstance(data, list):
+        return [u for u in data if isinstance(u, dict)]
+    return []
+
+
+def _users_by_telegram(client: Any, telegram_id: int) -> list[dict[str, Any]]:
+    """ВСЕ пользователи панели с этим telegramId (их может быть несколько — из разных проектов)."""
+    tg = int(telegram_id)
+    for path, params in (("/api/users/stream", {"telegramId": tg, "size": 250}),
+                         (f"/api/users/by-telegram-id/{tg}", None)):
+        try:
+            found = _as_list(client.get(path, params=params) if params else client.get(path))
+        except Exception:  # noqa: BLE001
+            continue
+        found = [u for u in found if str(u.get("telegramId") or u.get("telegram_id") or "") == str(tg)]
+        if found:
+            return found
+    # запасной вариант: просмотр страницами
+    out: list[dict[str, Any]] = []
+    try:
+        start, size = 0, 250
+        while True:
+            page = client.get_users(start=start, size=size)
+            users = _as_list(page)
+            if not users:
+                break
+            out += [u for u in users if str(u.get("telegramId") or u.get("telegram_id") or "") == str(tg)]
+            start += size
+            total = (page.get("response") or page).get("total") if isinstance(page, dict) else None
+            if (total is not None and start >= int(total)) or len(users) < size:
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _users_by_email(client: Any, email: str) -> list[dict[str, Any]]:
+    for call in (lambda: client.get("/api/users/stream", params={"email": email, "size": 250}),
+                 lambda: client.get("/api/users/by-email/" + urllib.parse.quote(email, safe="")),
+                 lambda: client.resolve_user(email=email)):
+        try:
+            found = [u for u in _as_list(call()) if str(u.get("email") or "").lower() == email.lower()]
+        except Exception:  # noqa: BLE001
+            continue
+        if found:
+            return found
+    return []
+
+
+def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[int] = None,
+           email: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """пользователь Remnawave этого бота:
+    1) по имени batman_<id> (так создаются все новые);
+    2) старые из прошлого бота — только с именем user_…, по telegram_id / email (без переименования).
+    Пользователей с другими именами не берём и не меняем."""
+    if user_id is None:
+        user_id = _local_user_id(telegram_id, email)
+    if user_id:
+        rw = _resolve_quiet(client, username=rw_username(int(user_id)))
+        if rw:
+            return rw
+    candidates: list[dict[str, Any]] = []
+    if telegram_id:
+        candidates += _users_by_telegram(client, int(telegram_id))
+    if email:
+        candidates += _users_by_email(client, str(email))
+    for u in candidates:
+        if str(u.get("username") or "").startswith(LEGACY_PREFIX) and (u.get("uuid") or u.get("id")):
+            return u
+    return None
 
 
 def _extract(user: dict[str, Any]) -> dict[str, Any]:
@@ -66,12 +176,10 @@ def provision(
 
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        # поиск: telegram → email → web_<id>
-        existing = client.find_user_by_telegram(int(telegram_id)) if telegram_id else None
-        if not existing and email:
-            existing = _resolve_quiet(client, email=email)
-        if not existing and not telegram_id and user_id:
-            existing = _resolve_quiet(client, username=f"web_{int(user_id)}")
+        # поиск: batman_<id> → (старые) telegram → email → web_<id>
+        if not user_id:
+            user_id = _local_user_id(telegram_id, email)
+        existing = lookup(client, user_id=user_id, telegram_id=telegram_id, email=email)
         squad_list = list(squads or [])
 
         if existing:
@@ -102,11 +210,11 @@ def provision(
                 except Exception:  # noqa: BLE001
                     pass
         else:
-            fallback = f"tg_{telegram_id}" if telegram_id else f"web_{int(user_id or 0)}"
-            uname = (username or fallback) if telegram_id else fallback
-            uname = "".join(c if c.isalnum() or c in "_-" else "_" for c in uname)[:36] or fallback
+            if not user_id:
+                result["error"] = "user_id_unknown"
+                return result
             user = client.create_user(
-                username=uname,
+                username=rw_username(int(user_id)),
                 expire_at=expire_at,
                 status="ACTIVE",
                 telegram_id=int(telegram_id) if telegram_id else None,
@@ -136,14 +244,7 @@ def provision(
 
 def find_user(client: Any, telegram_id: Optional[int], email: Optional[str] = None,
               user_id: Optional[int] = None) -> Optional[dict[str, Any]]:
-    rw = client.find_user_by_telegram(int(telegram_id)) if telegram_id else None
-    if isinstance(rw, dict) and "response" in rw:
-        rw = rw["response"]
-    if not rw and email:
-        rw = _resolve_quiet(client, email=email)
-    if not rw and not telegram_id and user_id:
-        rw = _resolve_quiet(client, username=f"web_{int(user_id)}")
-    return rw if isinstance(rw, dict) else None
+    return lookup(client, user_id=user_id, telegram_id=telegram_id, email=email)
 
 
 def rw_ref(rw: dict[str, Any]) -> dict[str, Any]:
@@ -209,14 +310,7 @@ def reset_traffic(telegram_id: int, email: Optional[str] = None) -> dict[str, An
         return out
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        rw = client.find_user_by_telegram(int(telegram_id)) if telegram_id else None
-        if not rw and email:
-            try:
-                rw = client.resolve_user(email=email)
-                if isinstance(rw, dict) and "response" in rw:
-                    rw = rw["response"]
-            except Exception:  # noqa: BLE001
-                rw = None
+        rw = lookup(client, telegram_id=telegram_id, email=email)
         if not isinstance(rw, dict):
             out["error"] = "user_not_found"
             return out
@@ -238,14 +332,7 @@ def user_ever_connected(telegram_id: int, email: Optional[str] = None) -> Option
         return None
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        rw = client.find_user_by_telegram(int(telegram_id)) if telegram_id else None
-        if not rw and email:
-            try:
-                rw = client.resolve_user(email=email)
-                if isinstance(rw, dict) and "response" in rw:
-                    rw = rw["response"]
-            except Exception:  # noqa: BLE001
-                rw = None
+        rw = lookup(client, telegram_id=telegram_id, email=email)
         if not isinstance(rw, dict):
             return None
         # online/traffic могут быть в userTraffic или на верхнем уровне
@@ -281,14 +368,7 @@ def user_first_connected_at(telegram_id: int, email: Optional[str] = None) -> Op
         return None
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        rw = client.find_user_by_telegram(int(telegram_id)) if telegram_id else None
-        if not rw and email:
-            try:
-                rw = client.resolve_user(email=email)
-                if isinstance(rw, dict) and "response" in rw:
-                    rw = rw["response"]
-            except Exception:  # noqa: BLE001
-                rw = None
+        rw = lookup(client, telegram_id=telegram_id, email=email)
         if not isinstance(rw, dict):
             return None
         ut = rw.get("userTraffic") if isinstance(rw.get("userTraffic"), dict) else {}
@@ -305,14 +385,7 @@ def set_enabled(telegram_id: Optional[int], enabled: bool, email: Optional[str] 
         return {"ok": False, "error": "remnawave_not_configured"}
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        rw = client.find_user_by_telegram(int(telegram_id)) if telegram_id else None
-        if not rw and email:
-            try:
-                rw = client.resolve_user(email=email)
-                if isinstance(rw, dict) and "response" in rw:
-                    rw = rw["response"]
-            except Exception:  # noqa: BLE001
-                rw = None
+        rw = lookup(client, telegram_id=telegram_id, email=email)
         if not isinstance(rw, dict) or rw.get("id") is None:
             return {"ok": True, "already_absent": True}
         uid = int(rw["id"])
@@ -330,14 +403,7 @@ def delete_user(telegram_id: Optional[int], email: Optional[str] = None) -> dict
         return {"ok": False, "error": "remnawave_not_configured"}
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        rw = client.find_user_by_telegram(int(telegram_id)) if telegram_id else None
-        if not rw and email:
-            try:
-                rw = client.resolve_user(email=email)
-                if isinstance(rw, dict) and "response" in rw:
-                    rw = rw["response"]
-            except Exception:  # noqa: BLE001
-                rw = None
+        rw = lookup(client, telegram_id=telegram_id, email=email)
         if not isinstance(rw, dict):
             return {"ok": True, "already_absent": True}
         uid = rw.get("id")

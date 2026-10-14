@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.13-2"
+INSTALLER_VERSION="2026.10.14-4"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -746,6 +746,13 @@ create_env_file() {
     prompt_valid "  ${BOLD}API Token${NC}  (из панели Remnawave): " REMWAVE_API_KEY \
         '^[!-~]{10,}$' "Токен — латинские символы без пробелов (Remnawave → API Tokens)"
 
+    section "Домены ссылок подписки"
+    hint "Пусто — ссылка как её отдаёт Remnawave / FurkVPN. Иначе домен в ссылке заменится на ваш, путь останется."
+    prompt_valid "  ${BOLD}Домен обычного VPN${NC} (например sub.example.com, Enter — не менять): " VPN_SUB_DOMAIN \
+        '^[A-Za-z0-9.-]+(:[0-9]{1,5})?$' "Только домен, без https:// и пути" 1
+    prompt_valid "  ${BOLD}Домен белых списков${NC} (Enter — не менять): " WHITELIST_SUB_DOMAIN \
+        '^[A-Za-z0-9.-]+(:[0-9]{1,5})?$' "Только домен, без https:// и пути" 1
+
     section "Белые списки · FurkVPN"
     hint "Ключ партнёра из @VPNpartenrsbot (карточка приложения). Пусто — белые списки будут скрыты, ключ можно добавить в .env позже."
     prompt_valid "  ${BOLD}FURK API-ключ${NC} (Enter — пропустить): " FURK_API_KEY \
@@ -771,6 +778,11 @@ VITE_BOT_USERNAME=${BOT_USERNAME}
 # панель remnawave
 REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
+
+# домены ссылок подписки: путь берётся из Remnawave / FurkVPN, домен — отсюда (пусто — без замены)
+# пример: Remnawave отдала https://domain1.com/hIeb, VPN_SUB_DOMAIN=domain2.com → пользователь получит https://domain2.com/hIeb
+VPN_SUB_DOMAIN=${VPN_SUB_DOMAIN:-}
+WHITELIST_SUB_DOMAIN=${WHITELIST_SUB_DOMAIN:-}
 
 # белые списки: FurkVPN Partner API v2 (https://api.furkvpn.com/docs/v2)
 FURK_API_KEY=${FURK_API_KEY}
@@ -983,6 +995,9 @@ fix_container_data_permissions() {
 
 migrate_security_update() {
     local file="${1:-.env}"
+    if [[ -f "$file" ]]; then
+        grep -q '^VPN_SUB_DOMAIN=' "$file" || printf '\n# домены ссылок подписки (пусто — без замены): путь из Remnawave/FurkVPN, домен отсюда\nVPN_SUB_DOMAIN=\nWHITELIST_SUB_DOMAIN=\n' >> "$file"
+    fi
     if [[ ! -f "$file" ]]; then
         log_warn "Файл ${file} не найден — миграция пропущена."
         return 0

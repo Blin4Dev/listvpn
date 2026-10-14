@@ -382,6 +382,20 @@ CREATE TABLE IF NOT EXISTS staff_payouts (
     FOREIGN KEY (staff_id) REFERENCES panel_staff(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_staff_payouts ON staff_payouts(staff_id, id);
+-- автоштрафы за обращения без ответа: одна запись на (обращение, ожидание, сотрудник, вид)
+-- msg_id — первое сообщение клиента без ответа; kind: warn | fine
+CREATE TABLE IF NOT EXISTS support_autofines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id INTEGER NOT NULL,
+    msg_id INTEGER NOT NULL,
+    staff_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    fine_id INTEGER,
+    amount REAL,
+    created_at TEXT NOT NULL,
+    UNIQUE (ticket_id, msg_id, staff_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_support_autofines_staff ON support_autofines(staff_id, id);
 -- push-подписки браузеров панели (Web Push)
 -- общий чат сотрудников панели (владелец, кураторы, операторы)
 CREATE TABLE IF NOT EXISTS team_messages (

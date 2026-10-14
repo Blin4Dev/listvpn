@@ -5,6 +5,7 @@ import { apiFetch, copyToClipboard, parseApiErr } from '../../lib/api';
 import { isOwner, useMe } from '../../lib/access';
 import { fmtDateTime } from '../../lib/format';
 import type { ToastType } from '../../lib/types';
+import { AutofineCard } from './AutofineCard';
 import {
   addDays, Day, hoursText, Interval, IntervalsEditor, money, monthEnd, monthStart, MonthCalendar, ROLE_RU, ruDate, ShiftBadge, spillFromPrev, StatBox, WEEK,
 } from './common';
@@ -491,6 +492,7 @@ export const StaffPage: React.FC<{ onToast: Toast }> = ({ onToast }) => {
         )}
       </PageHead>
       {owner && !data.bot_ready && <div className="badge danger" style={{ whiteSpace: 'normal' }}>Бот не настроен — коды входа сотрудникам отправлять некуда.</div>}
+      {owner && view === 'staff' && <AutofineCard onToast={onToast} onChanged={load} />}
       {view === 'journal' && owner ? <Journal staff={data.staff} /> : data.staff.length === 0 ? (
         <div className="card flex flex-col items-center sub" style={{ padding: 40, gap: 10, textAlign: 'center' }}>
           <UserPlus size={30} className="faint" /><div>Сотрудников пока нет</div>

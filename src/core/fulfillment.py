@@ -148,6 +148,11 @@ try:
 except Exception:  # noqa: BLE001
     furk = None  # type: ignore
 
+try:
+    import subdomain  # type: ignore
+except Exception:  # noqa: BLE001
+    subdomain = None  # type: ignore
+
 
 def whitelist_price(months: int = 1) -> float:
     """полная цена тарифа «ВПН + белые списки» на months (0 = нет такого периода)."""
@@ -185,7 +190,10 @@ def user_whitelist(user: Optional[dict[str, Any]]) -> dict[str, Any]:
     row = db.fetchone("SELECT anti_key, anti_key_id, anti_expires_at FROM users WHERE id = ?", (int(user["id"]),)) or {}
     until = parse_iso(row.get("anti_expires_at"))
     key_id = row.get("anti_key_id") or (furk.key_id_from_url(row["anti_key"]) if (furk and row.get("anti_key")) else None)
-    return {"key": row.get("anti_key"), "key_id": key_id, "until": row.get("anti_expires_at"),
+    key_url = row.get("anti_key")
+    if key_url and subdomain is not None:
+        key_url = subdomain.whitelist(key_url)  # домен белых списков из .env
+    return {"key": key_url, "key_id": key_id, "until": row.get("anti_expires_at"),
             "active": bool(row.get("anti_key") and until and until > utcnow())}
 
 

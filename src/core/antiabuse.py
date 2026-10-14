@@ -67,11 +67,13 @@ def _client():
 
 
 def _rw_num_id_for(sub: dict[str, Any], client) -> Optional[int]:
-    tg = db.fetchone("SELECT telegram_id FROM users WHERE id = ?", (sub.get("user_id"),))
-    if not (tg and tg.get("telegram_id")):
+    u = db.fetchone("SELECT id, telegram_id, email FROM users WHERE id = ?", (sub.get("user_id"),))
+    if not u:
         return None
     try:
-        rw = client.find_user_by_telegram(int(tg["telegram_id"]))
+        rw = provisioning.lookup(client, user_id=int(u["id"]),
+                                 telegram_id=int(u["telegram_id"]) if u.get("telegram_id") else None,
+                                 email=u.get("email"))
     except Exception:  # noqa: BLE001
         return None
     if not isinstance(rw, dict):

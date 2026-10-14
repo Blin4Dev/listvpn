@@ -120,10 +120,12 @@ try:
     from . import staff as staffmod  # type: ignore
     from . import staffpay  # type: ignore
     from . import webpush  # type: ignore
+    from . import autofine  # type: ignore
 except ImportError:  # pragma: no cover
     import staff as staffmod  # type: ignore
     import staffpay  # type: ignore
     import webpush  # type: ignore
+    import autofine  # type: ignore
 try:
     from . import stats as stats_mod  # type: ignore
 except ImportError:  # pragma: no cover
@@ -142,6 +144,7 @@ try:
 except Exception:  # noqa: BLE001
     applinks = None  # type: ignore
 
+import subdomain  # type: ignore  # домены ссылок подписки из .env
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -933,7 +936,7 @@ def serialize_key(sub: dict[str, Any], user: Optional[dict[str, Any]] = None) ->
         "id": sub["id"],
         "key_uuid": sub.get("key_uuid"),
         "short_uuid": sub.get("short_uuid"),
-        "key_config": sub.get("key_config"),
+        "key_config": subdomain.vpn(sub.get("key_config")),
         "user_id": sub["user_id"],
         "username": username,
         "status": sub.get("status", "Active"),
@@ -1151,27 +1154,15 @@ def _rw_client():
 
 
 def _rw_find_user(user: dict[str, Any]):
-    """(client, rw_user|none): сначала telegram_id, потом email."""
+    """(client, rw_user|none): по имени batman_<id>, для старых — telegram/email (с переименованием)."""
     client = _rw_client()
     if not client:
         return None, None
-    rw = None
     try:
-        if user.get("telegram_id"):
-            rw = client.find_user_by_telegram(int(user["telegram_id"]))
+        rw = provisioning.lookup(client, user_id=int(user["id"]) if user.get("id") else None,
+                                 telegram_id=int(user["telegram_id"]) if user.get("telegram_id") else None,
+                                 email=user.get("email"))
     except Exception:  # noqa: BLE001
-        rw = None
-    if not rw and user.get("email"):
-        try:
-            rw = unwrap_rw(client.resolve_user(email=user["email"]))
-        except Exception:  # noqa: BLE001
-            rw = None
-    if not rw and not user.get("telegram_id"):
-        try:
-            rw = unwrap_rw(client.resolve_user(username=f"web_{int(user['id'])}"))
-        except Exception:  # noqa: BLE001
-            rw = None
-    if not isinstance(rw, dict) or not (rw.get("uuid") or rw.get("id")):
         rw = None
     return client, rw
 
@@ -2779,6 +2770,29 @@ def panel_staff_fine_cancel(fine_id: int, p: dict = Depends(require_panel)) -> d
     return _staff_call(staffpay.cancel_fine, fine_id, p["actor"], None if p["kind"] == "owner" else p["actor"])
 
 
+class AutofineBody(BaseModel):
+    enabled: Optional[bool] = None
+    minutes: Optional[int] = None
+    hours: Optional[float] = None
+    pool: Optional[bool] = None
+    warn: Optional[bool] = None
+
+
+@app.get("/api/panel/staff-autofine")
+def panel_autofine_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    cfg = autofine.get_config()
+    return {**{k: cfg[k] for k in ("enabled", "minutes", "hours", "pool", "warn")}, "recent": autofine.recent(30)}
+
+
+@app.put("/api/panel/staff-autofine")
+def panel_autofine_put(body: AutofineBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        cfg = autofine.save_config(body.model_dump())
+    except autofine.AutofineError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+    return {**{k: cfg[k] for k in ("enabled", "minutes", "hours", "pool", "warn")}, "recent": autofine.recent(30)}
+
+
 @app.get("/api/panel/me/salary")
 def panel_my_salary(date_from: Optional[str] = Query(None, alias="from", max_length=10),
                     date_to: Optional[str] = Query(None, alias="to", max_length=10), p: dict = Depends(require_panel)) -> dict[str, Any]:
@@ -3955,7 +3969,7 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "email": user.get("email"),
         "registration_date": user.get("created_at"),
         # белые списки: анти-ключ FURK («Ключ обхода» в старом боте)
-        "anti_key": user.get("anti_key"),
+        "anti_key": subdomain.whitelist(user.get("anti_key")),
         "anti_expires_at": user.get("anti_expires_at"),
         "anti_key_id": user.get("anti_key_id"),
         "status": subscription_status_for_user(user),  # trial|active|expired|lapsed|never|banned
@@ -6472,8 +6486,8 @@ def _app_sub_url(user: dict[str, Any]) -> Optional[str]:
         return None
     base = _env("REMWAVE_SUB_PUBLIC_URL")
     if base and row.get("short_uuid"):
-        return f"{base.rstrip('/')}/api/sub/{row['short_uuid']}"
-    return row.get("key_config")
+        return subdomain.vpn(f"{base.rstrip('/')}/api/sub/{row['short_uuid']}")
+    return subdomain.vpn(row.get("key_config"))
 
 
 @app.get("/api/app/subscription/applink")
@@ -7627,6 +7641,21 @@ def _support_autoclose_loop() -> None:
             support.auto_close_expired()
         except Exception as exc:  # noqa: BLE001
             print(f"[support] autoclose failed: {exc}", flush=True)
+        try:
+            r = autofine.run(_autofine_notify)
+            if r["fines"]:
+                print(f"[autofine] выписано штрафов: {r['fines']}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[autofine] failed: {exc}", flush=True)
+
+
+def _autofine_notify(st: dict[str, Any], text: str) -> None:
+    if not st.get("telegram_id"):
+        return
+    try:
+        notifier.call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML", "text": text}, timeout=10.0)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _xbm_client():
