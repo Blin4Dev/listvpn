@@ -35,6 +35,22 @@ def rw_username(user_id: int) -> str:
     return f"{USERNAME_PREFIX}{int(user_id)}"
 
 
+EXTERNAL_SQUAD_KEY = "squad_external"
+
+
+def external_squad() -> Optional[str]:
+    """внешний сквад Remnawave для всех пользователей (панель → Сквады); None — не трогать."""
+    try:
+        try:
+            from . import database as db  # type: ignore
+        except ImportError:
+            import database as db  # type: ignore
+        v = (db.get_setting(EXTERNAL_SQUAD_KEY, "") or "").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    return v or None
+
+
 def _local_user_id(telegram_id: Optional[int], email: Optional[str]) -> Optional[int]:
     """id пользователя бота по telegram_id / email (для вызовов, где id не передали)."""
     try:
@@ -181,6 +197,7 @@ def provision(
             user_id = _local_user_id(telegram_id, email)
         existing = lookup(client, user_id=user_id, telegram_id=telegram_id, email=email)
         squad_list = list(squads or [])
+        ext_squad = external_squad()
 
         if existing:
             uid = existing.get("id") or existing.get("userId") or existing.get("uuid")
@@ -196,6 +213,8 @@ def provision(
                 patch["uuid"] = uid
             if squad_list:
                 patch["active_internal_squads"] = squad_list
+            if ext_squad:
+                patch["external_squad_uuid"] = ext_squad
             if traffic_limit_bytes:
                 patch["traffic_limit_bytes"] = traffic_limit_bytes
             if email:
@@ -224,6 +243,7 @@ def provision(
                 traffic_limit_bytes=traffic_limit_bytes or None,
                 traffic_limit_strategy=traffic_reset_strategy,
                 active_internal_squads=squad_list or None,
+                external_squad_uuid=ext_squad,
             )
 
         if not isinstance(user, dict):

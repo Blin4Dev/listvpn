@@ -50,7 +50,8 @@ export const SquadsPage: React.FC<{ onToast: (t: string, m: string, ty: ToastTyp
 
       {squads.length > 0 && (
         <div className="card" style={{ padding: 24 }}>
-          <h3 className="h-sec mb-2">Привязка сквадов к типам подписок</h3>
+          <h3 className="h-sec mb-2">Внутренние сквады</h3>
+          <p className="sub">Какие внутренние сквады получает подписка и пробный период</p>
           <div className="mb-4" />
           <div className="flex flex-col gap-5">
             {(['vpn', 'trial'] as const).map((type) => (
@@ -67,6 +68,8 @@ export const SquadsPage: React.FC<{ onToast: (t: string, m: string, ty: ToastTyp
           <button className="btn solid mt-6" onClick={saveMapping}>Сохранить привязки</button>
         </div>
       )}
+
+      <ExternalSquadCard onToast={onToast} />
 
       {squads.length > 0 && <GraceCard squads={squads} onToast={onToast} />}
 
@@ -127,6 +130,67 @@ const GraceCard: React.FC<{ squads: SquadConfig[]; onToast: (t: string, m: strin
       )}
       <div className="flex items-center gap-4 mt-6" style={{ flexWrap: 'wrap' }}>
         <button className="btn solid" disabled={!dirty || busy} onClick={() => void save()}>{busy ? <Spinner size={15} /> : null} Сохранить</button>
+      </div>
+    </div>
+  );
+};
+
+type ExtSquad = { uuid: string; name: string; members: number | null };
+type ExtState = { selected: string | null; squads: ExtSquad[]; error: string | null };
+
+// внешний сквад Remnawave: необязательный, один на всех пользователей
+const ExternalSquadCard: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void }> = ({ onToast }) => {
+  const [st, setSt] = useState<ExtState | null>(null);
+  const [pick, setPick] = useState<string>('');
+  const [busy, setBusy] = useState<'' | 'load' | 'save' | 'apply'>('load');
+  const apply = (d: ExtState) => { setSt(d); setPick(d.selected || ''); };
+  const load = () => { setBusy('load'); apiFetch('/panel/squads/external').then(apply).catch((e) => onToast('Ошибка', parseApiErr(e, 'Не удалось загрузить внешние сквады'), 'error')).finally(() => setBusy('')); };
+  useEffect(() => { load(); }, []);
+  if (!st) return null;
+  const dirty = (st.selected || '') !== pick;
+  const save = async () => {
+    setBusy('save');
+    try {
+      apply(await apiFetch('/panel/squads/external', { method: 'PUT', body: JSON.stringify({ uuid: pick || null }) }));
+      onToast('Готово', pick ? 'Внешний сквад будет назначаться всем пользователям' : 'Внешний сквад не назначается', 'success');
+    } catch (e) { onToast('Не сохранено', parseApiErr(e, 'Ошибка'), 'error'); } finally { setBusy(''); }
+  };
+  const applyAll = async () => {
+    const name = st.squads.find((x) => x.uuid === st.selected)?.name || 'выбранный сквад';
+    if (!window.confirm(`Назначить «${name}» всем пользователям в Remnawave прямо сейчас? Это затронет всех пользователей панели Remnawave, включая созданных не ботом.`)) return;
+    setBusy('apply');
+    try { await apiFetch('/panel/squads/external/apply', { method: 'POST' }); onToast('Готово', 'Remnawave назначает сквад всем пользователям', 'success'); load(); }
+    catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось'), 'error'); } finally { setBusy(''); }
+  };
+  const missing = st.selected && !st.squads.some((x) => x.uuid === st.selected) && !st.error;
+  return (
+    <div className="card" style={{ padding: 24 }}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="h-sec mb-2">Внешний сквад</h3>
+          <p className="sub" style={{ maxWidth: 620 }}>
+            Необязательно. Выбранный внешний сквад получают все новые пользователи и все, кто продлевает или покупает подписку.
+            «Не назначать» — бот не трогает внешний сквад пользователей в Remnawave.
+          </p>
+        </div>
+        <button className="btn" onClick={load} disabled={!!busy} title="Обновить список">{busy === 'load' ? <Spinner size={15} /> : <RefreshCw size={15} />}</button>
+      </div>
+      {st.error && <div className="badge danger" style={{ whiteSpace: 'normal', marginTop: 12 }}>{st.error}</div>}
+      {missing && <div className="badge danger" style={{ whiteSpace: 'normal', marginTop: 12 }}>Выбранного сквада больше нет в Remnawave — выберите другой или «Не назначать».</div>}
+      <div className="flex flex-wrap gap-2" style={{ marginTop: 16 }}>
+        <button className={`chip ${pick === '' ? 'on' : ''}`} onClick={() => setPick('')}>Не назначать</button>
+        {st.squads.map((sq) => (
+          <button key={sq.uuid} className={`chip ${pick === sq.uuid ? 'on' : ''}`} onClick={() => setPick(sq.uuid)}>
+            {sq.name}{sq.members != null ? <span className="faint" style={{ marginLeft: 6 }}>{sq.members}</span> : null}
+          </button>
+        ))}
+      </div>
+      {!st.error && st.squads.length === 0 && <p className="sub" style={{ marginTop: 10, fontSize: 13 }}>В Remnawave нет внешних сквадов — создайте их в панели Remnawave и обновите список.</p>}
+      <div className="flex items-center gap-3 mt-6" style={{ flexWrap: 'wrap' }}>
+        <button className="btn solid" disabled={!dirty || !!busy} onClick={() => void save()}>{busy === 'save' ? <Spinner size={15} /> : null} Сохранить</button>
+        {st.selected && !dirty && !missing && (
+          <button className="btn" disabled={!!busy} onClick={() => void applyAll()}>{busy === 'apply' ? <Spinner size={15} /> : null} Назначить всем существующим</button>
+        )}
       </div>
     </div>
   );

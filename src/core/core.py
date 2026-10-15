@@ -5477,6 +5477,84 @@ def panel_squads_sync(_: dict = Depends(require_owner)) -> dict[str, Any]:
     return {"success": True, "count": int(count_row["c"]) if count_row else 0, "synced": len(seen)}
 
 
+class ExternalSquadBody(BaseModel):
+    uuid: Optional[str] = Field(None, max_length=64)
+
+
+def _rw_external_squads(client: Any) -> list[dict[str, Any]]:
+    resp = client.get_external_squads()
+    items = resp
+    if isinstance(resp, dict):
+        items = resp.get("externalSquads") or resp.get("squads") or resp.get("items") or []
+    out = []
+    for s in items if isinstance(items, list) else []:
+        if not isinstance(s, dict) or not (s.get("uuid") or s.get("id")):
+            continue
+        info = s.get("info") if isinstance(s.get("info"), dict) else {}
+        members = info.get("membersCount", s.get("membersCount"))
+        out.append({"uuid": str(s.get("uuid") or s.get("id")), "name": str(s.get("name") or "Внешний сквад"),
+                    "members": int(members) if isinstance(members, (int, float)) else None})
+    return out
+
+
+def _external_state(client: Any = None) -> dict[str, Any]:
+    selected = provisioning.external_squad()
+    client = client or _rw_client()
+    if client is None:
+        return {"selected": selected, "squads": [], "error": "Remnawave не настроена"}
+    try:
+        squads = _rw_external_squads(client)
+    except Exception as exc:  # noqa: BLE001
+        return {"selected": selected, "squads": [], "error": f"Remnawave: {exc}"}
+    return {"selected": selected, "squads": squads, "error": None}
+
+
+@app.put("/api/panel/squads/mapping")
+def panel_squad_mapping(body: SquadMappingBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    set_squad_mapping(list(body.vpn), list(body.trial))
+    return {"success": True}
+
+
+@app.get("/api/panel/squads/external")
+def panel_squads_external(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """внешние сквады из Remnawave (живой список) + выбранный."""
+    return _external_state()
+
+
+@app.put("/api/panel/squads/external")
+def panel_squads_external_set(body: ExternalSquadBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    """выбрать внешний сквад для всех пользователей; пусто — не назначать (в Remnawave ничего не меняется)."""
+    uuid = (body.uuid or "").strip()
+    if uuid:
+        client = _rw_client()
+        if client is None:
+            raise HTTPException(503, detail={"message": "Remnawave не настроена (укажите URL и API-токен)"})
+        try:
+            known = {s["uuid"] for s in _rw_external_squads(client)}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, detail={"message": f"Ошибка Remnawave: {exc}"})
+        if uuid not in known:
+            raise HTTPException(400, detail={"message": "Такого внешнего сквада нет в Remnawave — обновите список"})
+    db.set_setting(provisioning.EXTERNAL_SQUAD_KEY, uuid)
+    return _external_state()
+
+
+@app.post("/api/panel/squads/external/apply")
+def panel_squads_external_apply(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """назначить выбранный внешний сквад всем уже существующим пользователям Remnawave."""
+    uuid = provisioning.external_squad()
+    if not uuid:
+        raise HTTPException(400, detail={"message": "Сначала выберите внешний сквад"})
+    client = _rw_client()
+    if client is None:
+        raise HTTPException(503, detail={"message": "Remnawave не настроена (укажите URL и API-токен)"})
+    try:
+        client.add_users_to_external_squad(uuid)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, detail={"message": f"Ошибка Remnawave: {exc}"})
+    return {"success": True}
+
+
 @app.put("/api/panel/squads/{squad_uuid}")
 def panel_squad_update(
     squad_uuid: str, body: SquadUpdateBody, _: dict = Depends(require_owner)
@@ -5499,12 +5577,6 @@ def panel_squad_update(
     if fields:
         params.append(squad_uuid)
         db.execute(f"UPDATE squads SET {', '.join(fields)} WHERE squad_uuid = ?", params)
-    return {"success": True}
-
-
-@app.put("/api/panel/squads/mapping")
-def panel_squad_mapping(body: SquadMappingBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
-    set_squad_mapping(list(body.vpn), list(body.trial))
     return {"success": True}
 
 
