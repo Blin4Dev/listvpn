@@ -197,12 +197,47 @@ def handle_start(message: dict[str, Any]) -> None:
         _apply_tracking(user, payload[4:].strip(), frm, is_new)
     elif payload.startswith("promo_") and user:
         _apply_promo(chat_id, user, payload[6:].strip())
+    elif payload.startswith("gift_") and user and _send_gift(chat_id, payload[5:].strip()):
+        return
     elif payload.startswith("pay_") and user and _send_payment_return(chat_id, user, payload[4:].strip()):
         return
     elif payload.startswith("payfail_") and user and _send_payment_return(chat_id, user, payload[8:].strip(), failed=True):
         return
 
     _send_welcome(chat_id)
+
+
+def _send_gift(chat_id: int, raw: str) -> bool:
+    """/start gift_XXXX: что за подарок + кнопка активации в мини-приложении."""
+    if not re.fullmatch(r"[A-Fa-f0-9]{8,16}", raw or ""):
+        return False
+    code = "GIFT-" + raw.upper()
+    try:
+        import reflevels  # type: ignore
+        info = reflevels.gift_preview(code)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bot] gift preview error: {type(exc).__name__}: {exc}", flush=True)
+        info = None
+    if not info:
+        api("sendMessage", {"chat_id": chat_id, "text": "⚠️ Подарок не найден. Проверьте ссылку."})
+        return True
+    if info["status"] != "issued":
+        text = {"redeemed": "Этот подарок уже активирован.", "revoked": "Этот подарок отменён.",
+                "expired": "Срок действия подарка истёк."}.get(info["status"], "Подарок недоступен.")
+        api("sendMessage", {"chat_id": chat_id, "text": f"⚠️ {text}"})
+        return True
+    m = info["months"]
+    period = {1: "1 месяц", 3: "3 месяца", 6: "6 месяцев", 12: "12 месяцев"}.get(m, f"{m} мес.")
+    extra = " + белые списки" if info["whitelist"] else ""
+    text = f"🎁 Вам подарок — подписка на {period}{extra}.\n\nКод: <code>{code}</code>"
+    markup: dict[str, Any] = {}
+    if MINIAPP_URL:
+        url = f"{MINIAPP_URL}/gift/activate?code={urllib.parse.quote(code)}"
+        markup = {"reply_markup": {"inline_keyboard": [[{"text": "Активировать", "style": "primary", "web_app": {"url": url}}]]}}
+    else:
+        text += "\n\nОткройте приложение → «Активировать подарок» и введите код."
+    api("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML", **markup})
+    return True
 
 
 def _send_payment_return(chat_id: int, user: dict[str, Any], payment_id: str, failed: bool = False) -> bool:

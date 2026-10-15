@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Home, DollarSign, Users, Mail, Gift, Percent, Link, Settings, Menu, X, Wallet, Lock, BarChart2, ClipboardList, Server, MessageCircle,
+  Home, Ticket, DollarSign, Users, Mail, Gift, Percent, Link, Settings, Menu, X, Wallet, Lock, BarChart2, ClipboardList, Server, MessageCircle,
   Shuffle, Eye, UserCog, Coins, Bell, BellOff, ChevronDown,
 } from 'lucide-react';
 import { UserActionModal } from './components/UserActionModal';
@@ -14,6 +14,7 @@ import { FinancePage } from './pages/Finance';
 import { LoginForm } from './pages/Login';
 import { MailingPage } from './pages/Mailing';
 import { PromocodesPage } from './pages/Promocodes';
+import { GiftsPage } from './pages/Gifts';
 import { PromotionsPage } from './pages/Promotions';
 import { StaffPage } from './pages/staff/StaffPage';
 import { SalaryPage } from './pages/staff/SalaryPage';
@@ -60,7 +61,7 @@ export const NAV = [
   { group: 'Главное', items: [{ name: 'Главная', icon: Home }, { name: 'Статистика', icon: BarChart2 }, { name: 'Финансы', icon: DollarSign }] },
   { group: 'Пользователи', items: [{ name: 'Пользователи', icon: Users }, { name: 'Выводы', icon: Wallet }, { name: 'Опрос', icon: ClipboardList }] },
   { group: 'Поддержка', items: [{ name: 'Поддержка', icon: MessageCircle }, { name: 'Сотрудники', icon: UserCog }, { name: 'Зарплата', icon: Coins }] },
-  { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Gift }, { name: 'Акции', icon: Percent }, { name: 'Ссылки', icon: Link }] },
+  { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Ticket }, { name: 'Подарки', icon: Gift }, { name: 'Акции', icon: Percent }, { name: 'Ссылки', icon: Link }] },
   { group: 'Другое', items: [{ name: 'Мониторинг', icon: Server }, { name: 'Балансировщик', icon: Shuffle }, { name: 'Настройки', icon: Settings }] },
 ];
 
@@ -68,7 +69,7 @@ export const NAV = [
 const PAGE_PATHS: Record<string, string> = {
   'Главная': '/', 'Статистика': '/statistics', 'Финансы': '/finance',
   'Пользователи': '/users', 'Поддержка': '/support', 'Выводы': '/withdrawals', 'Опрос': '/survey',
-  'Рассылка': '/mailing', 'Промокоды': '/promocodes', 'Акции': '/promotions', 'Ссылки': '/links',
+  'Рассылка': '/mailing', 'Промокоды': '/promocodes', 'Подарки': '/gifts', 'Акции': '/promotions', 'Ссылки': '/links',
   'Мониторинг': '/monitoring', 'Балансировщик': '/balancer', 'Настройки': '/settings', 'Сотрудники': '/staff', 'Зарплата': '/salary',
 };
 export const SETTINGS_TABS = ['price', 'antiabuse', 'offer', 'privacy', 'squads', 'mail', 'captcha', 'forum', 'backups', 'storage'] as const;
@@ -285,6 +286,7 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
               {activePage === 'Пользователи' && <UsersPage userSearch={userSearch} setUserSearch={setUserSearch} setSelectedUser={(u) => setDetailUserId(u.id)} setMassActionType={setMassActionType} />}
               {activePage === 'Рассылка' && <MailingPage onToast={addToast} />}
               {activePage === 'Промокоды' && <PromocodesPage onToast={addToast} />}
+              {activePage === 'Подарки' && <GiftsPage onToast={addToast} onOpenUser={(id) => setDetailUserId(id)} />}
               {activePage === 'Акции' && <PromotionsPage onToast={addToast} />}
               {activePage === 'Ссылки' && <TrackingLinksPage onToast={addToast} />}
               {activePage === 'Опрос' && <SurveyPage onToast={addToast} onOpenUser={(id) => setDetailUserId(id)} />}

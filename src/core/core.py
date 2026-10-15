@@ -5397,6 +5397,54 @@ def panel_tracking_delete(link_id: int, _: dict = Depends(require_panel)) -> dic
     return {"success": True}
 
 
+class AdminGiftBody(BaseModel):
+    count: int = Field(1, ge=1, le=500)
+    months: int = 1
+    whitelist: bool = False
+    note: Optional[str] = Field(None, max_length=200)
+    valid_days: Optional[int] = Field(None, ge=1, le=3650)
+    one_per_user: bool = True
+
+
+class AdminGiftRevokeBody(BaseModel):
+    ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+def _gift_link(code: str) -> str:
+    return f"https://t.me/{BOT_USERNAME}?start=gift_{code[len(reflevels.GIFT_PREFIX):]}"
+
+
+@app.get("/api/panel/gifts")
+def panel_gifts(status: str = Query("", max_length=16), q: str = Query("", max_length=64),
+                limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                _: dict = Depends(require_owner)) -> dict[str, Any]:
+    """подарочные подписки из панели: коды, статусы, кто активировал."""
+    data = reflevels.list_admin_gifts(status, q, limit, offset)
+    for it in data["items"]:
+        it["link"] = _gift_link(it["code"])
+    data["periods"] = list(fulfillment.SUB_PERIODS)
+    data["whitelist_available"] = bool(fulfillment.whitelist_available())
+    return data
+
+
+@app.post("/api/panel/gifts")
+def panel_gifts_create(body: AdminGiftBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    if body.whitelist and not fulfillment.whitelist_available():
+        raise HTTPException(400, detail={"message": "Белые списки не настроены (нет FURK_API_KEY) — выдать их в подарке нельзя"})
+    try:
+        r = reflevels.create_admin_gifts(body.count, body.months, body.whitelist, body.note or "", body.valid_days,
+                                         body.one_per_user)
+    except reflevels.RewardError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+    r["items"] = [{"code": c, "link": _gift_link(c)} for c in r.pop("codes")]
+    return r
+
+
+@app.post("/api/panel/gifts/revoke")
+def panel_gifts_revoke(body: AdminGiftRevokeBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    return {"revoked": reflevels.revoke_admin_gifts(body.ids)}
+
+
 @app.get("/api/panel/remnawave/squads")
 def panel_remnawave_squads(_: dict = Depends(require_owner)) -> list[dict[str, Any]]:
     rows = db.fetchall("SELECT squad_uuid, squad_name FROM squads WHERE is_active = 1")
