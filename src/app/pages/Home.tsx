@@ -210,7 +210,7 @@ type HomeCache = {
 let homeCache: HomeCache | null = null;
 let refCountCache: number | null = null;
 
-function snapshotFromMe(me: { subscription_status?: string; subscription_until?: string | null; blacklisted?: boolean }, trialEnabled: boolean): HomeCache {
+function snapshotFromMe(me: { subscription_status?: string; subscription_until?: string | null; blacklisted?: boolean; trial_available?: boolean }, trialEnabled: boolean): HomeCache {
   const st = String(me.subscription_status || "");
   const until = String(me.subscription_until || "");
   const untilText = until ? formatDateRu(until) : "";
@@ -235,7 +235,8 @@ function snapshotFromMe(me: { subscription_status?: string; subscription_until?:
   } else if (st === "lapsed") {
     subscriptionState = "had_before";
   }
-  return { subscriptionState, subscriptionUntilText: untilText, trialEnabled, expiringTitle, blacklisted };
+  const canTrial = trialEnabled && me.trial_available !== false;
+  return { subscriptionState, subscriptionUntilText: untilText, trialEnabled: canTrial, expiringTitle, blacklisted };
 }
 
 export default function HomePage() {
@@ -350,10 +351,15 @@ export default function HomePage() {
       setTrialBusy(true);
       const res = await activateTrial();
       setTrialBusy(false);
-      if (!res.success && res.message) {
+      if (res.success) {
+        navigate("/subscription?setup=1");
+        return;
+      }
+      if (res.code === "trial_used") {
         navigate(BUY_PATH);
         return;
       }
+      return;
     }
     navigate(ctaPath);
   };

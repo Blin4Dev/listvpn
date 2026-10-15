@@ -29,6 +29,7 @@ export type AppUser = {
   discount?: Discount;
   // приняты оферта и политика
   terms_accepted?: boolean;
+  trial_available?: boolean;
 };
 
 // активная скидка для зачёркнутой цены; percent 0 если нет
@@ -604,12 +605,13 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
   }
 }
 
-export async function activateTrial(): Promise<{ success: boolean; message?: string }> {
+export async function activateTrial(): Promise<{ success: boolean; message?: string; code?: string }> {
   try {
     const r = await appFetch<{ success: boolean }>("/trial", { method: "POST" });
     return { success: !!r?.success };
   } catch (e) {
-    return { success: false, message: e instanceof Error ? e.message : "Ошибка" };
+    const code = e instanceof ApiError && e.detail && typeof e.detail === "object" ? String(e.detail.code || "") : "";
+    return { success: false, message: e instanceof Error ? e.message : "Ошибка", code };
   }
 }
 

@@ -477,6 +477,8 @@ def grant_trial(user: dict[str, Any]) -> dict[str, Any]:
         devices=t_dev, squads=trial_squads(), email=user.get("email"),
         traffic_limit_bytes=t_gb * GB, traffic_reset_strategy=RESET_STRATEGY,
     )
+    if provisioning.is_configured() and not prov.get("ok"):
+        raise RuntimeError(prov.get("error") or "remnawave_failed")
     sub = _create_subscription_row(
         user=user, devices=t_dev, expire_at=new_exp, provision=prov,
         traffic_gb=t_gb, sub_type="trial", squads=trial_squads(),

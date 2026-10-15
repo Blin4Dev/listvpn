@@ -901,6 +901,7 @@ def serialize_app_user(u: dict[str, Any]) -> dict[str, Any]:
         "discount": active_discount_for_user(int(u["id"])),
         # принял ли оферту и политику
         "terms_accepted": bool(u.get("terms_accepted_at")),
+        "trial_available": _trial_available_for(int(u["id"])),
     }
 
 
@@ -4242,6 +4243,7 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
         ):
             raise HTTPException(400, detail={"message": "Пробная подписка ещё действует — сбросить можно после её окончания"})
         db.execute("DELETE FROM subscriptions WHERE user_id = ? AND type = 'trial'", (user_id,))
+        _clear_trial_claim(user_id, user.get("telegram_id"))
         sync_user_status_from_subs(user_id)
     elif action == "APPLY_PROMO":
         code = str(value or "").strip()
@@ -4841,6 +4843,7 @@ def panel_mass_action(body: MassActionBody, _: dict = Depends(require_panel)) ->
         (now_iso,),
     )
     for r in rows:
+        _clear_trial_claim(int(r["user_id"]))
         sync_user_status_from_subs(int(r["user_id"]))
     return {"success": True, "affected": len(rows)}
 
@@ -6422,14 +6425,42 @@ def _has_any_sub(user_id: int) -> bool:
     return bool(db.fetchone("SELECT id FROM subscriptions WHERE user_id = ? LIMIT 1", (user_id,)))
 
 
+def _clear_trial_claim(user_id: int, telegram_id: Optional[int] = None) -> None:
+    """после RESET_TRIAL можно взять пробный снова."""
+    db.execute("DELETE FROM trial_claims WHERE user_id = ?", (int(user_id),))
+    tg = telegram_id
+    if tg is None:
+        u = get_user(int(user_id)) or {}
+        tg = u.get("telegram_id")
+    if tg:
+        db.execute("DELETE FROM trial_claims WHERE telegram_id = ?", (int(tg),))
+
+
+def _trial_blocks(user_id: int) -> Optional[str]:
+    """почему пробный недоступен; None — можно выдать."""
+    if db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status != 'Deleted' LIMIT 1",
+        (int(user_id),),
+    ):
+        return "has_sub"
+    if db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND type != 'trial' LIMIT 1",
+        (int(user_id),),
+    ):
+        return "had_paid"
+    u = get_user(int(user_id)) or {}
+    if u.get("telegram_id") and db.fetchone(
+        "SELECT 1 FROM trial_claims WHERE telegram_id = ?", (int(u["telegram_id"]),)
+    ):
+        return "claimed"
+    return None
+
+
 def _trial_available_for(user_id: int) -> bool:
-    """пробный доступен: вкл, нет подписок, tg ещё не брал."""
-    if not trial_enabled() or _has_any_sub(user_id):
+    """пробный доступен: вкл, нет живой/платной подписки, tg ещё не брал (или сбросили)."""
+    if not trial_enabled():
         return False
-    u = get_user(user_id) or {}
-    if u.get("telegram_id") and db.fetchone("SELECT 1 FROM trial_claims WHERE telegram_id = ?", (int(u["telegram_id"]),)):
-        return False
-    return True
+    return _trial_blocks(user_id) is None
 
 
 def _bypass_info(user_id: int) -> dict[str, Any]:
@@ -6571,14 +6602,24 @@ def app_activate_trial(user: dict = Depends(require_channel_dep)) -> dict[str, A
     if not trial_enabled():
         raise HTTPException(403, detail={"message": "Пробный период сейчас недоступен"})
     if not fresh.get("telegram_id"):
-        raise HTTPException(400, detail={"message": "Пробный доступен только при входе через Telegram"})
-    if _has_any_sub(int(fresh["id"])):
-        raise HTTPException(400, detail={"message": "Пробный период уже был активирован"})
-    # один пробный на tg; отметка атомарно до выдачи
+        raise HTTPException(400, detail={"message": "Пробный доступен только при входе через Telegram",
+                                         "code": "need_telegram"})
+    live_trial = db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND type = 'trial' AND status = 'Active' "
+        "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+        (int(fresh["id"]), iso()),
+    )
+    if live_trial:
+        return {"success": True, "subscription_id": live_trial["id"], "already": True}
+    why = _trial_blocks(int(fresh["id"]))
+    if why:
+        print(f"[trial] отказ user {fresh['id']}: {why}", flush=True)
+        raise HTTPException(400, detail={"message": "Пробный период уже был активирован", "code": "trial_used"})
     cur = db.execute("INSERT OR IGNORE INTO trial_claims (telegram_id, user_id, claimed_at) VALUES (?, ?, ?)",
                      (int(fresh["telegram_id"]), int(fresh["id"]), iso()))
     if not cur.rowcount:
-        raise HTTPException(400, detail={"message": "Пробный период уже был активирован"})
+        print(f"[trial] отказ user {fresh['id']}: claim", flush=True)
+        raise HTTPException(400, detail={"message": "Пробный период уже был активирован", "code": "trial_used"})
     try:
         result = fulfillment.grant_trial(fresh)
     except Exception as exc:  # noqa: BLE001
