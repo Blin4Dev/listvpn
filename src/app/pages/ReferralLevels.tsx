@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch } from "../utils/api";
+import { loadReferral, peekReferral } from "../utils/referral";
 import { btnReset } from "../components/ui";
 import { N, NoirBack, NoirCard, NoirScreen } from "../components/noir";
 
@@ -50,13 +50,13 @@ function bonus(lv: Level): string {
 
 export default function ReferralLevels() {
   const goBack = useSmartBack("/referral");
-  const [levels, setLevels] = useState<Level[]>(FALLBACK);
-  const [current, setCurrent] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string>("starter");
-  const [loaded, setLoaded] = useState(false);
+  const cached = peekReferral();
+  const [levels, setLevels] = useState<Level[]>(cached?.levels?.length ? cached.levels : FALLBACK);
+  const [current, setCurrent] = useState<string | null>(cached?.level?.key || null);
+  const [selected, setSelected] = useState<string>(cached?.level?.key || "starter");
 
   useEffect(() => {
-    appFetch<{ levels?: Level[]; level?: { key: string } }>("/referral")
+    loadReferral()
       .then((d) => {
         if (Array.isArray(d.levels) && d.levels.length) setLevels(d.levels);
         if (d.level?.key) {
@@ -64,17 +64,14 @@ export default function ReferralLevels() {
           setSelected(d.level.key);
         }
       })
-      .catch(() => { /* запасные уровни */ })
-      .finally(() => setLoaded(true));
+      .catch(() => { /* запасные уровни */ });
   }, []);
 
   const selIdx = Math.max(0, levels.findIndex((l) => l.key === selected));
   const sel = levels[selIdx];
 
-  const rise = (i: number): React.CSSProperties => ({
-    animation: loaded ? `blinvpnRise 0.55s var(--ease-out) ${0.04 * i}s both` : undefined,
-    opacity: loaded ? undefined : 0,
-  });
+  // уровни есть всегда (запасные или из кэша) — показываем сразу, не ждём сеть
+  const rise = (i: number): React.CSSProperties => ({ animation: `blinvpnRise 0.45s var(--ease-out) ${0.04 * i}s both` });
 
   return (
     <NoirScreen>

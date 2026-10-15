@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { activateTrial, appFetch, fetchConfig, fetchMe, fetchSupport } from "../utils/api";
+import { activateTrial, fetchConfig, fetchMe, fetchSupport } from "../utils/api";
+import { loadReferral, peekReferral } from "../utils/referral";
 import { formatDateRu } from "../utils/date";
 import { hasEntered, homeIntroPending, markHomeIntroPlayed, signalHomeIntroReady, subscribeEntered } from "../utils/homeIntro";
 import { MSIcon, btnReset, pageFrame, pageOuter } from "../components/ui";
@@ -257,9 +258,13 @@ export default function HomePage() {
   // «Подарки»: активировать / купить / мои
   const [giftsMenu, setGiftsMenu] = useState(false);
   // сколько приглашено — подпись на плитке «Рефералы»
-  const [refCount, setRefCount] = useState<number | null>(refCountCache);
+  const [refCount, setRefCount] = useState<number | null>(() => {
+    const cached = peekReferral();
+    return cached ? Number(cached.referrals_count || 0) : refCountCache;
+  });
   useEffect(() => {
-    appFetch<{ referrals_count?: number }>("/referral")
+    // тот же запрос, что у экрана «Рефералы»: после него экран открывается мгновенно
+    loadReferral()
       .then((r) => { refCountCache = Number(r?.referrals_count || 0); setRefCount(refCountCache); })
       .catch(() => { /* нет данных */ });
   }, []);

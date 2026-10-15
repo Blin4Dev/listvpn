@@ -96,10 +96,12 @@ def _parse(v: Optional[str]) -> Optional[datetime]:
 # ── счёт рефералов и уровень ──
 
 def active_referrals(user_id: int) -> int:
+    # от приглашённых (индекс по referred_by) к их подпискам (индекс по user_id), а не перебор всех
+    # активных подписок сервиса; «+» у status/expires_at не даёт sqlite взять индекс (status, expires_at)
     row = db.fetchone(
-        "SELECT COUNT(DISTINCT u.id) AS c FROM users u JOIN subscriptions s ON s.user_id = u.id "
-        "WHERE u.referred_by = ? AND s.status = 'Active' AND s.type != 'trial' "
-        "AND s.expires_at IS NOT NULL AND s.expires_at > ?",
+        "SELECT COUNT(*) AS c FROM users u WHERE u.referred_by = ? AND EXISTS ("
+        "SELECT 1 FROM subscriptions s WHERE s.user_id = u.id AND +s.status = 'Active' "
+        "AND s.type != 'trial' AND +s.expires_at IS NOT NULL AND +s.expires_at > ?)",
         (int(user_id), _iso(_now())),
     )
     return int((row or {}).get("c") or 0)
@@ -145,17 +147,13 @@ def effective_rate(user: dict[str, Any], active: Optional[int] = None) -> float:
 def earnings(user_id: int) -> dict[str, float]:
     """заработано всего и за текущий месяц (бонусы минус возвраты)."""
     month_start = _now().astimezone(timezone(timedelta(hours=3))).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    total = db.fetchone(
-        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND status = 'completed' "
-        "AND payment_method IN ('referral', 'referral_reversal')",
-        (int(user_id),),
-    )
-    month = db.fetchone(
-        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND status = 'completed' "
-        "AND payment_method IN ('referral', 'referral_reversal') AND created_at >= ?",
-        (int(user_id), _iso(month_start)),
-    )
-    return {"total": round(max(0.0, float(total["s"] or 0)), 2), "month": round(float(month["s"] or 0), 2)}
+    row = db.fetchone(
+        "SELECT COALESCE(SUM(amount), 0) AS t, COALESCE(SUM(CASE WHEN created_at >= ? THEN amount ELSE 0 END), 0) AS m "
+        "FROM transactions WHERE user_id = ? AND payment_method IN ('referral', 'referral_reversal') "
+        "AND status = 'completed'",
+        (_iso(month_start), int(user_id)),
+    ) or {}
+    return {"total": round(max(0.0, float(row.get("t") or 0)), 2), "month": round(float(row.get("m") or 0), 2)}
 
 
 # ── награды ──
@@ -176,10 +174,11 @@ def _next_at(rows: list[dict[str, Any]]) -> Optional[str]:
     return _iso(first + timedelta(days=REWARD_WINDOW_DAYS)) if first else None
 
 
-def rewards_state(user: dict[str, Any]) -> dict[str, Any]:
+def rewards_state(user: dict[str, Any], active: Optional[int] = None) -> dict[str, Any]:
     _ensure_schema()
     uid = int(user["id"])
-    active = active_referrals(uid)
+    if active is None:
+        active = active_referrals(uid)
     lv = level_for(active)
     self_rows = _recent(uid, "self")
     gift_rows = _recent(uid, "gift")

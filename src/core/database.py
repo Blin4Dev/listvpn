@@ -784,6 +784,9 @@ CREATE INDEX IF NOT EXISTS idx_users_tg ON users(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_subs_expiry ON subscriptions(status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id);
+-- реферальная программа: приглашённые и реф. начисления без полного прохода по таблицам
+CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users(referred_by);
+CREATE INDEX IF NOT EXISTS idx_tx_user_method ON transactions(user_id, payment_method, created_at);
 CREATE INDEX IF NOT EXISTS idx_promo_code ON promocodes(code);
 CREATE INDEX IF NOT EXISTS idx_payments_pid ON payments(payment_id);
 CREATE INDEX IF NOT EXISTS idx_payments_provider_pid ON payments(provider_payment_id);

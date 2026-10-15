@@ -7,27 +7,7 @@ import { copyText } from "../components/SubLinkBox";
 import { MSIcon, btnReset } from "../components/ui";
 import { N, NoirBack, NoirButton, NoirCard, NoirScreen, NoirSheet } from "../components/noir";
 import { BRAND_NAME } from "../utils/brand";
-
-type Level = { key: string; name: string; min: number; rate: number; gifts: number; self_free_from: number };
-type Gift = { code: string; status: string; created_at: string; redeemed_at?: string | null };
-
-type ReferralData = {
-  code?: string;
-  link?: string;
-  partner_balance?: number;
-  referrals_count?: number;
-  active_count?: number;
-  earned_total?: number;
-  earned_month?: number;
-  min_withdraw?: number;
-  level?: { key: string; name: string; rate: number; level_rate: number; custom_rate: boolean };
-  next_level?: { key: string; name: string; need: number; rate: number } | null;
-  levels?: Level[];
-  rewards?: {
-    self: { eligible: boolean; available: boolean; need_active: number; next_at: string | null };
-    gifts: { per_month: number; left: number; next_at: string | null; items: Gift[] };
-  };
-};
+import { loadReferral, patchReferral, peekReferral, type ReferralData } from "../utils/referral";
 
 type Sheet = null | "withdraw" | "requests" | "free" | "gift";
 
@@ -131,6 +111,17 @@ function Input({ value, onChange, placeholder, inputMode }: { value: string; onC
   );
 }
 
+/** заглушка на месте цифры, пока грузятся данные */
+function Sk({ w, h }: { w: number; h: number }) {
+  return (
+    <span
+      aria-hidden
+      className="blin-skeleton"
+      style={{ display: "inline-block", width: w, maxWidth: "100%", height: Math.round(h * 0.72), borderRadius: 10, verticalAlign: "middle" }}
+    />
+  );
+}
+
 const W_STATUS: Record<string, [string, string]> = {
   pending: ["На рассмотрении", N.warn],
   approved: ["Одобрена", "#7FB2FF"],
@@ -141,15 +132,16 @@ const W_STATUS: Record<string, [string, string]> = {
 export default function Referral() {
   const goBack = useSmartBack("/");
   const navigate = useNavigate();
-  const [data, setData] = useState<ReferralData | null>(null);
+  // сразу последние известные данные (кэш), свежие — фоном
+  const [data, setData] = useState<ReferralData | null>(() => peekReferral());
   const [sheet, setSheet] = useState<Sheet>(null);
   const [copied, setCopied] = useState(false);
 
-  const load = async () => {
+  const load = async (force = true) => {
     try {
-      setData(await appFetch<ReferralData>("/referral"));
+      setData(await loadReferral(force));
     } catch {
-      setData({ partner_balance: 0, referrals_count: 0, active_count: 0, earned_total: 0, earned_month: 0 });
+      setData((d) => d || { partner_balance: 0, referrals_count: 0, active_count: 0, earned_total: 0, earned_month: 0 });
     }
   };
   useEffect(() => { void load(); }, []);
@@ -174,10 +166,9 @@ export default function Referral() {
     }
   };
 
-  const rise = (i: number): React.CSSProperties => ({
-    animation: data ? `blinvpnRise 0.55s var(--ease-out) ${0.05 * i}s both` : undefined,
-    opacity: data ? undefined : 0,
-  });
+  // карточки видны сразу; пока нет данных — заглушки вместо цифр
+  const rise = (i: number): React.CSSProperties => ({ animation: `blinvpnRise 0.45s var(--ease-out) ${0.04 * i}s both` });
+  const v = (node: React.ReactNode, w: number, h = 22) => (data ? node : <Sk w={w} h={h} />);
 
   const label: React.CSSProperties = { fontSize: 15, color: N.muted };
   const big: React.CSSProperties = { fontSize: 52, fontWeight: 600, letterSpacing: "-0.03em", lineHeight: 1.1, fontVariantNumeric: "tabular-nums" };
@@ -191,20 +182,20 @@ export default function Referral() {
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: "min(29px, 7.6vw)", fontWeight: 500, letterSpacing: "-0.035em", lineHeight: 1.15, color: N.text, whiteSpace: "nowrap" }}>Реферальная программа</div>
         <div style={{ marginTop: 8, fontSize: 15.5, color: N.muted, minHeight: 22 }}>
-          {level ? `Ваш уровень ${level.name}, ${pct(level.rate)}` : " "}
+          {level ? `Ваш уровень ${level.name}, ${pct(level.rate)}` : data ? " " : <Sk w={170} h={16} />}
         </div>
       </div>
 
       <NoirCard style={{ ...rise(0), marginTop: 20, padding: "20px 18px 16px" }}>
         <div style={label}>Доступно к выводу</div>
-        <div style={{ ...big, color: N.text, margin: "8px 0 14px" }}>{rub(balance)}</div>
+        <div style={{ ...big, color: N.text, margin: "8px 0 14px" }}>{v(rub(balance), 150, 52)}</div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15.5, padding: "4px 0" }}>
           <span style={{ color: N.muted }}>Заработано всего</span>
-          <span style={{ color: N.text }}>{rub(earnedTotal)}</span>
+          <span style={{ color: N.text }}>{v(rub(earnedTotal), 60, 18)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15.5, padding: "8px 0 18px" }}>
           <span style={{ color: N.muted }}>За этот месяц</span>
-          <span style={{ color: N.redText }}>{earnedMonth >= 0 ? "+" : "−"}{rub(Math.abs(earnedMonth))}</span>
+          <span style={{ color: N.redText }}>{v(`${earnedMonth >= 0 ? "+" : "−"}${rub(Math.abs(earnedMonth))}`, 60, 18)}</span>
         </div>
         <WhiteButton onClick={() => setSheet("withdraw")}>Вывести деньги</WhiteButton>
         <TextLink onClick={() => setSheet("requests")}>Мои заявки</TextLink>
@@ -212,9 +203,9 @@ export default function Referral() {
 
       <NoirCard style={{ ...rise(1), marginTop: 12, padding: "20px 18px 16px" }}>
         <div style={label}>Активных друзей</div>
-        <div style={{ ...big, color: N.text, margin: "8px 0 4px" }}>{active}</div>
+        <div style={{ ...big, color: N.text, margin: "8px 0 4px" }}>{v(active, 60, 52)}</div>
         <div style={{ ...label, marginBottom: 18 }}>
-          из {invited} {plural(invited, "приглашённого", "приглашённых", "приглашённых")}
+          {v(<>из {invited} {plural(invited, "приглашённого", "приглашённых", "приглашённых")}</>, 130, 16)}
         </div>
         <WhiteButton onClick={invite} disabled={!link}>Пригласить друга</WhiteButton>
         <TextLink onClick={() => void copyLink()}>{copied ? "Ссылка скопирована" : "Скопировать ссылку"}</TextLink>
@@ -222,7 +213,7 @@ export default function Referral() {
 
       <NoirCard style={{ ...rise(2), marginTop: 12, padding: "20px 18px 20px" }}>
         <div style={label}>Заработано всего</div>
-        <div style={{ ...big, color: N.redText, margin: "8px 0 4px" }}>{rub(earnedTotal)}</div>
+        <div style={{ ...big, color: N.redText, margin: "8px 0 4px" }}>{v(rub(earnedTotal), 150, 52)}</div>
         <div style={label}>за всё время</div>
       </NoirCard>
 
@@ -237,7 +228,7 @@ export default function Referral() {
           balance={balance}
           min={Number(data?.min_withdraw || 100)}
           onClose={() => setSheet(null)}
-          onDone={(b) => { setData((d) => (d ? { ...d, partner_balance: b } : d)); void load(); }}
+          onDone={(b) => { setData((d) => (d ? { ...d, partner_balance: b } : d)); patchReferral({ partner_balance: b }); void load(); }}
         />
       )}
       {sheet === "requests" && <RequestsSheet onClose={() => setSheet(null)} />}

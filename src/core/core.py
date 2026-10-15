@@ -7214,61 +7214,17 @@ def mask_email(email: str) -> str:
     return f"{masked}@{dom}"
 
 
-def _referral_display(u: dict[str, Any]) -> dict[str, Any]:
-    """данные приглашённого для мини-приложения."""
-    username = (u.get("username") or "").lstrip("@")
-    email = u.get("email")
-    if username:
-        name = f"@{username}"
-    elif email:
-        name = mask_email(str(email))
-    elif u.get("telegram_id"):
-        # telegram id приглашённого целиком не показываем
-        tg = str(u.get("telegram_id"))
-        name = f"id{tg[:3]}•••{tg[-2:]}" if len(tg) > 5 else "Пользователь"
-    else:
-        name = f"#{u.get('id')}"
-    seed = (username or (str(email) if email else "") or "?")
-    initial = (seed.lstrip("@")[:1] or "?").upper()
-    return {
-        "id": u.get("id"),
-        "username": username or None,
-        "name": name,
-        "initial": initial,
-    }
-
-
 @app.get("/api/app/referral")
 def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
-    fresh = get_user(int(user["id"]))
-    assert fresh is not None
-    refs = db.fetchall("SELECT * FROM users WHERE referred_by = ? ORDER BY id DESC", (fresh["id"],))
-    # заработок с приглашённого из transactions
-    earned: dict[int, float] = {}
-    for r in db.fetchall(
-        "SELECT description, SUM(amount) AS total FROM transactions "
-        "WHERE user_id = ? AND payment_method = 'referral' AND status = 'completed' "
-        "AND description LIKE 'referral bonus from user %' GROUP BY description",
-        (fresh["id"],),
-    ):
-        try:
-            earned[int(str(r["description"]).rsplit(" ", 1)[-1])] = round(float(r["total"] or 0), 2)
-        except (TypeError, ValueError):
-            continue
-    items = []
-    for u in refs:
-        item = _referral_display(u)
-        item["earned"] = earned.get(int(u["id"]), 0)
-        items.append(item)
-    # сначала кто принёс больше, потом новые
-    items.sort(key=lambda x: -float(x["earned"] or 0))
+    """экран «Реферальная программа»: только то, что показывает мини-приложение (список друзей не нужен)."""
     reflevels._ensure_schema()
-    fresh = get_user(int(fresh["id"])) or fresh
-    active = reflevels.active_referrals(int(fresh["id"]))
+    fresh = get_user(int(user["id"])) or user
+    uid = int(fresh["id"])
+    invited = reflevels.invited_referrals(uid)
+    active = reflevels.active_referrals(uid) if invited else 0
     lv = reflevels.level_for(active)
     nxt = reflevels.next_level(active)
-    earn = reflevels.earnings(int(fresh["id"]))
-    rewards = reflevels.rewards_state(fresh)
+    earn = reflevels.earnings(uid)
     return {
         "level": {"key": lv["key"], "name": lv["name"], "rate": reflevels.effective_rate(fresh, active),
                   "level_rate": lv["rate"], "custom_rate": bool(fresh.get("partner_rate_custom"))},
@@ -7276,15 +7232,14 @@ def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         "levels": reflevels.levels_public(),
         "active_count": active,
         "earned_month": earn["month"],
-        "rewards": rewards,
+        "rewards": reflevels.rewards_state(fresh, active),
         # реф. ссылка: t.me/<bot>?start=ref_<id>
-        "code": str(fresh["id"]),
-        "link": f"https://t.me/{BOT_USERNAME}?start=ref_{fresh['id']}",
+        "code": str(uid),
+        "link": f"https://t.me/{BOT_USERNAME}?start=ref_{uid}",
         "is_partner": bool(fresh.get("is_partner")),
         "partner_balance": fresh.get("partner_balance", 0),
         "partner_rate": fresh.get("partner_rate", 25),
-        "referrals_count": len(refs),
-        "referrals": items,
+        "referrals_count": invited,
         "earned_total": earn["total"],
         "min_withdraw": int(services.MIN_WITHDRAW_RUB),
     }

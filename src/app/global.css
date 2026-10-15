@@ -196,6 +196,17 @@ input::placeholder, textarea::placeholder {
   }
 }
 
+/* заглушка вместо цифр, пока грузятся данные */
+.blin-skeleton {
+  background: linear-gradient(90deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.13) 50%, rgba(255,255,255,0.06) 100%);
+  background-size: 200% 100%;
+  animation: blinvpnShimmer 1.2s ease-in-out infinite;
+}
+@keyframes blinvpnShimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.001ms !important;
