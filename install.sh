@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.15-3"
+INSTALLER_VERSION="2026.10.15-4"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -244,8 +244,10 @@ CADDY_FALLBACK_VERSION="2.8.4"
 
 # ── порт HTTPS (по умолчанию 443) ──
 HTTPS_PORT="${HTTPS_PORT:-443}"
+# порт вебхука (ЮKassa и др.) на 127.0.0.1 — WEBHOOK_PORT в .env, по умолчанию 5000
+WEBHOOK_PORT="${WEBHOOK_PORT:-5000}"
 # порты, занятые сервисами BatmanVPN на 127.0.0.1 (+80 для сертификатов/редиректа)
-RESERVED_PORTS="80 3000 4100 5000 8000 9741 9742"
+RESERVED_PORTS="80 3000 4100 ${WEBHOOK_PORT} 8000 9741 9742"
 
 # https://host или https://host:порт
 pub_url() { if [[ "$HTTPS_PORT" == "443" ]]; then printf 'https://%s' "$1"; else printf 'https://%s:%s' "$1" "$HTTPS_PORT"; fi; }
@@ -256,6 +258,38 @@ load_https_port() {
     local p
     p="$(get_env_var HTTPS_PORT .env 2>/dev/null || true)"
     HTTPS_PORT="${p:-443}"
+}
+
+# WEBHOOK_PORT из .env: число 1024–65535, не порт другого сервиса и не HTTPS.
+# Неверное значение — ошибка (контейнер вебхука и Caddy должны смотреть в один порт).
+load_webhook_port() {
+    local p owner
+    p="$(get_env_var WEBHOOK_PORT .env 2>/dev/null || true)"
+    p="${p//[[:space:]\"\']/}"
+    if [[ -z "$p" ]]; then
+        p=5000
+        set_env_var WEBHOOK_PORT "$p"
+    fi
+    if ! [[ "$p" =~ ^[0-9]{4,5}$ ]] || (( p < 1024 || p > 65535 )); then
+        log_error "WEBHOOK_PORT=${p} в .env: нужен порт от 1024 до 65535."
+        return 1
+    fi
+    if [[ " 80 3000 4100 8000 9741 9742 ${HTTPS_PORT} " == *" ${p} "* ]]; then
+        log_error "WEBHOOK_PORT=${p} в .env совпадает с портом другого сервиса BatmanVPN — выберите другой."
+        return 1
+    fi
+    # порт занят чужой программой (не нашим вебхуком: процесс контейнера blinvpn-webhook / uvicorn)
+    owner="$(sudo ss -ltnpH "sport = :${p}" 2>/dev/null | head -n1 || true)"
+    local wpid
+    wpid="$(sudo docker inspect -f '{{.State.Pid}}' blinvpn-webhook 2>/dev/null || true)"
+    if [[ -n "$owner" && "$owner" != *'"uvicorn"'* && ( -z "$wpid" || "$wpid" == "0" || "$owner" != *"pid=${wpid},"* ) ]]; then
+        log_error "WEBHOOK_PORT=${p}: порт уже занят другой программой:"
+        printf '   %s\n' "$owner"
+        hint "Укажите в .env свободный порт (WEBHOOK_PORT=...) и запустите install.sh ещё раз."
+        return 1
+    fi
+    WEBHOOK_PORT="$p"
+    RESERVED_PORTS="80 3000 4100 ${WEBHOOK_PORT} 8000 9741 9742"
 }
 
 # спросить порт HTTPS; Enter — 443
@@ -581,7 +615,7 @@ $(_caddy_api_headers)
 			}
 		}
 		handle /yookassa* {
-			reverse_proxy 127.0.0.1:5000 {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
 $(_caddy_api_headers)
 			}
 		}
@@ -817,9 +851,10 @@ API_URL=$(pub_url "$domain")/api
 # порт HTTPS (Caddy); смена — install.sh → «Сменить порт»
 HTTPS_PORT=${HTTPS_PORT}
 
-# порты сервисов
+# порты сервисов (слушают только 127.0.0.1)
 API_PORT=8000
-WEBHOOK_PORT=5000
+# порт вебхука (уведомления ЮKassa); после смены: install.sh → 1 (перезапуск + Caddy)
+WEBHOOK_PORT=${WEBHOOK_PORT:-5000}
 MINIAPP_PORT=9741
 PANEL_PORT=9742
 
@@ -1851,6 +1886,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     cd "$PROJECT_DIR"
     ensure_compose
     load_https_port
+    load_webhook_port || exit 1
 
     if [[ "${BLINVPN_POST_UPDATE:-}" == "1" ]]; then
         unset BLINVPN_POST_UPDATE
