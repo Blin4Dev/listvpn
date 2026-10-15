@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.15-4"
+INSTALLER_VERSION="2026.10.15-5"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -244,6 +244,8 @@ CADDY_FALLBACK_VERSION="2.8.4"
 
 # ── порт HTTPS (по умолчанию 443) ──
 HTTPS_PORT="${HTTPS_PORT:-443}"
+# домен вебхуков (ЮKassa, Telegram) — WEBHOOK_DOMAIN в .env; пусто = домен мини-приложения
+HOOK_DOMAIN="${HOOK_DOMAIN:-}"
 # порт вебхука (ЮKassa и др.) на 127.0.0.1 — WEBHOOK_PORT в .env, по умолчанию 5000
 WEBHOOK_PORT="${WEBHOOK_PORT:-5000}"
 # порты, занятые сервисами BatmanVPN на 127.0.0.1 (+80 для сертификатов/редиректа)
@@ -258,6 +260,48 @@ load_https_port() {
     local p
     p="$(get_env_var HTTPS_PORT .env 2>/dev/null || true)"
     HTTPS_PORT="${p:-443}"
+}
+
+# WEBHOOK_DOMAIN из .env; совпадает с мини-приложением или пустой — отдельного сайта нет
+load_hook_domain() {
+    local mini h
+    mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
+    h="$(get_env_var WEBHOOK_DOMAIN .env 2>/dev/null || true)"
+    [[ -n "$h" ]] && h="$(sanitize_domain "$h" 2>/dev/null || true)"
+    if [[ -n "$h" ]] && ! _is_domain "$h"; then
+        log_warn "WEBHOOK_DOMAIN в .env некорректный — вебхуки остаются на домене мини-приложения."
+        h=""
+    fi
+    HOOK_DOMAIN="${h:-$mini}"
+}
+
+_is_domain() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$ ]]; }
+
+# домен вебхуков для мини-приложения <mini>: свой или тот же
+hook_for() { printf '%s' "${HOOK_DOMAIN:-$1}"; }
+
+# отдельный ли домен вебхуков (нужен свой сайт и сертификат)
+hook_separate() { [[ -n "$HOOK_DOMAIN" && "$HOOK_DOMAIN" != "$1" ]]; }
+
+# спросить домен вебхуков; Enter — текущий (по умолчанию как у мини-приложения).
+# ask_hook_domain <mini> <panel> [текущий]
+ask_hook_domain() {
+    local mini="$1" panel="$2" cur="${3:-$1}" tmp
+    hint "Вебхуки (уведомления ЮKassa, Telegram) можно принимать на отдельном домене."
+    while true; do
+        prompt "Домен вебхуков (Enter = ${cur}): " tmp
+        if [[ -z "$tmp" ]]; then HOOK_DOMAIN="$cur"; break; fi
+        tmp="$(sanitize_domain "$tmp")"
+        if [[ -z "$tmp" ]] || ! _is_domain "$tmp"; then log_warn "Некорректный домен."; continue; fi
+        if [[ "$tmp" == "$panel" ]]; then log_warn "Домен вебхуков не может совпадать с доменом панели."; continue; fi
+        HOOK_DOMAIN="$tmp"
+        break
+    done
+    if [[ "$HOOK_DOMAIN" == "$mini" ]]; then
+        log_info "Вебхуки — на домене мини-приложения."
+    else
+        log_info "Вебхуки — на отдельном домене ${HOOK_DOMAIN} (A-запись должна указывать на этот сервер)."
+    fi
 }
 
 # WEBHOOK_PORT из .env: число 1024–65535, не порт другого сервиса и не HTTPS.
@@ -659,6 +703,34 @@ $(_caddy_api_headers)
 }
 EOF
     fi
+    if hook_separate "$miniapp_domain" && [[ "$HOOK_DOMAIN" != "$panel_domain" ]]; then
+        cat >> "$tmp" <<EOF
+
+# вебхуки: только ЮKassa и Telegram, остальное 404
+$(site_addr "$HOOK_DOMAIN") {
+	import blin_sec
+${tls_block}
+	request_body {
+		max_size 1MB
+	}
+	route {
+		handle /yookassa* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		handle /api/telegram/webhook {
+			reverse_proxy 127.0.0.1:8000 {
+$(_caddy_api_headers)
+			}
+		}
+		handle {
+			respond 404
+		}
+	}
+}
+EOF
+    fi
 }
 
 # configure_caddy <miniapp> <panel> [<ip_сервера_панели> <секрет_шлюза>]
@@ -714,6 +786,7 @@ caddy_proxy_up() {
     local mini="$1" panel="$2" email="$3"
     local -a domains=("$mini")
     panel_is_remote || domains+=("$panel")
+    if hook_separate "$mini" && [[ "$HOOK_DOMAIN" != "$panel" ]]; then domains+=("$HOOK_DOMAIN"); fi
     install_caddy || return 1
     caddy_prepare_main "$email" || return 1
     free_ports_for_caddy || return 1
@@ -846,7 +919,7 @@ MAIL_ENABLED=0
 # публичные url
 MINIAPP_URL=$(pub_url "$domain")
 PANEL_URL=$(pub_url "$panel_domain")
-WEBHOOK_URL=$(pub_url "$domain")
+WEBHOOK_URL=$(pub_url "$(hook_for "$domain")")
 API_URL=$(pub_url "$domain")/api
 # порт HTTPS (Caddy); смена — install.sh → «Сменить порт»
 HTTPS_PORT=${HTTPS_PORT}
@@ -877,7 +950,8 @@ MINIAPP_ALLOW_UNAUTH=0
 SSL_EMAIL=${email}
 MINIAPP_DOMAIN=${domain}
 PANEL_DOMAIN=${panel_domain}
-WEBHOOK_DOMAIN=${domain}
+# домен вебхуков (ЮKassa, Telegram); смена — install.sh → «Заменить домены»
+WEBHOOK_DOMAIN=$(hook_for "$domain")
 EOF
 
     # .env с секретами: chmod 600
@@ -1124,11 +1198,11 @@ update_env_domains() {
     local panel="$2"
 
     set_env_var MINIAPP_DOMAIN "$miniapp"
-    set_env_var WEBHOOK_DOMAIN "$miniapp"
+    set_env_var WEBHOOK_DOMAIN "$(hook_for "$miniapp")"
     set_env_var PANEL_DOMAIN   "$panel"
 
     set_env_var MINIAPP_URL         "$(pub_url "$miniapp")"
-    set_env_var WEBHOOK_URL         "$(pub_url "$miniapp")"
+    set_env_var WEBHOOK_URL         "$(pub_url "$(hook_for "$miniapp")")"
     set_env_var API_URL             "$(pub_url "$miniapp")/api"
     set_env_var PANEL_URL           "$(pub_url "$panel")"
     set_env_var CORS_ORIGINS        "$(pub_url "$miniapp"),$(pub_url "$panel"),https://web.telegram.org"
@@ -1150,9 +1224,11 @@ replace_domains_flow() {
     cur_panel=$(get_env_var PANEL_DOMAIN || true)
     cur_email=$(get_env_var SSL_EMAIL || true)
 
+    local cur_hook; cur_hook="$(hook_for "$cur_miniapp")"
     log_info "Текущие домены:"
     printf "  Мини-приложение : ${BOLD}%s${NC}\n" "${cur_miniapp:-—}"
     printf "  Панель          : ${BOLD}%s${NC}\n" "${cur_panel:-—}"
+    printf "  Вебхуки         : ${BOLD}%s${NC}%s\n" "${cur_hook:-—}" "$([[ "$cur_hook" == "$cur_miniapp" ]] && echo " (как у мини-приложения)")"
     echo
 
     if [[ -z "$cur_email" ]]; then
@@ -1179,7 +1255,26 @@ replace_domains_flow() {
         new_panel="$tmp"; changed+=("$new_panel"); old_domains+=("$cur_panel")
     fi
 
-    if ((${#changed[@]} == 0)); then
+    # вебхуки: были на домене мини-приложения — переезжают вместе с ним, если не выбрать свой
+    local new_hook="$cur_hook"
+    [[ "$cur_hook" == "$cur_miniapp" ]] && new_hook="$new_miniapp"
+    if confirm "Заменить домен вебхуков (${cur_hook})? (y/n): "; then
+        ask_hook_domain "$new_miniapp" "$new_panel" "$new_miniapp"
+        new_hook="$HOOK_DOMAIN"
+    fi
+    if [[ "$new_hook" == "$new_panel" ]]; then
+        log_error "Домен вебхуков не может совпадать с доменом панели."
+        exit 1
+    fi
+    HOOK_DOMAIN="$new_hook"
+    if [[ "$new_hook" != "$cur_hook" && "$new_hook" != "$new_miniapp" ]]; then
+        changed+=("$new_hook")
+    fi
+    if [[ "$cur_hook" != "$cur_miniapp" && "$cur_hook" != "$new_hook" ]]; then
+        old_domains+=("$cur_hook")
+    fi
+
+    if ((${#changed[@]} == 0)) && [[ "$new_hook" == "$cur_hook" ]]; then
         log_warn "Ни один домен не выбран. Изменений нет."
         return 0
     fi
@@ -1187,6 +1282,7 @@ replace_domains_flow() {
     log_info "\nНовые домены:"
     printf "  Мини-приложение : ${BOLD}%s${NC}\n" "$new_miniapp"
     printf "  Панель          : ${BOLD}%s${NC}\n" "$new_panel"
+    printf "  Вебхуки         : ${BOLD}%s${NC}\n" "$new_hook"
     echo
     confirm "Применить замену? (y/n): " || { log_info "Отменено."; return 0; }
 
@@ -1247,13 +1343,17 @@ replace_domains_flow() {
         fi
     fi
 
-    if [[ "$new_miniapp" != "$cur_miniapp" ]]; then
-        section "Telegram Stars"
+    if [[ "$new_hook" != "$cur_hook" ]]; then
+        section "Вебхуки"
         local bot_token; bot_token=$(get_env_var TELEGRAM_BOT_TOKEN || true)
         TELEGRAM_STARS_DELIVERY="$(get_env_var TELEGRAM_STARS_DELIVERY || true)"
         TELEGRAM_STARS_DELIVERY="${TELEGRAM_STARS_DELIVERY:-bot}"
-        register_telegram_webhook "$bot_token" "$new_miniapp"
-        print_payment_webhooks "$new_miniapp"
+        register_telegram_webhook "$bot_token" "$new_hook"
+        print_payment_webhooks "$new_hook"
+        log_warn "Укажите новый адрес уведомлений в личном кабинете ЮKassa (см. выше)."
+        if [[ "$new_miniapp" == "$cur_miniapp" ]]; then
+            hint "Старый адрес $(pub_url "$cur_miniapp")/yookassa тоже продолжает работать."
+        fi
     fi
 
     # старые certbot-сертификаты прежних доменов (если остались от nginx-версии)
@@ -1262,6 +1362,7 @@ replace_domains_flow() {
     section "Замена доменов завершена"
     printf "  Мини-приложение : ${YELLOW}%s${NC}\n" "$(pub_url "$new_miniapp")"
     printf "  Панель          : ${YELLOW}%s${NC}\n" "$(pub_url "$new_panel")"
+    printf "  Вебхуки         : ${YELLOW}%s${NC}\n" "$(pub_url "$new_hook")/yookassa"
     if [[ "$new_miniapp" != "$cur_miniapp" ]]; then
         echo
         log_warn "Обновите Web App URL в @BotFather:"
@@ -1856,7 +1957,7 @@ change_port_flow() {
             || log_warn "Панель на отдельном сервере не обновлена — повторите: install.sh → «Панель на отдельном сервере»."
     fi
     TELEGRAM_STARS_DELIVERY="$(get_env_var TELEGRAM_STARS_DELIVERY || true)"
-    register_telegram_webhook "$(get_env_var TELEGRAM_BOT_TOKEN || true)" "$mini"
+    register_telegram_webhook "$(get_env_var TELEGRAM_BOT_TOKEN || true)" "$(hook_for "$mini")"
     if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active' && [[ "$old" != "443" ]]; then
         sudo ufw delete allow "${old}/tcp" >/dev/null 2>&1 || true
     fi
@@ -1864,7 +1965,7 @@ change_port_flow() {
     printf "  Мини-приложение : ${YELLOW}%s${NC}\n" "$(pub_url "$mini")"
     printf "  Панель          : ${YELLOW}%s${NC}\n" "$(pub_url "$panel")"
     log_warn "Обновите Web App URL в @BotFather и адрес уведомлений в ЮKassa:"
-    printf "     ${CYAN}%s${NC}   и   ${CYAN}%s/yookassa${NC}\n" "$(pub_url "$mini")" "$(pub_url "$mini")"
+    printf "     ${CYAN}%s${NC}   и   ${CYAN}%s/yookassa${NC}\n" "$(pub_url "$mini")" "$(pub_url "$(hook_for "$mini")")"
 }
 
 REPO_URL="${BLINVPN_REPO_URL:-https://github.com/Blin4Dev/listvpn.git}"
@@ -1887,6 +1988,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     ensure_compose
     load_https_port
     load_webhook_port || exit 1
+    load_hook_domain
 
     if [[ "${BLINVPN_POST_UPDATE:-}" == "1" ]]; then
         unset BLINVPN_POST_UPDATE
@@ -1914,6 +2016,8 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
                 log_error "Не удалось применить Caddy. Контейнеры обновлены; прокси оставлен как был."
                 exit 1
             fi
+            set_env_var WEBHOOK_DOMAIN "$(hook_for "$_upd_mini")"
+            set_env_var WEBHOOK_URL "$(pub_url "$(hook_for "$_upd_mini")")"
         else
             log_warn "В .env нет MINIAPP_DOMAIN/PANEL_DOMAIN — прокси не перенастроен."
         fi
@@ -2043,6 +2147,7 @@ PANEL_DOMAIN=$(sanitize_domain "$USER_PANEL_DOMAIN_INPUT")
 [[ -n "$PANEL_DOMAIN" ]] || { log_error "Некорректный домен панели."; exit 1; }
 
 prompt_valid "Email для Let's Encrypt: " EMAIL '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' "Email вида name@example.com"
+ask_hook_domain "$DOMAIN" "$PANEL_DOMAIN"
 ask_https_port 443
 
 PANEL_REMOTE=0
@@ -2067,6 +2172,9 @@ PANEL_DOMAIN_IP=$(resolve_domain_ip "$PANEL_DOMAIN" || true)
 if [[ -n "$SERVER_IP" && -n "$DOMAIN_IP" && "$SERVER_IP" != "$DOMAIN_IP" ]]; then
     log_warn "DNS ${DOMAIN} не совпадает с IP сервера."
     confirm "Продолжить? (y/n): " || exit 1
+fi
+if hook_separate "$DOMAIN"; then
+    dns_preflight "$HOOK_DOMAIN" || exit 1
 fi
 if [[ $PANEL_REMOTE -eq 1 ]]; then
     panel_remote_check_dns "$PANEL_DOMAIN" || exit 1
@@ -2133,7 +2241,7 @@ fi
 log_info "\nШаг 7: Telegram Stars"
 TELEGRAM_STARS_DELIVERY="$(get_env_var TELEGRAM_STARS_DELIVERY || true)"
 TELEGRAM_STARS_DELIVERY="${TELEGRAM_STARS_DELIVERY:-bot}"
-register_telegram_webhook "${TELEGRAM_BOT_TOKEN:-}" "$DOMAIN"
+register_telegram_webhook "${TELEGRAM_BOT_TOKEN:-}" "$(hook_for "$DOMAIN")"
 
 # логин/пароль панели: data/first_run_credentials.txt, показать один раз и удалить
 log_info "\nШаг 8: Доступ в панель"
@@ -2166,4 +2274,4 @@ else
     printf "  Панель:           ${YELLOW}%s${NC}\n" "$(pub_url "$PANEL_DOMAIN")"
 fi
 printf "  API:              ${YELLOW}%s/api${NC}\n" "$(pub_url "$DOMAIN")"
-print_payment_webhooks "$DOMAIN"
+print_payment_webhooks "$(hook_for "$DOMAIN")"
