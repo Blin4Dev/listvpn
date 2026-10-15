@@ -119,12 +119,21 @@ export async function appFetch<T = unknown>(
   options: RequestInit = {},
 ): Promise<T> {
   const clean = path.startsWith("/") ? path : `/${path}`;
+  const method = String(options.method || "GET").toUpperCase();
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
     ...initDataHeader(),
     ...(options.headers as Record<string, string> | undefined),
   };
-  const res = await fetch(`/api/app${clean}`, { ...options, headers });
+  const mutating = method !== "GET" && method !== "HEAD";
+  if (mutating) headers["Content-Type"] = "application/json";
+  // абсолютный url: в Telegram WebView относительный /api иногда уходит на web.telegram.org → Failed to fetch
+  const url = `${window.location.origin}/api/app${clean}`;
+  const res = await fetch(url, {
+    ...options,
+    method,
+    headers,
+    body: mutating && options.body == null ? "{}" : options.body,
+  });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const msg =
@@ -169,7 +178,7 @@ export async function authAndGetUser(): Promise<AppUser | null> {
   try {
     const headers = initDataHeader();
     if (!headers["X-Telegram-Init-Data"]) return null;
-    const res = await fetch("/api/app/auth", { method: "POST", headers });
+    const res = await fetch(`${window.location.origin}/api/app/auth`, { method: "POST", headers });
     if (!res.ok) return null;
     const body = (await res.json()) as { user?: AppUser };
     return body.user || null;
@@ -494,7 +503,7 @@ export async function checkAuth(): Promise<boolean> {
     try {
       const headers = initDataHeader();
       delete headers["X-App-Session"];
-      const res = await fetch("/api/app/auth", { method: "POST", headers });
+      const res = await fetch(`${window.location.origin}/api/app/auth`, { method: "POST", headers });
       if (res.ok) {
         const body = (await res.json()) as { token?: string };
         if (body.token) setAppToken(body.token);

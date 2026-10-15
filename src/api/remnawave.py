@@ -208,10 +208,10 @@ class RemnawaveAPI:
             params["filters"] = filters
         if sorting is not None:
             params["sorting"] = sorting
-        return self.get("/api/users", params=params)
+        return self.get("/api/users/", params=params)
 
     def get_user(self, user_id: int) -> Any:
-        return self.get(f"/api/users/{user_id}")
+        return self.get(f"/api/users/{int(user_id)}")
 
     def get_user_by_username(self, username: str) -> Any:
         return self.get(f"/api/users/by-username/{urllib.parse.quote(username, safe='')}")
@@ -229,20 +229,20 @@ class RemnawaveAPI:
         telegram_id: Optional[int] = None,
         email: Optional[str] = None,
     ) -> Any:
-        # применяем все способы идентификации принадлежность подписки пользователю
+        # 3.x: ровно одно из id / shortUuid / username. uuid/telegramId/email панель игнорирует
+        # и при пустом теле может вернуть чужого пользователя.
         body: dict[str, Any] = {}
         if id is not None:
-            body["id"] = id
-        if uuid is not None:
-            body["uuid"] = uuid
-        if short_uuid is not None:
+            body["id"] = int(id)
+        elif short_uuid:
             body["shortUuid"] = short_uuid
-        if username is not None:
+        elif username:
             body["username"] = username
-        if telegram_id is not None:
-            body["telegramId"] = telegram_id
-        if email is not None:
-            body["email"] = email
+        else:
+            raise RemnawaveValidationError(
+                "resolve: нужен id, shortUuid или username",
+                status=400,
+            )
         return self.post("/api/users/resolve", json_body=body)
 
     def create_user(
@@ -285,27 +285,28 @@ class RemnawaveAPI:
             "external_squad_uuid": external_squad_uuid,
             **extra,
         }
-        return self.post("/api/users", json_body=body)
+        return self.post("/api/users/", json_body=body)
 
     def update_user(self, *, id: Optional[int] = None, username: Optional[str] = None, **fields: Any) -> Any:
         body: dict[str, Any] = {**fields}
+        body.pop("uuid", None)
         if id is not None:
-            body["id"] = id
+            body["id"] = int(id)
         if username is not None:
             body["username"] = username
-        return self.patch("/api/users", json_body=body)
+        return self.patch("/api/users/", json_body=body)
 
     def delete_user(self, user_id: int) -> Any:
-        return self.delete(f"/api/users/{user_id}")
+        return self.delete(f"/api/users/{int(user_id)}")
 
     def enable_user(self, user_id: int) -> Any:
-        return self.post(f"/api/users/{user_id}/actions/enable")
+        return self.post(f"/api/users/{int(user_id)}/actions/enable")
 
     def disable_user(self, user_id: int) -> Any:
-        return self.post(f"/api/users/{user_id}/actions/disable")
+        return self.post(f"/api/users/{int(user_id)}/actions/disable")
 
     def reset_user_traffic(self, user_id: int) -> Any:
-        return self.post(f"/api/users/{user_id}/actions/reset-traffic")
+        return self.post(f"/api/users/{int(user_id)}/actions/reset-traffic")
 
     def revoke_user_subscription(self, user_id: int, body: Optional[dict[str, Any]] = None) -> Any:
         return self.post(f"/api/users/{user_id}/actions/revoke", json_body=body or {})
@@ -624,34 +625,29 @@ class RemnawaveAPI:
         return result
 
     def find_user_by_telegram(self, telegram_id: int) -> Optional[dict[str, Any]]:
+        tg = int(telegram_id)
         try:
-            user = self.resolve_user(telegram_id=telegram_id)
-            if isinstance(user, dict):
-                return user
-        except RemnawaveNotFoundError:
-            return None
-        except RemnawaveValidationError:
-            # fallback страницами
-            start = 0
-            size = 100
-            while True:
-                page = self.get_users(start=start, size=size)
-                users = page.get("users") if isinstance(page, dict) else page
-                if not users:
-                    break
-                for u in users:
-                    if int(u.get("telegramId") or u.get("telegram_id") or 0) == int(telegram_id):
-                        return u
-                if isinstance(page, dict) and page.get("total") is not None:
-                    start += size
-                    if start >= int(page["total"]):
-                        break
-                else:
-                    if len(users) < size:
-                        break
-                    start += size
-            return None
-        return None
+            page = self.get("/api/users/stream", params={"telegramId": str(tg), "size": 250})
+        except RemnawaveError:
+            page = None
+        users = page.get("users") if isinstance(page, dict) else page
+        if isinstance(users, list):
+            for u in users:
+                if isinstance(u, dict) and str(u.get("telegramId") or u.get("telegram_id") or "") == str(tg):
+                    return u
+        start, size = 0, 100
+        while True:
+            page = self.get_users(start=start, size=size)
+            users = page.get("users") if isinstance(page, dict) else page
+            if not users:
+                return None
+            for u in users:
+                if isinstance(u, dict) and str(u.get("telegramId") or u.get("telegram_id") or "") == str(tg):
+                    return u
+            start += size
+            total = page.get("total") if isinstance(page, dict) else None
+            if (total is not None and start >= int(total)) or len(users) < size:
+                return None
 
     def ensure_user(
         self,

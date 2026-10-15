@@ -200,7 +200,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if _cors_wildcard else CORS_ORIGINS,
     allow_credentials=not _cors_wildcard,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Telegram-Init-Data",
                    "X-App-Session", "X-Panel-Setup-Token"],
 )
@@ -1186,7 +1186,9 @@ def _rw_num_id(rw: dict[str, Any]) -> Optional[int]:
     if val is None:
         val = rw.get("userId")
     try:
-        return int(val) if val is not None else None
+        if val is None or (isinstance(val, str) and not val.isdigit()):
+            return None
+        return int(val)
     except (TypeError, ValueError):
         return None
 
@@ -6001,7 +6003,8 @@ def app_config(request: Request) -> dict[str, Any]:
 
 
 # заблокированный видит главную в состоянии «заблокирована»
-_BANNED_ALLOWED_PATHS = {"/api/app/auth", "/api/app/me", "/api/app/membership",
+_BANNED_ALLOWED_PATHS = {"/api/app/auth", "/api/app/me", "/api/app/me/terms", "/api/app/membership",
+                         "/api/app/legal",
                          # заблокированным поддержка всё равно нужна
                          "/api/app/support", "/api/app/support/upload", "/api/app/support/messages",
                          "/api/app/support/read", "/api/app/support/close"}

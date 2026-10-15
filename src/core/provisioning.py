@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import os
-import urllib.parse
-import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -72,6 +70,14 @@ def _local_user_id(telegram_id: Optional[int], email: Optional[str]) -> Optional
 LEGACY_PREFIX = "user_"
 
 
+def _as_user(data: Any) -> Optional[dict[str, Any]]:
+    if isinstance(data, dict) and "response" in data:
+        data = data["response"]
+    if isinstance(data, dict) and (data.get("id") is not None or data.get("username")):
+        return data
+    return None
+
+
 def _as_list(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, dict) and "response" in data:
         data = data["response"]
@@ -79,25 +85,72 @@ def _as_list(data: Any) -> list[dict[str, Any]]:
         for key in ("users", "items", "data"):
             if isinstance(data.get(key), list):
                 return [u for u in data[key] if isinstance(u, dict)]
-        return [data] if (data.get("uuid") or data.get("id")) else []
+        return []
     if isinstance(data, list):
         return [u for u in data if isinstance(u, dict)]
     return []
 
 
-def _users_by_telegram(client: Any, telegram_id: int) -> list[dict[str, Any]]:
-    """ВСЕ пользователи панели с этим telegramId (их может быть несколько — из разных проектов)."""
-    tg = int(telegram_id)
-    for path, params in (("/api/users/stream", {"telegramId": tg, "size": 250}),
-                         (f"/api/users/by-telegram-id/{tg}", None)):
+def _tg_of(u: dict[str, Any]) -> str:
+    v = u.get("telegramId")
+    if v is None:
+        v = u.get("telegram_id")
+    return str(v) if v is not None and str(v) != "" else ""
+
+
+def _email_of(u: dict[str, Any]) -> str:
+    return str(u.get("email") or "").strip().lower()
+
+
+def _num_id(u: dict[str, Any]) -> Optional[int]:
+    val = u.get("id")
+    if val is None:
+        val = u.get("userId")
+    try:
+        return int(val) if val is not None and str(val).isdigit() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _by_username(client: Any, username: str) -> Optional[dict[str, Any]]:
+    try:
+        return _as_user(client.get_user_by_username(username))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _stream_users(client: Any, **params: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    cursor: Any = None
+    for _ in range(40):
+        q = {k: v for k, v in params.items() if v is not None}
+        q["size"] = int(q.get("size") or 250)
+        if cursor is not None:
+            q["cursor"] = cursor
         try:
-            found = _as_list(client.get(path, params=params) if params else client.get(path))
+            page = client.get("/api/users/stream", params=q)
         except Exception:  # noqa: BLE001
-            continue
-        found = [u for u in found if str(u.get("telegramId") or u.get("telegram_id") or "") == str(tg)]
-        if found:
-            return found
-    # запасной вариант: просмотр страницами
+            break
+        if isinstance(page, dict) and "response" in page:
+            page = page["response"]
+        users = _as_list(page)
+        if not users:
+            break
+        out.extend(users)
+        if not (isinstance(page, dict) and page.get("hasMore")):
+            break
+        cursor = page.get("nextCursor")
+        if cursor is None:
+            break
+    return out
+
+
+def _users_by_telegram(client: Any, telegram_id: int) -> list[dict[str, Any]]:
+    """пользователи панели с этим telegramId (их может быть несколько — из разных проектов)."""
+    tg = int(telegram_id)
+    found = [u for u in _stream_users(client, telegramId=str(tg)) if _tg_of(u) == str(tg)]
+    if found:
+        return found
     out: list[dict[str, Any]] = []
     try:
         start, size = 0, 250
@@ -106,7 +159,7 @@ def _users_by_telegram(client: Any, telegram_id: int) -> list[dict[str, Any]]:
             users = _as_list(page)
             if not users:
                 break
-            out += [u for u in users if str(u.get("telegramId") or u.get("telegram_id") or "") == str(tg)]
+            out += [u for u in users if _tg_of(u) == str(tg)]
             start += size
             total = (page.get("response") or page).get("total") if isinstance(page, dict) else None
             if (total is not None and start >= int(total)) or len(users) < size:
@@ -117,16 +170,31 @@ def _users_by_telegram(client: Any, telegram_id: int) -> list[dict[str, Any]]:
 
 
 def _users_by_email(client: Any, email: str) -> list[dict[str, Any]]:
-    for call in (lambda: client.get("/api/users/stream", params={"email": email, "size": 250}),
-                 lambda: client.get("/api/users/by-email/" + urllib.parse.quote(email, safe="")),
-                 lambda: client.resolve_user(email=email)):
-        try:
-            found = [u for u in _as_list(call()) if str(u.get("email") or "").lower() == email.lower()]
-        except Exception:  # noqa: BLE001
-            continue
-        if found:
-            return found
-    return []
+    want = email.strip().lower()
+    if not want:
+        return []
+    found = [u for u in _stream_users(client, email=want) if _email_of(u) == want]
+    return found
+
+
+def _owned(u: dict[str, Any], *, user_id: Optional[int], telegram_id: Optional[int],
+           email: Optional[str]) -> bool:
+    """только batman_<наш id> или legacy user_… с тем же telegram/email."""
+    if not isinstance(u, dict) or _num_id(u) is None:
+        return False
+    name = str(u.get("username") or "")
+    if user_id and name == rw_username(int(user_id)):
+        return True
+    if not name.startswith(LEGACY_PREFIX):
+        return False
+    desc = str(u.get("description") or "").strip()
+    if user_id and desc.isdigit() and int(desc) != int(user_id):
+        return False
+    if telegram_id and _tg_of(u) == str(int(telegram_id)):
+        return True
+    if email and _email_of(u) == str(email).strip().lower():
+        return True
+    return False
 
 
 def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[int] = None,
@@ -138,22 +206,27 @@ def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[
     if user_id is None:
         user_id = _local_user_id(telegram_id, email)
     if user_id:
-        rw = _resolve_quiet(client, username=rw_username(int(user_id)))
-        if rw:
+        rw = _by_username(client, rw_username(int(user_id)))
+        if rw and _owned(rw, user_id=user_id, telegram_id=telegram_id, email=email):
             return rw
     candidates: list[dict[str, Any]] = []
     if telegram_id:
         candidates += _users_by_telegram(client, int(telegram_id))
     if email:
         candidates += _users_by_email(client, str(email))
+    seen: set[int] = set()
     for u in candidates:
-        if str(u.get("username") or "").startswith(LEGACY_PREFIX) and (u.get("uuid") or u.get("id")):
+        nid = _num_id(u)
+        if nid is None or nid in seen:
+            continue
+        seen.add(nid)
+        if _owned(u, user_id=user_id, telegram_id=telegram_id, email=email):
             return u
     return None
 
 
 def _extract(user: dict[str, Any]) -> dict[str, Any]:
-    rw_id = user.get("uuid") or user.get("id") or user.get("userId")
+    rw_id = user.get("id") or user.get("userId") or user.get("uuid")
     short = user.get("shortUuid") or user.get("short_uuid")
     return {
         "rw_id": str(rw_id) if rw_id is not None else None,
@@ -200,17 +273,17 @@ def provision(
         ext_squad = external_squad()
 
         if existing:
-            uid = existing.get("id") or existing.get("userId") or existing.get("uuid")
+            uid = _num_id(existing)
+            if uid is None:
+                result["error"] = "user_id_missing"
+                return result
             patch: dict[str, Any] = {
+                "id": uid,
                 "status": "ACTIVE",
                 "expire_at": expire_at,
                 "hwid_device_limit": int(max(1, devices)),
                 "traffic_limit_strategy": traffic_reset_strategy,
             }
-            if isinstance(uid, int) or (isinstance(uid, str) and uid.isdigit()):
-                patch["id"] = int(uid)
-            else:
-                patch["uuid"] = uid
             if squad_list:
                 patch["active_internal_squads"] = squad_list
             if ext_squad:
@@ -222,8 +295,7 @@ def provision(
             if user_id:
                 patch["description"] = str(int(user_id))
             user = client.update_user(**patch)
-            # опциональный сброс трафика (напр. trial→paid)
-            if reset_traffic and uid is not None:
+            if reset_traffic:
                 try:
                     client.reset_user_traffic(uid)
                 except Exception:  # noqa: BLE001
@@ -232,19 +304,45 @@ def provision(
             if not user_id:
                 result["error"] = "user_id_unknown"
                 return result
-            user = client.create_user(
-                username=rw_username(int(user_id)),
-                expire_at=expire_at,
-                status="ACTIVE",
-                telegram_id=int(telegram_id) if telegram_id else None,
-                email=email or None,
-                description=str(int(user_id)) if user_id else None,
-                hwid_device_limit=int(max(1, devices)),
-                traffic_limit_bytes=traffic_limit_bytes or None,
-                traffic_limit_strategy=traffic_reset_strategy,
-                active_internal_squads=squad_list or None,
-                external_squad_uuid=ext_squad,
-            )
+            try:
+                user = client.create_user(
+                    username=rw_username(int(user_id)),
+                    expire_at=expire_at,
+                    status="ACTIVE",
+                    telegram_id=int(telegram_id) if telegram_id else None,
+                    email=email or None,
+                    description=str(int(user_id)),
+                    hwid_device_limit=int(max(1, devices)),
+                    traffic_limit_bytes=traffic_limit_bytes or None,
+                    traffic_limit_strategy=traffic_reset_strategy,
+                    active_internal_squads=squad_list or None,
+                    external_squad_uuid=ext_squad,
+                )
+            except Exception as created:  # noqa: BLE001
+                # username уже есть → обновляем своего batman_<id>, а не чужого
+                raced = _by_username(client, rw_username(int(user_id)))
+                if not raced or not _owned(raced, user_id=user_id, telegram_id=telegram_id, email=email):
+                    raise created
+                uid = _num_id(raced)
+                if uid is None:
+                    raise created
+                extra: dict[str, Any] = {"description": str(int(user_id))}
+                if squad_list:
+                    extra["active_internal_squads"] = squad_list
+                if ext_squad:
+                    extra["external_squad_uuid"] = ext_squad
+                if traffic_limit_bytes:
+                    extra["traffic_limit_bytes"] = traffic_limit_bytes
+                if email:
+                    extra["email"] = email
+                user = client.update_user(
+                    id=uid,
+                    status="ACTIVE",
+                    expire_at=expire_at,
+                    hwid_device_limit=int(max(1, devices)),
+                    traffic_limit_strategy=traffic_reset_strategy,
+                    **extra,
+                )
 
         if not isinstance(user, dict):
             result["error"] = "unexpected_remnawave_response"
@@ -268,20 +366,21 @@ def find_user(client: Any, telegram_id: Optional[int], email: Optional[str] = No
 
 
 def rw_ref(rw: dict[str, Any]) -> dict[str, Any]:
-    uid = rw.get("id") or rw.get("userId") or rw.get("uuid")
-    if isinstance(uid, int) or (isinstance(uid, str) and uid.isdigit()):
-        return {"id": int(uid)}
-    return {"uuid": uid}
+    uid = _num_id(rw)
+    if uid is None:
+        raise ValueError("remnawave user id missing")
+    return {"id": uid}
 
 
 def _resolve_quiet(client: Any, **kw: Any) -> Optional[dict[str, Any]]:
+    username = kw.get("username")
+    if username:
+        return _by_username(client, str(username))
     try:
-        rw = client.resolve_user(**kw)
+        rw = client.resolve_user(**{k: v for k, v in kw.items() if k in ("id", "short_uuid", "username") and v is not None})
     except Exception:  # noqa: BLE001
         return None
-    if isinstance(rw, dict) and "response" in rw:
-        rw = rw["response"]
-    return rw if isinstance(rw, dict) and (rw.get("uuid") or rw.get("id")) else None
+    return _as_user(rw)
 
 
 def backfill_descriptions(tg_to_user_id: dict[int, int]) -> dict[str, Any]:
@@ -330,7 +429,7 @@ def reset_traffic(telegram_id: int, email: Optional[str] = None) -> dict[str, An
         return out
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        rw = lookup(client, telegram_id=telegram_id, email=email)
+        rw = lookup(client, telegram_id=telegram_id or None, email=email)
         if not isinstance(rw, dict):
             out["error"] = "user_not_found"
             return out
@@ -418,18 +517,19 @@ def set_enabled(telegram_id: Optional[int], enabled: bool, email: Optional[str] 
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def delete_user(telegram_id: Optional[int], email: Optional[str] = None) -> dict[str, Any]:
+def delete_user(telegram_id: Optional[int], email: Optional[str] = None,
+                user_id: Optional[int] = None) -> dict[str, Any]:
     if not is_configured():
         return {"ok": False, "error": "remnawave_not_configured"}
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        rw = lookup(client, telegram_id=telegram_id, email=email)
+        rw = lookup(client, user_id=user_id, telegram_id=telegram_id, email=email)
         if not isinstance(rw, dict):
             return {"ok": True, "already_absent": True}
-        uid = rw.get("id")
+        uid = _num_id(rw)
         if uid is None:
-            uid = rw.get("userId") or rw.get("uuid")
-        client.delete_user(int(uid) if str(uid).isdigit() else uid)
+            return {"ok": False, "error": "user_id_missing"}
+        client.delete_user(uid)
         return {"ok": True}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

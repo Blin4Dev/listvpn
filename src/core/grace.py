@@ -68,7 +68,10 @@ def _client_and_user(user: dict[str, Any]) -> tuple[Any, Optional[dict[str, Any]
 
 
 def _rw_uid(rw: dict[str, Any]) -> Any:
-    return rw.get("id") or rw.get("userId") or rw.get("uuid")
+    uid = rw.get("id")
+    if uid is None:
+        uid = rw.get("userId")
+    return int(uid) if uid is not None and str(uid).isdigit() else uid
 
 
 def _cycle_exp(cycle: Any) -> str:

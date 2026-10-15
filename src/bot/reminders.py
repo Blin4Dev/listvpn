@@ -587,7 +587,7 @@ def delete_subscription(sub: dict[str, Any], log: Callable[[str], None] = print)
     if not other_alive:
         user = db.fetchone("SELECT telegram_id, email FROM users WHERE id = ?", (uid,)) or {}
         if provisioning.is_configured():
-            res = provisioning.delete_user(user.get("telegram_id"), user.get("email"))
+            res = provisioning.delete_user(user.get("telegram_id"), user.get("email"), user_id=uid)
             if not res.get("ok"):
                 log(f"[expiry] Remnawave: не удалось удалить пользователя {uid}: {res.get('error')}")
                 return False

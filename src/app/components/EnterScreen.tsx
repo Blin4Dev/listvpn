@@ -255,7 +255,10 @@ function WelcomeTerms({ onAccepted }: { onAccepted: () => void }) {
       await acceptTerms();
       onAccepted();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Не удалось сохранить. Попробуйте ещё раз.");
+      const raw = e instanceof Error ? e.message : "";
+      setErr(raw === "Failed to fetch"
+        ? "Нет связи с сервером. Проверьте интернет и нажмите ещё раз."
+        : (raw || "Не удалось сохранить. Попробуйте ещё раз."));
       setBusy(false);
     }
   };
