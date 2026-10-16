@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 API_URL = "https://api.yookassa.ru/v3"
 
-# способ оплаты в мини-приложении → payment_method_data.type YooKassa
+# способы в приложении (на форму ЮKassa не передаём: иначе «method is not available»)
 APP_METHOD_MAP: dict[str, str] = {
     "sbp": "sbp",
     "card": "bank_card",
@@ -120,6 +120,9 @@ class YooKassaClient:
             msg = None
             if isinstance(payload, dict):
                 msg = payload.get("description") or payload.get("code")
+                param = payload.get("parameter")
+                if param and msg:
+                    msg = f"{msg} ({param})"
             raise YooKassaError(str(msg or raw or e.reason), status=e.code, payload=payload) from e
         except urllib.error.URLError as e:
             raise YooKassaError(f"Не удалось связаться с ЮKassa: {e.reason}") from e
@@ -138,20 +141,25 @@ class YooKassaClient:
         receipt_email: Optional[str] = None,
         receipt_item: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Платёж с подтверждением через redirect; payment_id — наш id (metadata + ключ идемпотентности)."""
+        """Платёж с redirect. Способ не фиксируем в payment_method_data: иначе ЮKassa
+        отвечает «Payment method is not available», если СБП/карта/SberPay не подключены
+        в этом магазине. Форма ЮKassa сама покажет доступные методы.
+        Чек 54-ФЗ — в том же запросе (https://yookassa.ru/developers/payment-acceptance/receipts/54fz/yoomoney/payments)."""
         body: dict[str, Any] = {
             "amount": {"value": _money(amount), "currency": "RUB"},
             "capture": True,
-            "confirmation": {"type": "redirect", "return_url": return_url or _env("YOOKASSA_RETURN_URL") or "https://yookassa.ru"},
+            "confirmation": {
+                "type": "redirect",
+                "return_url": return_url or _env("YOOKASSA_RETURN_URL") or "https://yookassa.ru",
+            },
             "metadata": {"payment_id": str(payment_id)},
         }
         if user_id:
             body["metadata"]["user_id"] = str(user_id)
+        if method:
+            body["metadata"]["method"] = str(method)
         if description:
             body["description"] = description[:128]
-        pm_type = APP_METHOD_MAP.get(str(method or ""))
-        if pm_type:
-            body["payment_method_data"] = {"type": pm_type}
         receipt = self._receipt(amount, receipt_email, receipt_item or description)
         if receipt:
             body["receipt"] = receipt
@@ -186,28 +194,30 @@ class YooKassaClient:
 
     @staticmethod
     def receipts_enabled() -> bool:
-        return _env("YOOKASSA_RECEIPT", default="0").lower() in ("1", "true", "yes", "on")
+        # выкл. только явно: магазину с 54-ФЗ чек обязателен при каждом платеже
+        return _env("YOOKASSA_RECEIPT", default="1").lower() not in ("0", "false", "no", "off")
 
     def _receipt(self, amount: float, email: Optional[str], item: Optional[str]) -> Optional[dict[str, Any]]:
         if not self.receipts_enabled():
             return None
-        contact = (email or "").strip() or _env("YOOKASSA_RECEIPT_EMAIL")
-        if not contact:
+        contact = (email or "").strip() or _env("YOOKASSA_RECEIPT_EMAIL") or _env("MAIL_FROM")
+        if "@" not in contact:
             return None
         try:
-            vat = int(_env("YOOKASSA_VAT_CODE", default="1"))  # 1 = без НДС
+            vat = int(_env("YOOKASSA_VAT_CODE", default="1"))  # 1 = НДС не облагается
         except ValueError:
             vat = 1
         receipt: dict[str, Any] = {
             "customer": {"email": contact},
             "items": [{
                 "description": (item or "Доступ к VPN-сервису")[:128],
-                "quantity": "1.00",
+                "quantity": 1.0,
                 "amount": {"value": _money(amount), "currency": "RUB"},
                 "vat_code": vat,
                 "payment_subject": "service",
                 "payment_mode": "full_payment",
             }],
+            "internet": True,
         }
         tax = _env("YOOKASSA_TAX_SYSTEM_CODE")
         if tax.isdigit():
