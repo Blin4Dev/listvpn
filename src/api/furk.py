@@ -103,13 +103,32 @@ def key_info(key_id: str) -> Optional[dict[str, Any]]:
     return res.get("key") if isinstance(res.get("key"), dict) else res
 
 
-def create_key(limit_gb: int, months: int, idem: Optional[str] = None) -> dict[str, Any]:
-    res = _request("POST", "/keys", {"limit_gb": int(limit_gb), "months": int(months)}, idem=idem)
+def _period(months: Optional[int] = None, days: Optional[int] = None, hours: Optional[int] = None) -> dict[str, int]:
+    """ровно одно из months / days / hours, как в API v2."""
+    if days is not None:
+        d = int(days)
+        if not 1 <= d <= 1095:
+            raise FurkError(400, "VALIDATION_ERROR", "дней: от 1 до 1095")
+        return {"days": d}
+    if hours is not None:
+        h = int(hours)
+        if not 1 <= h <= 26280:
+            raise FurkError(400, "VALIDATION_ERROR", "часов: от 1 до 26280")
+        return {"hours": h}
+    m = max(1, min(36, int(months or 1)))
+    return {"months": m}
+
+
+def create_key(limit_gb: int, months: Optional[int] = None, idem: Optional[str] = None,
+               days: Optional[int] = None, hours: Optional[int] = None) -> dict[str, Any]:
+    body = {"limit_gb": int(limit_gb), **_period(months, days, hours)}
+    res = _request("POST", "/keys", body, idem=idem)
     return res.get("key") or {}
 
 
-def renew_key(key_id: str, months: int, idem: Optional[str] = None) -> dict[str, Any]:
-    res = _request("POST", f"/keys/{_safe_id(key_id)}/renew", {"months": int(months)}, idem=idem)
+def renew_key(key_id: str, months: Optional[int] = None, idem: Optional[str] = None,
+              days: Optional[int] = None, hours: Optional[int] = None) -> dict[str, Any]:
+    res = _request("POST", f"/keys/{_safe_id(key_id)}/renew", _period(months, days, hours), idem=idem)
     return res.get("key") or {}
 
 
@@ -118,8 +137,10 @@ def expand_key(key_id: str, limit_gb: int, idem: Optional[str] = None) -> dict[s
     return res.get("key") or {}
 
 
-def edit_key(key_id: str, limit_gb: int, months: int, idem: Optional[str] = None) -> dict[str, Any]:
-    res = _request("POST", f"/keys/{_safe_id(key_id)}/edit", {"limit_gb": int(limit_gb), "months": int(months)}, idem=idem)
+def edit_key(key_id: str, limit_gb: int, months: Optional[int] = None, idem: Optional[str] = None,
+             days: Optional[int] = None, hours: Optional[int] = None) -> dict[str, Any]:
+    body = {"limit_gb": int(limit_gb), **_period(months, days, hours)}
+    res = _request("POST", f"/keys/{_safe_id(key_id)}/edit", body, idem=idem)
     return res.get("key") or {}
 
 
@@ -159,10 +180,11 @@ def _limit_gb(key: dict[str, Any]) -> int:
     return 0
 
 
-def issue_or_renew(key_id: Optional[str], months: int, idem: Optional[str] = None) -> dict[str, Any]:
+def issue_or_renew(key_id: Optional[str], months: Optional[int] = None, idem: Optional[str] = None,
+                   days: Optional[int] = None) -> dict[str, Any]:
     """логика старого бота: продлить анти-ключ или выпустить новый (500 ГБ).
     Возвращает {"id", "subscription_url", "expires_at"}."""
-    months = max(1, min(36, int(months or 1)))
+    period = dict(days=days) if days is not None else dict(months=max(1, min(36, int(months or 1))))
     tag = (idem or "").strip()
 
     def _k(step: str) -> Optional[str]:
@@ -170,19 +192,19 @@ def issue_or_renew(key_id: Optional[str], months: int, idem: Optional[str] = Non
 
     key = key_info(key_id) if key_id else None
     if key is None:
-        key = create_key(ANTI_TRAFFIC_GB, months, idem=_k("create"))
+        key = create_key(ANTI_TRAFFIC_GB, idem=_k("create"), **period)
     else:
         tr = key.get("traffic") or {}
         if key.get("is_trial") or tr.get("unlimited"):
             # продление/расширение для пробных и безлимитных недоступно — меняем тариф
-            key = edit_key(key["id"], ANTI_TRAFFIC_GB, months, idem=_k("edit")) or key
+            key = edit_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("edit"), **period) or key
         else:
             try:
-                key = renew_key(key["id"], months, idem=_k("renew")) or key
+                key = renew_key(key["id"], idem=_k("renew"), **period) or key
             except FurkError as exc:
                 if exc.code != "KEY_NOT_ELIGIBLE":
                     raise
-                key = edit_key(key["id"], ANTI_TRAFFIC_GB, months, idem=_k("edit")) or key
+                key = edit_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("edit"), **period) or key
             if _limit_gb(key) and _limit_gb(key) < ANTI_TRAFFIC_GB:
                 try:
                     key = expand_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("expand")) or key

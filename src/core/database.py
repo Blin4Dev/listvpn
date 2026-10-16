@@ -875,7 +875,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "support_messages": {
             "ticket_id": "ALTER TABLE support_messages ADD COLUMN ticket_id INTEGER",
             "reply_to": "ALTER TABLE support_messages ADD COLUMN reply_to INTEGER",
-            "kind": "ALTER TABLE support_messages ADD COLUMN kind TEXT",  # null | close_prompt
+            "kind": "ALTER TABLE support_messages ADD COLUMN kind TEXT",  # null | close_prompt | wait
             # служебная заметка только для панели (пользователю скрыта)
             "internal": "ALTER TABLE support_messages ADD COLUMN internal INTEGER NOT NULL DEFAULT 0",
             # автор для правки/удаления своих сообщений

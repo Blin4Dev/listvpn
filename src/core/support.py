@@ -613,6 +613,48 @@ def send_note(chat: dict[str, Any], author: str, text: str, actor: str,
     return message(mid)
 
 
+def waiting_since(ticket_id: int, conn: Any = None) -> Optional[dict[str, Any]]:
+    """первое сообщение клиента после последнего ответа сотрудника или кнопки «Ожидание»."""
+    sql_last = (
+        "SELECT COALESCE(MAX(id), 0) AS id FROM support_messages "
+        "WHERE ticket_id = ? AND deleted_at IS NULL AND ("
+        "(sender = 'admin' AND COALESCE(internal, 0) = 0) OR kind = 'wait')"
+    )
+    sql_user = (
+        "SELECT id, created_at FROM support_messages WHERE ticket_id = ? AND sender = 'user' AND id > ? "
+        "AND deleted_at IS NULL ORDER BY id LIMIT 1"
+    )
+    tid = int(ticket_id)
+    if conn is None:
+        last = int((db.fetchone(sql_last, (tid,)) or {"id": 0})["id"])
+        return db.fetchone(sql_user, (tid, last))
+    la = conn.execute(sql_last, (tid,)).fetchone()
+    last = int(la["id"] if la else 0)
+    row = conn.execute(sql_user, (tid, last)).fetchone()
+    return dict(row) if row else None
+
+
+def ack_wait(chat: dict[str, Any], actor: str, name: str, guard: Guard = None) -> dict[str, Any]:
+    """поставить обращение на ожидание: юзеру ничего не уходит, автоштраф по текущему ожиданию снимается."""
+    with db.transaction() as tx:
+        t = open_ticket(chat, tx)
+        if not t:
+            raise SupportError("Открытого обращения нет", 409)
+        _check(guard, t)
+        if t.get("assigned_admin") != actor:
+            raise SupportError("Сначала нажмите «Начать»", 409)
+        if not waiting_since(t["id"], tx):
+            raise SupportError("Пользователь уже не ждёт ответа", 409)
+        now = _iso()
+        cur = tx.execute(
+            "INSERT INTO support_messages (chat_id, ticket_id, sender, author, author_actor, text, internal, kind, panel_text, created_at) "
+            "VALUES (?, ?, 'system', ?, ?, '', 1, 'wait', ?, ?)",
+            (int(chat["id"]), t["id"], name, actor, f"{name}: ожидание", now),
+        )
+        mid = cur.lastrowid
+    return message(mid)
+
+
 def send_message(chat: dict[str, Any], sender: str, author: Optional[str], text: str, file_ids: list[str],
                  uploader_id: str, reply_to: Optional[int] = None, actor: Optional[str] = None,
                  quote_tickets: Optional[set[int]] = None, any_ticket: bool = False, guard: Guard = None) -> dict[str, Any]:
@@ -732,6 +774,8 @@ _LEGACY_PANEL = (
 
 
 def _panel_text(m: dict[str, Any]) -> Optional[str]:
+    if m.get("kind") == "wait":
+        return m.get("panel_text") or f"{m.get('author') or 'Оператор'}: ожидание"
     if m.get("kind") == "close_prompt":
         return f"{m.get('author') or 'Оператор'} закрывает обращение..."
     if m.get("sender") != "system":

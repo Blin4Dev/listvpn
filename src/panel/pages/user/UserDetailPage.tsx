@@ -235,10 +235,15 @@ export const UserDetailPage: React.FC<{
             )}
           </InfoRow>
           <InfoRow label="Регистрация"><span className="mono">{fmtDateTime(detail.registration_date)}</span></InfoRow>
-          <InfoRow label="Белые списки">
+          <InfoRow label="Ключ обхода">
             {detail.anti_key ? (
               <span className="mono" style={{ wordBreak: 'break-all' }}>{detail.anti_key} · до {fmtDateTime(detail.anti_expires_at ?? null)}</span>
-            ) : <span className="mono">—</span>}
+            ) : <span className="mono">нет</span>}
+            {canEdit && (
+              <button className="btn sm solid" onClick={() => setAction('EXTEND_BYPASS')}>
+                <Plus size={14} /> {detail.anti_key ? 'Продлить' : 'Выдать'}
+              </button>
+            )}
           </InfoRow>
           <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
           {canEdit && (
@@ -327,7 +332,12 @@ export const UserDetailPage: React.FC<{
       {special === 'exchange' && sub && <ExchangeModal userId={userId} current={sub.devices_limit ?? 1} onClose={() => setSpecial('')} onDone={() => { setSpecial(''); void load(); void loadRw(); }} onToast={onToast} />}
       {special === 'transfer' && <TransferModal userId={userId} onClose={() => setSpecial('')} onDone={(tid) => { setSpecial(''); if (window.confirm('Подписка перенесена. Открыть карточку получателя?')) onOpenUser(tid); else { void load(); void loadRw(); } }} onToast={onToast} />}
       <DCard title="Подписка" icon={Key}>
-        {!sub ? <div className="muted sm">Активной подписки нет.</div> : (
+        {!sub ? (
+          <div className="flex flex-col gap-3">
+            <div className="muted sm">Активной подписки нет.</div>
+            {canEdit && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction('EXTEND_SUB')}><Plus size={14} /> Выдать VPN</button>}
+          </div>
+        ) : (
           <>
             <InfoRow label="Действует до">
               <span className="mono">{fmtDateTime(sub.expiry_date)}</span>
@@ -335,7 +345,7 @@ export const UserDetailPage: React.FC<{
             </InfoRow>
             <InfoRow label="Срок">
               {canEdit ? (<>
-                <button className="btn sm solid" onClick={() => setAction('EXTEND_SUB')}><Plus size={14} /> Продлить</button>
+                <button className="btn sm solid" onClick={() => setAction('EXTEND_SUB')}><Plus size={14} /> Продлить VPN</button>
                 <button className="btn sm" onClick={() => setAction('REDUCE_SUB')}>Уменьшить</button>
               </>) : <span className="faint">—</span>}
             </InfoRow>

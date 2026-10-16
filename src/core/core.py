@@ -4067,6 +4067,26 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
     elif action == "REDUCE_SUB":
         extend_user_sub(user_id, -int(float(value or 0)), body.subscription_id)
         _rw_sync_expiry(user)
+    elif action == "EXTEND_BYPASS":
+        try:
+            bypass_days = int(float(value or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail={"message": "Укажите число дней"})
+        if not 1 <= bypass_days <= 1095:
+            raise HTTPException(400, detail={"message": "Дней ключа обхода: от 1 до 1095"})
+        if not fulfillment.whitelist_available():
+            raise HTTPException(400, detail={"message": "FurkVPN API не подключён — ключ обхода продлить нельзя"})
+        wl = fulfillment.grant_whitelist(
+            user, idem=f"panel-{user_id}-bypass-{secrets.token_hex(8)}", days=bypass_days)
+        if not wl.get("ok"):
+            code = wl.get("error_code")
+            if code == "INSUFFICIENT_FUNDS":
+                msg = "Недостаточно средств на балансе FurkVPN"
+            elif wl.get("error") == "furk_not_configured":
+                msg = "FurkVPN API не подключён"
+            else:
+                msg = str(wl.get("error") or "Не удалось продлить ключ обхода")
+            raise HTTPException(502, detail={"message": msg})
     elif action == "SET_TRAFFIC":
         gb = int(float(value or 0))
         if body.subscription_id:
@@ -4334,7 +4354,9 @@ def _delete_user_keep_history(user_id: int) -> None:
 def _action_notify_text(action: str, value: Any) -> str:
     a = action.upper()
     if a == "EXTEND_SUB":
-        return f"✅ Ваша подписка продлена на {int(float(value or 0))} дн."
+        return f"✅ Ваша подписка VPN продлена на {int(float(value or 0))} дн."
+    if a == "EXTEND_BYPASS":
+        return f"✅ Ключ обхода продлён на {int(float(value or 0))} дн."
     if a == "REDUCE_SUB":
         return f"ℹ️ Срок вашей подписки уменьшен на {int(float(value or 0))} дн."
     if a in ("ADD_TRAFFIC", "SET_TRAFFIC"):
@@ -8453,7 +8475,9 @@ def _started_by(chat: dict[str, Any], p: dict[str, Any]) -> bool:
 def panel_support_chat(chat_id: int, after: int = Query(0, ge=0), p: dict = Depends(require_panel)) -> dict[str, Any]:
     chat = _panel_chat(chat_id, p)
     full = is_full(p)
-    return {"chat": {**_panel_chat_row(chat, p), "started_by_me": _started_by(chat, p)},
+    t = support.open_ticket(chat)
+    waiting = bool(t and support.waiting_since(int(t["id"])))
+    return {"chat": {**_panel_chat_row(chat, p), "started_by_me": _started_by(chat, p), "user_waiting": waiting},
             "messages": _staff_view(support.messages(chat_id, after, tickets=_visible_tickets(chat, p)), p),
             "changes": _staff_view(support.changes(chat_id, after, tickets=_visible_tickets(chat, p)), p) if after else [],
             "edit_window_h": support.EDIT_WINDOW // 3600,
@@ -8488,6 +8512,16 @@ def panel_support_start(chat_id: int, body: Optional[SupportStartBody] = None, p
             who = {"owner": "администратор", "curator": "другой куратор"}.get(_holder_role(t.get("assigned_admin")) or "", "другой сотрудник")
             raise HTTPException(403, detail={"message": f"Нельзя забрать обращение — его ведёт {who}"})
     return _sup(support.start, chat, p["actor"], p["name"], takeover, _guard(p, "start"))
+
+
+@app.post("/api/panel/support/chats/{chat_id}/wait")
+def panel_support_wait(chat_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """ожидание без ответа пользователю: автоштраф по текущему ожиданию не начисляется."""
+    chat = _panel_chat(chat_id, p)
+    if not _started_by(chat, p):
+        raise HTTPException(409, detail={"message": "Сначала нажмите «Начать»"})
+    msg = _sup(support.ack_wait, chat, p["actor"], p["name"], _guard(p, "write"))
+    return _staff_view([msg], p)[0]
 
 
 @app.post("/api/panel/support/chats/{chat_id}/reopen")

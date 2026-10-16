@@ -1,7 +1,8 @@
 # автоштрафы поддержки: клиент ждёт ответа N рабочих минут → штраф за X рабочих часов.
 # Настройка (панель → Сотрудники → Автоштрафы) хранится в settings["support_autofine"].
 #  - считаются только минуты смены сотрудника по графику (вне смены часы не тикают);
-#  - ожидание начинается с первого сообщения клиента после последнего ответа сотрудника,
+#  - ожидание начинается с первого сообщения клиента после последнего ответа сотрудника
+#    или кнопки «Ожидание» в панели (юзеру ничего не уходит),
 #    но не раньше, чем обращение взято в работу этим сотрудником и чем включены автоштрафы;
 #  - один штраф на одно ожидание (повторно — только после нового ответа и нового ожидания);
 #  - сумма = оплата дня / часы смены этого дня × часы штрафа; день без оплаты — без штрафа;
@@ -16,9 +17,11 @@ from typing import Any, Callable, Optional
 try:
     from . import database as db
     from . import staffpay
+    from . import support
 except ImportError:  # pragma: no cover
     import database as db  # type: ignore
     import staffpay  # type: ignore
+    import support  # type: ignore
 
 KEY = "support_autofine"
 DEFAULTS: dict[str, Any] = {"enabled": False, "minutes": 15, "hours": 1.0, "pool": False, "warn": True, "since": None}
@@ -89,11 +92,8 @@ def save_config(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _waiting(ticket_id: int) -> Optional[dict[str, Any]]:
-    """первое сообщение клиента после последнего ответа сотрудника (внутренние заметки — не ответ)."""
-    la = db.fetchone("SELECT COALESCE(MAX(id), 0) AS id FROM support_messages "
-                     "WHERE ticket_id = ? AND sender = 'admin' AND COALESCE(internal, 0) = 0", (int(ticket_id),))
-    return db.fetchone("SELECT id, created_at FROM support_messages WHERE ticket_id = ? AND sender = 'user' AND id > ? "
-                       "ORDER BY id LIMIT 1", (int(ticket_id), int(la["id"] if la else 0)))
+    """первое сообщение клиента после последнего ответа сотрудника или «Ожидание» (заметки — не ответ)."""
+    return support.waiting_since(int(ticket_id))
 
 
 def _marked(ticket_id: int, msg_id: int, staff_id: int, kind: str) -> bool:

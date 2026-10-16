@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle, Users, Trash2, CornerUpLeft, Download, Edit2, ExternalLink, FileText, FileX, HelpCircle, Info, Lock, MessageCircle, Paperclip, Play, Save, Search, Send, ShieldAlert, Undo2, X, XCircle } from 'lucide-react';
+import { ArrowLeft, CheckCircle, Clock, Users, Trash2, CornerUpLeft, Download, Edit2, ExternalLink, FileText, FileX, HelpCircle, Info, Lock, MessageCircle, Paperclip, Play, Save, Search, Send, ShieldAlert, Undo2, X, XCircle } from 'lucide-react';
 import { DotsMenu, Modal, Spinner } from '../components/ui';
 import { RichText } from '../components/RichText';
 import { TEAM_CHAT_ID, TeamChat } from './TeamChat';
@@ -11,7 +11,7 @@ type SFile = { id: string; kind: 'image' | 'video' | 'file' | 'deleted'; name: s
 type SQuote = { id: number; sender?: string; text?: string; files?: number; deleted?: boolean };
 type SMsg = {
   id: number; ticket_id?: number | null; sender: 'user' | 'admin' | 'system'; author?: string | null; text: string; created_at: string; files: SFile[]; reply_to?: SQuote | null;
-  kind?: 'close_prompt' | null; action_active?: boolean | null; internal?: boolean; panel_text?: string | null;
+  kind?: 'close_prompt' | 'wait' | null; action_active?: boolean | null; internal?: boolean; panel_text?: string | null;
   mine?: boolean; edited?: boolean; deleted?: boolean;
 };
 const EDIT_WINDOW_MS = 48 * 3600 * 1000;
@@ -33,7 +33,7 @@ type ChatRow = {
   ticket?: Ticket | null; tab?: Tab; group?: '' | 'mine' | 'others' | 'escalated';
 };
 type MeInfo = { name: string; role: 'owner' | 'curator' | 'operator'; full: boolean; can_manage_user: boolean; prompt_ttl_min: number };
-type ChatData = { chat: ChatRow & { started_by_me: boolean }; messages: SMsg[]; changes?: SMsg[]; limits: { max_file_mb: number; max_files: number; max_text: number }; me: MeInfo };
+type ChatData = { chat: ChatRow & { started_by_me: boolean; user_waiting?: boolean }; messages: SMsg[]; changes?: SMsg[]; limits: { max_file_mb: number; max_files: number; max_text: number }; me: MeInfo };
 type Pending = { key: string; file: File; preview?: string; progress: number; id?: string; error?: string; abort?: () => void };
 
 const POLL_MS = 4000;
@@ -108,7 +108,7 @@ const quoteText = (q: SQuote) => (q.deleted ? 'Сообщение недосту
 const Bubble: React.FC<{ m: SMsg; onImage: (u: string) => void; onMedia?: () => void; onReply?: (m: SMsg) => void; onQuote: (id: number) => void; flash: boolean;
   onEdit?: (m: SMsg) => void; onDelete?: (m: SMsg) => void }> =
   ({ m, onImage, onMedia, onReply, onQuote, flash, onEdit, onDelete }) => {
-  if (m.sender === 'system' || (m.kind === 'close_prompt' && m.panel_text)) {
+  if (m.sender === 'system' || m.kind === 'wait' || (m.kind === 'close_prompt' && m.panel_text)) {
     // служебные события одной серой строкой, без времени
     const text = m.panel_text ?? m.text;
     if (!text) return null;
@@ -601,6 +601,19 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
         loadChats();
       } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось отправить'), 'error'); } finally { setBusy(''); }
     };
+    const ackWait = async () => {
+      if (sid == null || busy) return;
+      setBusy('wait');
+      try {
+        const m: SMsg = await apiFetch(`/panel/support/chats/${sid}/wait`, { method: 'POST' });
+        stick.current = true;
+        setData((cur) => (cur ? {
+          ...cur,
+          chat: { ...cur.chat, user_waiting: false },
+          messages: [...cur.messages.filter((x) => x.id !== m.id), m].sort((a, b) => a.id - b.id),
+        } : cur));
+      } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось поставить на ожидание'), 'error'); } finally { setBusy(''); }
+    };
 
     const chat = data?.chat;
     const height = vh ? `${Math.max(320, vh - gridTop - 20)}px` : 'calc(100dvh - 57px - 40px)';
@@ -867,6 +880,13 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                         style={{ width: '100%', resize: 'none', minHeight: 42, maxHeight: 160, lineHeight: 1.4, paddingTop: 10, paddingBottom: 10 }} />
                     )}
                   </div>
+                  {canWriteUser && !asNote && !editing && !!chat.user_waiting && (
+                    <button className="btn" style={{ height: 42, flex: 'none' }}
+                      title="Пользователь ничего не увидит — текущее ожидание без штрафа"
+                      disabled={!!busy} onClick={() => void ackWait()}>
+                      {busy === 'wait' ? <Spinner size={15} /> : <Clock size={15} />} Ожидание
+                    </button>
+                  )}
                   {(asNote || canWriteUser || editing) && (
                     <button className="btn solid" style={{ height: 42, flex: 'none' }}
                       title={editing ? 'Сохранить' : 'Отправить'}

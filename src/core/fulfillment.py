@@ -197,10 +197,11 @@ def user_whitelist(user: Optional[dict[str, Any]]) -> dict[str, Any]:
             "active": bool(row.get("anti_key") and until and until > utcnow())}
 
 
-def grant_whitelist(user: dict[str, Any], months: int, idem: Optional[str] = None) -> dict[str, Any]:
-    """выпустить/продлить анти-ключ FURK на months (логика старого process_payment для anti_*).
+def grant_whitelist(user: dict[str, Any], months: int = 1, idem: Optional[str] = None,
+                    *, days: Optional[int] = None) -> dict[str, Any]:
+    """выпустить/продлить анти-ключ FURK на months или days (логика старого process_payment для anti_*).
     idem — ключ идемпотентности (id платежа): повторная обработка не спишет деньги у FURK дважды."""
-    months = max(1, int(months or 1))
+    add_days = int(days) if days is not None else DAYS_PER_MONTH * max(1, int(months or 1))
     cur = user_whitelist(user)
     out: dict[str, Any] = {"ok": False, "key": cur["key"], "key_id": cur["key_id"], "until": cur["until"],
                            "prev_key": cur["key"], "prev_key_id": cur["key_id"], "prev_until": cur["until"],
@@ -214,12 +215,16 @@ def grant_whitelist(user: dict[str, Any], months: int, idem: Optional[str] = Non
         out["error"] = "furk_not_configured"
         return out
     try:
-        res = furk.issue_or_renew(cur["key_id"], months, idem=f"blin-{idem}" if idem else None)
+        if days is not None:
+            res = furk.issue_or_renew(cur["key_id"], idem=f"blin-{idem}" if idem else None, days=int(days))
+        else:
+            res = furk.issue_or_renew(cur["key_id"], max(1, int(months or 1)),
+                                      idem=f"blin-{idem}" if idem else None)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
         out["error_code"] = getattr(exc, "code", None)
         return out
-    # срок — как у провайдера; если не пришёл, считаем сами: от текущего (или сейчас) + 30 дн × months
+    # срок — как у провайдера; если не пришёл, считаем сами: от текущего (или сейчас) + срок
     until = None
     try:
         if res.get("expires_at"):
@@ -229,7 +234,7 @@ def grant_whitelist(user: dict[str, Any], months: int, idem: Optional[str] = Non
     if not until:
         prev = parse_iso(cur["until"])
         base = prev if (prev and prev > utcnow()) else utcnow()
-        until = iso(base + timedelta(days=DAYS_PER_MONTH * months))
+        until = iso(base + timedelta(days=max(1, add_days)))
     key_url = res.get("subscription_url") or cur["key"]
     db.execute("UPDATE users SET anti_key = ?, anti_key_id = ?, anti_expires_at = ?, anti_last_idem = ? WHERE id = ?",
                (key_url, res["id"], until, str(idem) if idem else None, int(user["id"])))

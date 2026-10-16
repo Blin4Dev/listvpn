@@ -15,8 +15,9 @@ export const clampNumber = (raw: string, min: number, max: number, fallback: num
 export type ActionConfig = { title: string; label: string; icon: React.ElementType; type: string; min?: number; max?: number; presets?: number[]; };
 
 export const ACTION_MAP: Record<string, ActionConfig> = {
-  EXTEND_SUB:         { title: 'Продлить подписку', label: 'Дней', icon: Clock, type: 'number' },
-  REDUCE_SUB:         { title: 'Уменьшить срок', label: 'Дней', icon: Clock, type: 'number' },
+  EXTEND_SUB:         { title: 'Продлить VPN', label: 'Дней', icon: Clock, type: 'number' },
+  EXTEND_BYPASS:      { title: 'Продлить ключ обхода', label: 'Дней', icon: Clock, type: 'number', min: 1, max: 1095 },
+  REDUCE_SUB:         { title: 'Уменьшить срок VPN', label: 'Дней', icon: Clock, type: 'number' },
   SET_TRAFFIC:        { title: 'Лимит трафика', label: 'Макс. трафик, ГБ', icon: Database, type: 'number' },
   SET_DEVICES:        { title: 'Лимит устройств', label: 'Устройств (1–20)', icon: Smartphone, type: 'number', min: 1, max: 20, presets: DEVICE_LIMIT_PRESETS },
   BAN:                { title: 'Заблокировать', label: 'Причина', icon: Ban, type: 'text' },
@@ -96,6 +97,16 @@ export const UserActionModal: React.FC<{
               <input className="input mono" type={config.type} value={value} placeholder={config.type === 'number' ? '0' : ''}
                 autoFocus min={numMin} max={config.max} onChange={(e) => setValue(e.target.value)} />
             )}
+          </div>
+        )}
+        {type === 'EXTEND_BYPASS' && (
+          <div className="sub" style={{ fontSize: 12 }}>
+            Списывается с баланса FurkVPN. Ключ VPN и срок подписки в Remnawave не меняются. Если ключа обхода ещё нет — он будет выдан.
+          </div>
+        )}
+        {type === 'EXTEND_SUB' && (
+          <div className="sub" style={{ fontSize: 12 }}>
+            Продлевается только ключ VPN (база и Remnawave). Ключ обхода не трогается.
           </div>
         )}
         {isNotify ? (
