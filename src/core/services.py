@@ -293,6 +293,12 @@ def request_withdrawal(user_id: int, amount: float, address: str) -> dict[str, A
             (user_id, amount, address.strip(), db.utcnow_iso()),
         )
         wid = ins.lastrowid
+        # реферальный леджер (API v1)
+        tx.execute(
+            "INSERT INTO referral_ledger (user_id, kind, amount, withdrawal_id, created_at) "
+            "VALUES (?, 'withdrawal', ?, ?, ?)",
+            (user_id, -amount, wid, db.utcnow_iso()),
+        )
     return db.fetchone("SELECT * FROM withdrawals WHERE id = ?", (wid,))  # type: ignore[return-value]
 
 
@@ -354,6 +360,11 @@ def reject_withdrawal(withdrawal_id: int, reason: str = "", refund: bool = True)
             tx.execute(
                 "UPDATE users SET partner_balance = partner_balance + ? WHERE id = ?",
                 (float(w["amount"]), w["user_id"]),
+            )
+            tx.execute(
+                "INSERT INTO referral_ledger (user_id, kind, amount, withdrawal_id, created_at) "
+                "VALUES (?, 'withdrawal_refund', ?, ?, ?)",
+                (w["user_id"], float(w["amount"]), withdrawal_id, db.utcnow_iso()),
             )
     return _get_withdrawal(withdrawal_id)
 

@@ -987,6 +987,15 @@ def fulfill_payment(
 
     _notify_admin(user, payment, grant)
 
+    # API v1: запись в purchases; если Remnawave не ответил — задача в очередь выдачи
+    try:
+        try:
+            from . import apiv1_store  # type: ignore
+        except ImportError:
+            import apiv1_store  # type: ignore
+        apiv1_store.on_payment_fulfilled(payment_id, grant)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api-v1] on_payment_fulfilled {payment_id}: {exc}", flush=True)
 
     return {
         "ok": True,
@@ -1121,17 +1130,24 @@ def _credit_referral(user: dict[str, Any], amount: float, currency: str, payment
         bonus = round(amount * rate / 100.0, 2)
         if bonus <= 0:
             return
-        db.execute(
-            "UPDATE users SET partner_balance = partner_balance + ? WHERE id = ?",
-            (bonus, referrer["id"]),
-        )
-        db.execute(
-            "INSERT INTO transactions (user_id, amount, status, payment_method, hash, payment_id, description, created_at) "
-            "VALUES (?, ?, 'completed', 'referral', ?, ?, ?, ?)",
-            # хеш pay:<id>, чтобы возврат мог забрать бонус
-            (referrer["id"], bonus, f"pay:{payment_id}" if payment_id else secrets.token_hex(8), secrets.token_hex(8),
-             f"referral bonus from user {user['id']}", db.utcnow_iso()),
-        )
+        # баланс, транзакция и строка леджера (API v1) — атомарно
+        with db.transaction() as conn:
+            conn.execute(
+                "UPDATE users SET partner_balance = partner_balance + ? WHERE id = ?",
+                (bonus, referrer["id"]),
+            )
+            conn.execute(
+                "INSERT INTO transactions (user_id, amount, status, payment_method, hash, payment_id, description, created_at) "
+                "VALUES (?, ?, 'completed', 'referral', ?, ?, ?, ?)",
+                # хеш pay:<id>, чтобы возврат мог забрать бонус
+                (referrer["id"], bonus, f"pay:{payment_id}" if payment_id else secrets.token_hex(8), secrets.token_hex(8),
+                 f"referral bonus from user {user['id']}", db.utcnow_iso()),
+            )
+            conn.execute(
+                "INSERT INTO referral_ledger (user_id, kind, amount, ref_user_id, payment_id, created_at) "
+                "VALUES (?, 'accrual', ?, ?, ?, ?)",
+                (referrer["id"], bonus, int(user["id"]), payment_id, db.utcnow_iso()),
+            )
     except Exception:  # noqa: BLE001
         pass
 

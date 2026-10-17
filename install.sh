@@ -246,6 +246,9 @@ CADDY_FALLBACK_VERSION="2.8.4"
 HTTPS_PORT="${HTTPS_PORT:-443}"
 # домен вебхуков (ЮKassa, Telegram) — WEBHOOK_DOMAIN в .env; пусто = домен мини-приложения
 HOOK_DOMAIN="${HOOK_DOMAIN:-}"
+# отдельный домен API v1 (API_DOMAIN в .env, например api.example.com): пути как в спецификации,
+# https://api.example.com/subscription = https://<мини-приложение>/api/v1/subscription. Пусто — нет.
+API_DOMAIN="${API_DOMAIN:-}"
 # порт вебхука (ЮKassa и др.) на 127.0.0.1 — WEBHOOK_PORT в .env, по умолчанию 5000
 WEBHOOK_PORT="${WEBHOOK_PORT:-5000}"
 # порты, занятые сервисами BatmanVPN на 127.0.0.1 (+80 для сертификатов/редиректа)
@@ -273,6 +276,24 @@ load_hook_domain() {
         h=""
     fi
     HOOK_DOMAIN="${h:-$mini}"
+}
+
+# API_DOMAIN из .env; некорректный или совпадает с другим доменом — отдельного сайта нет
+load_api_domain() {
+    local a mini panel
+    a="$(get_env_var API_DOMAIN .env 2>/dev/null || true)"
+    [[ -n "$a" ]] && a="$(sanitize_domain "$a" 2>/dev/null || true)"
+    mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
+    panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+    if [[ -n "$a" ]] && ! _is_domain "$a"; then
+        log_warn "API_DOMAIN в .env некорректный — отдельный домен API не настроен."
+        a=""
+    fi
+    if [[ -n "$a" && ( "$a" == "$mini" || "$a" == "$panel" || "$a" == "$HOOK_DOMAIN" ) ]]; then
+        log_warn "API_DOMAIN совпадает с другим доменом BatmanVPN — отдельный сайт не нужен, API работает по /api/v1."
+        a=""
+    fi
+    API_DOMAIN="$a"
 }
 
 _is_domain() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$ ]]; }
@@ -663,6 +684,12 @@ $(_caddy_api_headers)
 $(_caddy_api_headers)
 			}
 		}
+		# API v1: уведомления ЮKassa по адресу /webhooks/payments/yookassa
+		handle /webhooks/payments/* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
 		handle {
 			reverse_proxy 127.0.0.1:9741 {
 				header_up X-Real-IP {client_ip}
@@ -703,6 +730,36 @@ $(_caddy_api_headers)
 }
 EOF
     fi
+    if [[ -n "$API_DOMAIN" ]]; then
+        cat >> "$tmp" <<EOF
+
+# API v1 на своём домене: /subscription → /api/v1/subscription; вебхук ЮKassa — как есть
+$(site_addr "$API_DOMAIN") {
+	import blin_sec
+${tls_block}
+	request_body {
+		max_size 1MB
+	}
+	route {
+		handle /webhooks/payments/* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		# остальные /api/* (мини-приложение, панель) на этом домене закрыты
+		handle /api/* {
+			respond 404
+		}
+		handle {
+			rewrite * /api/v1{uri}
+			reverse_proxy 127.0.0.1:8000 {
+$(_caddy_api_headers)
+			}
+		}
+	}
+}
+EOF
+    fi
     if hook_separate "$miniapp_domain" && [[ "$HOOK_DOMAIN" != "$panel_domain" ]]; then
         cat >> "$tmp" <<EOF
 
@@ -715,6 +772,12 @@ ${tls_block}
 	}
 	route {
 		handle /yookassa* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		# API v1: уведомления ЮKassa по адресу /webhooks/payments/yookassa
+		handle /webhooks/payments/* {
 			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
 $(_caddy_api_headers)
 			}
@@ -869,6 +932,7 @@ create_env_file() {
     PANEL_SETUP_TOKEN="$(gen_secret_hex)"
     INTERNAL_API_SECRET="$(gen_secret_hex)"
     MONITOR_SECRET_KEY="$(gen_secret_hex)"
+    API_TOKEN_SECRET="$(gen_secret_hex)"
 
     # .env с секретами: chmod 600
     ( umask 077; : > .env )
@@ -942,6 +1006,8 @@ TELEGRAM_INITDATA_MAX_AGE=86400
 TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET}
 PANEL_SETUP_TOKEN=${PANEL_SETUP_TOKEN}
 INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
+# подпись токенов API v1 (смена = выход всех клиентов API v1)
+API_TOKEN_SECRET=${API_TOKEN_SECRET}
 # шифрование ключей нод мониторинга (не менять после выдачи)
 MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY}
 MINIAPP_ALLOW_UNAUTH=0
@@ -952,6 +1018,8 @@ MINIAPP_DOMAIN=${domain}
 PANEL_DOMAIN=${panel_domain}
 # домен вебхуков (ЮKassa, Telegram); смена — install.sh → «Заменить домены»
 WEBHOOK_DOMAIN=$(hook_for "$domain")
+# отдельный домен API v1, необязательно (A-запись на этот сервер, затем install.sh → 1)
+API_DOMAIN=
 EOF
 
     # .env с секретами: chmod 600
@@ -1133,6 +1201,11 @@ migrate_security_update() {
     secret="$(gen_secret_hex)"
     if ensure_env_var INTERNAL_API_SECRET "$secret" "$file"; then
         log_info "  + INTERNAL_API_SECRET сгенерирован"
+    fi
+
+    secret="$(gen_secret_hex)"
+    if ensure_env_var API_TOKEN_SECRET "$secret" "$file"; then
+        log_info "  + API_TOKEN_SECRET сгенерирован (подпись токенов API v1)"
     fi
 
     secret="$(gen_secret_hex)"
@@ -1989,6 +2062,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
     load_https_port
     load_webhook_port || exit 1
     load_hook_domain
+    load_api_domain
 
     if [[ "${BLINVPN_POST_UPDATE:-}" == "1" ]]; then
         unset BLINVPN_POST_UPDATE

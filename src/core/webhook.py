@@ -44,6 +44,7 @@ def health() -> dict[str, Any]:
 
 # проверка доступности адреса уведомлений: get → 200
 @app.get("/yookassa")
+@app.get("/webhooks/payments/yookassa")
 def yookassa_probe() -> dict[str, Any]:
     return {"ok": True}
 
@@ -62,7 +63,9 @@ def _ack(note: str = "") -> JSONResponse:
     return JSONResponse(status_code=200, content={"ok": True, **({"note": note} if note else {})})
 
 
+# /webhooks/payments/yookassa — адрес из API v1 (docs/API_V1.md), логика та же
 @app.post("/yookassa")
+@app.post("/webhooks/payments/yookassa")
 async def yookassa_callback(request: Request) -> JSONResponse:
     """
     HTTP-уведомление ЮKassa. Подписи у уведомлений нет, поэтому:

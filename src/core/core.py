@@ -5995,6 +5995,10 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
             if key in cur and isinstance(v, dict) and "enabled" in v:
                 cur[key]["enabled"] = bool(v["enabled"])
         db.set_setting("pay_methods", db.dumps(cur))
+    try:  # таблица tariffs (GET /api/v1/tariffs) — те же цены, что в панели
+        apiv1_store.sync_tariffs()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api-v1] sync tariffs: {exc}", flush=True)
     return {"plans": get_active_plans(), **get_plans_meta()}
 
 
@@ -7646,11 +7650,13 @@ def internal_payment_chargeback(
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_: Request, exc: HTTPException):
     detail = exc.detail
+    headers = getattr(exc, "headers", None)  # WWW-Authenticate и т.п. не теряем
     if isinstance(detail, dict) and "message" in detail:
-        return JSONResponse(status_code=exc.status_code, content={"detail": detail, "error": detail.get("message")})
+        return JSONResponse(status_code=exc.status_code, content={"detail": detail, "error": detail.get("message")},
+                            headers=headers)
     if isinstance(detail, str):
-        return JSONResponse(status_code=exc.status_code, content={"detail": detail, "error": detail})
-    return JSONResponse(status_code=exc.status_code, content={"detail": detail})
+        return JSONResponse(status_code=exc.status_code, content={"detail": detail, "error": detail}, headers=headers)
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)
 
 
 @app.exception_handler(OverflowError)
@@ -8844,6 +8850,29 @@ def panel_captcha_put(body: CaptchaConfigBody, _: dict = Depends(require_owner))
         return captcha_mod.save_config(body.model_dump())
     except captcha_mod.CaptchaError as e:
         raise HTTPException(e.status, detail={"message": e.message})
+
+
+# ── API v1 (/api/v1/*, см. docs/API_V1.md) ──
+try:
+    from . import apiv1 as _apiv1  # type: ignore
+    from . import apiv1_store  # type: ignore
+except ImportError:  # pragma: no cover
+    import apiv1 as _apiv1  # type: ignore
+    import apiv1_store  # type: ignore
+
+app.include_router(_apiv1.build_router(_sys.modules[__name__]))
+
+
+@app.on_event("startup")
+def _apiv1_startup() -> None:
+    try:
+        apiv1_store.ensure()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api-v1] init failed: {type(exc).__name__}: {exc}", flush=True)
+    # ключ подписи токенов: короткий API_TOKEN_SECRET — ошибка сразу при старте, а не на первом запросе
+    _apiv1.tokens._signing_key()
+    # воркер очереди выдачи ссылок (provisioning_jobs) — только в сервисе api
+    apiv1_store.start_worker()
 
 
 if __name__ == "__main__":

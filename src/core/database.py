@@ -780,6 +780,129 @@ CREATE TABLE IF NOT EXISTS mon_incidents (
 CREATE INDEX IF NOT EXISTS idx_mon_inc_node ON mon_incidents(node_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_mon_inc_open ON mon_incidents(node_id, kind, resolved_at);
 
+-- ── API v1 (см. docs/API_V1.md) ──
+-- сессии токенов API v1: access-токен подписан (HMAC), refresh хранится только как sha-256
+CREATE TABLE IF NOT EXISTS api_sessions (
+    id TEXT PRIMARY KEY,                      -- sid внутри access-токена
+    user_id INTEGER NOT NULL,
+    refresh_hash TEXT NOT NULL UNIQUE,
+    prev_refresh_hash TEXT,                   -- прошлый refresh: повторное предъявление = кража → отзыв
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,                 -- refresh (скользящий, но не дольше абсолютного предела)
+    last_used_at REAL,
+    revoked_at REAL,
+    revoke_reason TEXT,
+    ip TEXT,
+    user_agent TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_api_sessions_user ON api_sessions(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_api_sessions_prev ON api_sessions(prev_refresh_hash);
+
+-- очередь выдачи/пересинхронизации ссылки в Remnawave (обрабатывает воркер в сервисе api)
+CREATE TABLE IF NOT EXISTS provisioning_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    subscription_id INTEGER,
+    reason TEXT NOT NULL DEFAULT 'resync',    -- resync | payment | task_reward
+    status TEXT NOT NULL DEFAULT 'queued',    -- queued | running | done | failed
+    attempts INTEGER NOT NULL DEFAULT 0,
+    run_after TEXT NOT NULL,
+    payment_id TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_prov_jobs_queue ON provisioning_jobs(status, run_after);
+CREATE INDEX IF NOT EXISTS idx_prov_jobs_user ON provisioning_jobs(user_id, status);
+
+-- тарифы по периодам; цена синхронизируется с настройками панели (period_price_N)
+CREATE TABLE IF NOT EXISTS tariffs (
+    code TEXT PRIMARY KEY,                    -- m1 | m3 | m6 | m12
+    title TEXT NOT NULL,
+    price REAL NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'RUB',
+    period_days INTEGER NOT NULL,
+    months INTEGER,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT
+);
+
+-- факт покупки (одна строка на оплаченный платёж); без FK — история не теряется при удалении юзера
+CREATE TABLE IF NOT EXISTS purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payment_id TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    tariff_code TEXT,
+    purpose TEXT,
+    amount REAL NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'RUB',
+    provider TEXT,
+    provider_payment_id TEXT,
+    subscription_id INTEGER,
+    expires_at TEXT,                          -- срок подписки после покупки
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id, id);
+
+-- журнал реферального баланса: SUM(amount) по юзеру = users.partner_balance
+CREATE TABLE IF NOT EXISTS referral_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,                       -- accrual | reversal | withdrawal | withdrawal_refund | adjustment | opening_balance
+    amount REAL NOT NULL,                     -- со знаком
+    ref_user_id INTEGER,
+    payment_id TEXT,
+    withdrawal_id INTEGER,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ref_ledger_user ON referral_ledger(user_id, id);
+
+-- задания за бонусные дни
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT UNIQUE,
+    title TEXT NOT NULL,
+    description TEXT,
+    kind TEXT NOT NULL DEFAULT 'manual',      -- channel | vpn_minutes | referrals | manual
+    target INTEGER NOT NULL DEFAULT 1,        -- минут / приглашённых
+    channel_id TEXT,                          -- для kind=channel (пусто = REQUIRED_CHANNEL_ID)
+    url TEXT,
+    reward_days INTEGER NOT NULL DEFAULT 1,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_tasks (
+    user_id INTEGER NOT NULL,
+    task_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',    -- active | completed | claimed
+    checked_at TEXT,
+    completed_at TEXT,
+    claimed_at TEXT,
+    PRIMARY KEY (user_id, task_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+-- телеметрия VPN-сессий (heartbeat от клиента) — для заданий «проведи N минут в VPN»
+CREATE TABLE IF NOT EXISTS vpn_sessions (
+    user_id INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    node_name TEXT,
+    started_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    active_seconds INTEGER NOT NULL DEFAULT 0,
+    heartbeats INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, session_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_vpn_sessions_seen ON vpn_sessions(user_id, last_seen_at);
+
 CREATE INDEX IF NOT EXISTS idx_users_tg ON users(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_subs_expiry ON subscriptions(status, expires_at);
@@ -957,6 +1080,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "grace_until": "ALTER TABLE subscriptions ADD COLUMN grace_until TEXT",
             # снимок remnawave до grace (для ui)
             "grace_snapshot": "ALTER TABLE subscriptions ADD COLUMN grace_snapshot TEXT",
+            # API v1: NULL | provisioning (есть задача в provisioning_jobs) | failed
+            "sync_state": "ALTER TABLE subscriptions ADD COLUMN sync_state TEXT",
         },
     }
     for table, cols in add_columns.items():

@@ -1,5 +1,14 @@
 # blinvpn
 
+## API v1
+
+Клиентский API: `/api/v1/subscription`, `/subscription/resync`, `/tariffs`, `/referrals/me`,
+`/referrals/withdrawals`, `/tasks`, `/tasks/{id}/claim`, `/telemetry/sessions` и вебхук ЮKassa
+`/webhooks/payments/yookassa`. Для разработчика клиента — [docs/API_V1_CLIENT.md](docs/API_V1_CLIENT.md), устройство на сервере — [docs/API_V1.md](docs/API_V1.md).
+Отдельный домен API без префикса: `API_DOMAIN=api.example.com` в `.env` → `install.sh` → 1.
+После обновления (`install.sh` → 1) таблицы создаются сами; в кабинете ЮKassa можно указать
+`https://<домен>/webhooks/payments/yookassa` (старый `/yookassa` тоже работает).
+
 ## Панель на отдельном сервере
 
 При установке `install.sh` спрашивает «Установить панель на ОТДЕЛЬНЫЙ сервер?». Для уже установленного бота: `install.sh` → «Перенести панель на отдельный сервер».
