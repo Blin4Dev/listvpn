@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +17,15 @@ from typing import Any, Iterable, Optional
 
 API_CONTRACT = "3.4.4"
 
+# Бот работает ТОЛЬКО со своими пользователями панели: имя строго batman_<id пользователя бота>.
+# Любое изменение / удаление другого пользователя (чужие проекты на той же панели) клиент отклоняет.
+OWN_USERNAME_RE = re.compile(r"^batman_[0-9]+$")
+
+
+def is_own_username(name: Any) -> bool:
+    return bool(OWN_USERNAME_RE.match(str(name or "")))
+
+
 class RemnawaveError(Exception):
     """Базовая ошибка клиента Remnawave."""
 
@@ -22,6 +33,10 @@ class RemnawaveError(Exception):
         super().__init__(message)
         self.status = status
         self.payload = payload
+
+
+class RemnawaveForeignUserError(RemnawaveError):
+    """Попытка изменить пользователя панели, который не batman_<id>, или массовая операция."""
 
 
 class RemnawaveAuthError(RemnawaveError):
@@ -194,6 +209,61 @@ class RemnawaveAPI:
     def delete(self, path: str, json_body: Any = None, **kwargs: Any) -> Any:
         return self.request("DELETE", path, json_body=json_body, **kwargs)
 
+    # ── защита: только batman_<id> ──
+    _own_ids_lock = threading.Lock()
+
+    def _own_cache(self) -> set:
+        cache = getattr(self, "_own_ids", None)
+        if cache is None:
+            cache = set()
+            self._own_ids = cache  # type: ignore[attr-defined]
+        return cache
+
+    @staticmethod
+    def _unwrap_user(data: Any) -> dict[str, Any]:
+        if isinstance(data, dict) and isinstance(data.get("response"), dict):
+            data = data["response"]
+        return data if isinstance(data, dict) else {}
+
+    def _remember_own(self, data: Any) -> None:
+        u = self._unwrap_user(data)
+        if is_own_username(u.get("username")) and u.get("id") is not None:
+            with self._own_ids_lock:
+                cache = self._own_cache()
+                if len(cache) > 100000:
+                    cache.clear()
+                cache.add(int(u["id"]))
+
+    def assert_own_user(self, user_id: Any) -> None:
+        """перед изменением: пользователь панели с этим id должен называться batman_<число>."""
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            raise RemnawaveForeignUserError(f"отказ: непонятный id пользователя {user_id!r}")
+        if uid in self._own_cache():
+            return
+        try:
+            u = self._unwrap_user(self.get(f"/api/users/{uid}"))
+        except RemnawaveError:
+            u = {}
+        if not u.get("username"):
+            # 3.x: пользователь по числовому id — через /api/users/resolve
+            try:
+                u = self._unwrap_user(self.resolve_user(id=uid))
+            except RemnawaveError:
+                u = {}
+        if u.get("id") is not None and str(u.get("id")) != str(uid):
+            u = {}  # панель вернула не того пользователя
+        name = u.get("username")
+        if not is_own_username(name):
+            raise RemnawaveForeignUserError(
+                f"отказ: пользователь Remnawave id={uid} ({name!r}) не batman_<id> — бот его не трогает")
+        self._remember_own(u)
+
+    def _refuse_bulk(self, what: str) -> Any:
+        raise RemnawaveForeignUserError(
+            f"отказ: «{what}» затрагивает всех пользователей панели (в том числе чужих) — запрещено")
+
     def get_users(
         self,
         *,
@@ -214,7 +284,9 @@ class RemnawaveAPI:
         return self.get(f"/api/users/{int(user_id)}")
 
     def get_user_by_username(self, username: str) -> Any:
-        return self.get(f"/api/users/by-username/{urllib.parse.quote(username, safe='')}")
+        data = self.get(f"/api/users/by-username/{urllib.parse.quote(username, safe='')}")
+        self._remember_own(data)
+        return data
 
     def get_user_by_short_uuid(self, short_uuid: str) -> Any:
         return self.get(f"/api/users/by-short-uuid/{urllib.parse.quote(short_uuid, safe='')}")
@@ -266,6 +338,8 @@ class RemnawaveAPI:
         external_squad_uuid: Optional[str] = None,
         **extra: Any,
     ) -> Any:
+        if not is_own_username(username):
+            raise RemnawaveForeignUserError(f"отказ: создавать можно только batman_<id>, а не {username!r}")
         body: dict[str, Any] = {
             "username": username,
             "expire_at": expire_at,
@@ -285,30 +359,43 @@ class RemnawaveAPI:
             "external_squad_uuid": external_squad_uuid,
             **extra,
         }
-        return self.post("/api/users/", json_body=body)
+        data = self.post("/api/users/", json_body=body)
+        self._remember_own(data)
+        return data
 
     def update_user(self, *, id: Optional[int] = None, username: Optional[str] = None, **fields: Any) -> Any:
         body: dict[str, Any] = {**fields}
         body.pop("uuid", None)
-        if id is not None:
-            body["id"] = int(id)
+        if id is None:
+            raise RemnawaveForeignUserError("отказ: update_user без id")
+        self.assert_own_user(id)
+        if username is not None and not is_own_username(username):
+            raise RemnawaveForeignUserError(f"отказ: переименование в {username!r} (не batman_<id>)")
+        body["id"] = int(id)
         if username is not None:
             body["username"] = username
         return self.patch("/api/users/", json_body=body)
 
     def delete_user(self, user_id: int) -> Any:
-        return self.delete(f"/api/users/{int(user_id)}")
+        self.assert_own_user(user_id)
+        res = self.delete(f"/api/users/{int(user_id)}")
+        self._own_cache().discard(int(user_id))
+        return res
 
     def enable_user(self, user_id: int) -> Any:
+        self.assert_own_user(user_id)
         return self.post(f"/api/users/{int(user_id)}/actions/enable")
 
     def disable_user(self, user_id: int) -> Any:
+        self.assert_own_user(user_id)
         return self.post(f"/api/users/{int(user_id)}/actions/disable")
 
     def reset_user_traffic(self, user_id: int) -> Any:
+        self.assert_own_user(user_id)
         return self.post(f"/api/users/{int(user_id)}/actions/reset-traffic")
 
     def revoke_user_subscription(self, user_id: int, body: Optional[dict[str, Any]] = None) -> Any:
+        self.assert_own_user(user_id)
         return self.post(f"/api/users/{user_id}/actions/revoke", json_body=body or {})
 
     def extend_user(
@@ -321,6 +408,7 @@ class RemnawaveAPI:
         extend_to: Optional[datetime | str] = None,
         **extra: Any,
     ) -> Any:
+        self.assert_own_user(user_id)
         body: dict[str, Any] = {**extra}
         if days is not None:
             body["days"] = days
@@ -343,34 +431,34 @@ class RemnawaveAPI:
 
     # массовые пользователи
     def bulk_update_users(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/update", json_body=body)
+        return self._refuse_bulk("массовое изменение")
 
     def bulk_delete_users(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/delete", json_body=body)
+        return self._refuse_bulk("массовое удаление")
 
     def bulk_delete_users_by_status(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/delete-by-status", json_body=body)
+        return self._refuse_bulk("удаление по статусу")
 
     def bulk_reset_traffic(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/reset-traffic", json_body=body)
+        return self._refuse_bulk("массовый сброс трафика")
 
     def bulk_revoke_subscription(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/revoke-subscription", json_body=body)
+        return self._refuse_bulk("массовый перевыпуск")
 
     def bulk_extend_expiration(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/extend-expiration-date", json_body=body)
+        return self._refuse_bulk("массовое продление")
 
     def bulk_update_squads(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/update-squads", json_body=body)
+        return self._refuse_bulk("массовая смена сквадов")
 
     def bulk_all_update(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/all/update", json_body=body)
+        return self._refuse_bulk("изменение всех пользователей")
 
     def bulk_all_reset_traffic(self, body: Optional[dict[str, Any]] = None) -> Any:
-        return self.post("/api/users/bulk/all/reset-traffic", json_body=body or {})
+        return self._refuse_bulk("сброс трафика всем пользователям")
 
     def bulk_all_extend(self, body: dict[str, Any]) -> Any:
-        return self.post("/api/users/bulk/all/extend-expiration-date", json_body=body)
+        return self._refuse_bulk("продление всем пользователям")
 
     def get_internal_squads(self) -> Any:
         return self.get("/api/internal-squads")
@@ -394,19 +482,22 @@ class RemnawaveAPI:
         return self.get(f"/api/internal-squads/{uuid}/usage", params=params)
 
     def add_users_to_internal_squad(self, uuid: str) -> Any:
-        # обновляем сквады для каждого пользователя
-        return self.post(f"/api/internal-squads/{uuid}/bulk-actions/add-users")
+        return self._refuse_bulk("добавить всех пользователей в сквад")
 
     def remove_users_from_internal_squad(self, uuid: str) -> Any:
-        return self.delete(f"/api/internal-squads/{uuid}/bulk-actions/remove-users")
+        return self._refuse_bulk("убрать всех пользователей из сквада")
 
     def add_many_users_to_internal_squad(self, uuid: str, user_ids: list[int]) -> Any:
+        for uid in user_ids:
+            self.assert_own_user(uid)
         return self.post(
             f"/api/internal-squads/{uuid}/bulk-actions/add-many-users",
             json_body={"user_ids": user_ids},
         )
 
     def remove_many_users_from_internal_squad(self, uuid: str, user_ids: list[int]) -> Any:
+        for uid in user_ids:
+            self.assert_own_user(uid)
         return self.delete(
             f"/api/internal-squads/{uuid}/bulk-actions/remove-many-users",
             json_body={"user_ids": user_ids},
@@ -434,10 +525,10 @@ class RemnawaveAPI:
         return self.delete(f"/api/external-squads/{uuid}")
 
     def add_users_to_external_squad(self, uuid: str) -> Any:
-        return self.post(f"/api/external-squads/{uuid}/bulk-actions/add-users")
+        return self._refuse_bulk("назначить внешний сквад всем пользователям")
 
     def remove_users_from_external_squad(self, uuid: str) -> Any:
-        return self.delete(f"/api/external-squads/{uuid}/bulk-actions/remove-users")
+        return self._refuse_bulk("убрать внешний сквад у всех пользователей")
 
     def get_hwid_devices(self, **params: Any) -> Any:
         return self.get("/api/hwid/devices", params=params or None)
@@ -445,13 +536,21 @@ class RemnawaveAPI:
     def get_user_hwid_devices(self, user_id: int) -> Any:
         return self.get(f"/api/hwid/devices/{user_id}")
 
+    def _assert_hwid_body(self, body: dict[str, Any]) -> None:
+        if "userId" not in (body or {}):
+            raise RemnawaveForeignUserError("отказ: операция с HWID без userId")
+        self.assert_own_user(body["userId"])
+
     def create_hwid_device(self, body: dict[str, Any]) -> Any:
+        self._assert_hwid_body(body)
         return self.post("/api/hwid/devices", json_body=body)
 
     def delete_hwid_device(self, body: dict[str, Any]) -> Any:
+        self._assert_hwid_body(body)
         return self.post("/api/hwid/devices/delete", json_body=body)
 
     def delete_all_user_hwid_devices(self, body: dict[str, Any]) -> Any:
+        self._assert_hwid_body(body)
         return self.post("/api/hwid/devices/delete-all", json_body=body)
 
     def get_hwid_stats(self) -> Any:
@@ -600,6 +699,7 @@ class RemnawaveAPI:
         return self.get(f"/api/metadata/user/{user_id}")
 
     def upsert_user_metadata(self, user_id: int, body: dict[str, Any]) -> Any:
+        self.assert_own_user(user_id)
         return self.put(f"/api/metadata/user/{user_id}", json_body=body)
 
     def get_node_metadata(self, uuid: str) -> Any:
@@ -625,6 +725,11 @@ class RemnawaveAPI:
         return result
 
     def find_user_by_telegram(self, telegram_id: int) -> Optional[dict[str, Any]]:
+        """только свои (batman_<id>) с этим telegramId; чужих не возвращаем."""
+        found = self._find_user_by_telegram_any(telegram_id)
+        return found if found and is_own_username(found.get("username")) else None
+
+    def _find_user_by_telegram_any(self, telegram_id: int) -> Optional[dict[str, Any]]:
         tg = int(telegram_id)
         try:
             page = self.get("/api/users/stream", params={"telegramId": str(tg), "size": 250})
@@ -667,6 +772,8 @@ class RemnawaveAPI:
         uname = username or f"tg_{telegram_id}"
         # вычищаем из U
         uname = "".join(c if c.isalnum() or c in "_-" else "_" for c in uname)[:36] or f"tg_{telegram_id}"
+        if not is_own_username(uname):
+            raise RemnawaveForeignUserError(f"отказ: ensure_user только для batman_<id>, а не {uname!r}")
 
         existing = self.find_user_by_telegram(telegram_id)
         expire = _utcnow() + timedelta(days=max(1, days))

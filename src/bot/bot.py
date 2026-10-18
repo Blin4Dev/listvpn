@@ -22,7 +22,6 @@ import fulfillment  # type: ignore
 import reminders  # type: ignore
 import services  # type: ignore
 import forum  # type: ignore
-import survey  # type: ignore
 import blacklist  # type: ignore
 import names  # type: ignore
 
@@ -43,7 +42,7 @@ BOT_USERNAME = _env("BOT_USERNAME", "VITE_BOT_USERNAME", default="blinvpn_bot")
 SUPPORT_URL = _env("SUPPORT_URL")  # fallback если нет miniapp
 
 # premium emoji (нужен premium/fragment + bot api 9.4+)
-EMOJI_FOX = _env("EMOJI_FOX", default="5283051451889756068")
+EMOJI_FOX = _env("EMOJI_FOX", default="5963229754516574142")  # premium-эмодзи в приветствии /start
 EMOJI_KEY = _env("EMOJI_KEY", default="6005570495603282482")
 EMOJI_CHAT = _env("EMOJI_CHAT", default="5994297722574737553")
 
@@ -134,7 +133,8 @@ def _send_welcome(chat_id: int) -> None:
     """/start: приветствие + кнопки «запустить» / «поддержка» (bot api 9.4+)."""
     text, entities = _welcome_text_entities()
     launch = _launch_button()
-    rows: list[list[dict[str, Any]]] = [[{**launch, "style": "primary", "icon_custom_emoji_id": EMOJI_KEY}]]
+    # style: primary — синяя, danger — красная, success — зелёная (bot api 9.4+)
+    rows: list[list[dict[str, Any]]] = [[{**launch, "style": "danger", "icon_custom_emoji_id": EMOJI_KEY}]]
     sup = _support_button(icon_custom_emoji_id=EMOJI_CHAT)
     if sup:
         rows.append([sup])
@@ -408,20 +408,9 @@ def handle_callback(cq: dict[str, Any]) -> None:
     def answer(text: str = "") -> None:
         api("answerCallbackQuery", {"callback_query_id": cq_id, "text": text})
 
-    # опрос
+    # кнопки опроса из уже отправленных сообщений: опрос удалён
     if data == "survey:start" or data.startswith(("sv:", "svm:", "svd:")):
-        answer()
-        urow = db.fetchone("SELECT id FROM users WHERE telegram_id = ?", (from_id,))
-        if not urow:
-            return
-        uid = int(urow["id"])
-        try:
-            if data == "survey:start":
-                survey.start(api, uid, from_id)
-            else:
-                survey.handle_callback(api, uid, int(from_id), message_id, data)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[bot] survey callback error: {type(exc).__name__}: {exc}", flush=True)
+        answer("Опрос больше не проводится")
         return
 
     # старые кнопки выводов: только панель
@@ -430,23 +419,6 @@ def handle_callback(cq: dict[str, Any]) -> None:
         return
 
     answer()
-
-
-def handle_survey_text(message: dict[str, Any]) -> bool:
-    """свободный ответ в опросе (q4 «другое», q8), если бот ждёт текст."""
-    frm = message.get("from") or {}
-    from_id = int(frm.get("id") or 0)
-    chat_id = (message.get("chat") or {}).get("id")
-    if not from_id or chat_id is None:
-        return False
-    urow = db.fetchone("SELECT id FROM users WHERE telegram_id = ?", (from_id,))
-    if not urow:
-        return False
-    try:
-        return survey.handle_text(api, int(urow["id"]), int(chat_id), message.get("text") or "")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[bot] survey text error: {type(exc).__name__}: {exc}", flush=True)
-        return False
 
 
 def process_update(update: dict[str, Any]) -> None:
@@ -466,9 +438,6 @@ def process_update(update: dict[str, Any]) -> None:
         text = message.get("text") or ""
         if text.startswith("/start"):
             handle_start(message)
-            return
-        # текст ответа в опросе
-        if text and handle_survey_text(message):
             return
     except Exception as exc:  # noqa: BLE001
         print(f"[bot] ошибка обработки апдейта: {type(exc).__name__}: {exc}", flush=True)

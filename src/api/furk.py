@@ -126,6 +126,20 @@ def create_key(limit_gb: int, months: Optional[int] = None, idem: Optional[str] 
     return res.get("key") or {}
 
 
+def create_trial_key(idem: Optional[str] = None) -> dict[str, Any]:
+    """POST /keys/trial — бесплатный пробный ключ (cost = 0). Тела нет: срок и трафик берутся
+    из настроек приложения в @VPNpartenrsbot. Ключ обычный — его можно продлить / перевести на тариф.
+    403 TRIAL_DISABLED — пробные ключи у приложения выключены. Возвращает объект key."""
+    res = _request("POST", "/keys/trial", None, idem=idem)
+    key = res.get("key") or {}
+    if key.get("id") and not key.get("subscription_url"):
+        try:  # в ответе на создание ссылки может не быть — берём из карточки ключа
+            key = key_info(str(key["id"])) or key
+        except FurkError:
+            pass
+    return key
+
+
 def renew_key(key_id: str, months: Optional[int] = None, idem: Optional[str] = None,
               days: Optional[int] = None, hours: Optional[int] = None) -> dict[str, Any]:
     res = _request("POST", f"/keys/{_safe_id(key_id)}/renew", _period(months, days, hours), idem=idem)

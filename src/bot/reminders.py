@@ -427,61 +427,7 @@ def run_trial_connection_checks(api: Callable[..., Any], log: Callable[[str], No
     return sent
 
 
-SURVEY_DELAY_HOURS = 1        # часов после первого коннекта
-SURVEY_GIVEUP_DAYS = 14       # не ждать дольше
 
-
-def run_survey_invites(api: Callable[..., Any], log: Callable[[str], None] = print) -> int:
-    """через час после первого vpn-коннекта: приглашение в опрос (connected_at кэшируем)."""
-    try:
-        import provisioning  # type: ignore
-        import survey  # type: ignore
-    except Exception:  # noqa: BLE001
-        return 0
-    now = _utcnow()
-    giveup_before = (now - timedelta(days=SURVEY_GIVEUP_DAYS)).isoformat()
-    rows = db.fetchall(
-        "SELECT si.user_id AS uid, si.telegram_id AS tg, si.enrolled_at AS enrolled, "
-        "si.connected_at AS conn FROM survey_invites si JOIN users u ON u.id = si.user_id "
-        "WHERE si.invited = 0 AND si.gave_up = 0 AND si.telegram_id IS NOT NULL "
-        "AND COALESCE(u.is_banned, 0) = 0"
-    )
-    sent = 0
-    for r in rows:
-        uid, tg = int(r["uid"]), int(r["tg"])
-        conn_iso = r.get("conn")
-        if not conn_iso:
-            # connected_at неизвестен -> remnawave
-            u = db.fetchone("SELECT email FROM users WHERE id = ?", (uid,))
-            conn_iso = provisioning.user_first_connected_at(tg, (u or {}).get("email"))
-            if not conn_iso:
-                # так и не подключился: сдаёмся
-                if str(r.get("enrolled") or "") <= giveup_before:
-                    db.execute("UPDATE survey_invites SET gave_up = 1 WHERE user_id = ?", (uid,))
-                continue
-            db.execute("UPDATE survey_invites SET connected_at = ? WHERE user_id = ?", (conn_iso, uid))
-        conn_dt = _parse_iso(conn_iso)
-        if not conn_dt:
-            continue
-        if (now - conn_dt).total_seconds() < SURVEY_DELAY_HOURS * 3600:
-            continue  # ещё рано
-        if survey.has_completed(uid):
-            db.execute("UPDATE survey_invites SET invited = 1 WHERE user_id = ?", (uid,))
-            continue
-        # mark до send (антидубль если ack потерялся)
-        # invite строго один раз
-        db.execute(
-            "UPDATE survey_invites SET invited = 1, invited_at = ? WHERE user_id = ?",
-            (db.utcnow_iso(), uid),
-        )
-        if api("sendMessage", survey.invite_payload(tg)) is not None:
-            sent += 1
-        else:
-            log(f"[survey] не удалось отправить приглашение пользователю {uid}")
-        time.sleep(0.05)  # ~20 msg/s
-    if sent:
-        log(f"[survey] отправлено приглашений: {sent}")
-    return sent
 
 
 _DAY = 24 * _H
@@ -709,10 +655,6 @@ def start_background(api: Callable[..., Any], log: Callable[[str], None] = print
                 run_trial_connection_checks(api, log)
             except Exception as exc:  # noqa: BLE001
                 log(f"[trial-check] ошибка прохода: {type(exc).__name__}: {exc}")
-            try:
-                run_survey_invites(api, log)
-            except Exception as exc:  # noqa: BLE001
-                log(f"[survey] ошибка прохода: {type(exc).__name__}: {exc}")
             # antiabuse ~раз в 10 мин
             aa_counter += 1
             if aa_counter * INTERVAL >= 600:

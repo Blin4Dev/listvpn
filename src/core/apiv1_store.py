@@ -617,16 +617,19 @@ def session_heartbeat(user_id: int, session_id: str, node_name: str) -> None:
         last = conn.execute("SELECT MAX(last_seen_at) AS m FROM vpn_sessions WHERE user_id = ?",
                             (int(user_id),)).fetchone()
         prev = parse_iso(last["m"]) if last else None
+        same = conn.execute("SELECT 1 FROM vpn_sessions WHERE user_id = ? AND session_id = ?",
+                            (int(user_id), session_id)).fetchone()
         credit = 0
-        if prev:
+        # новая сессия — с нуля (время между прошлым отключением и этим подключением не считаем);
+        # в продолжающейся — промежуток от последней отметки пользователя по любой сессии (не больше часа)
+        if same and prev:
             gap = (t - prev).total_seconds()
-            # засчитываем только непрерывное подключение: после долгого разрыва отсчёт заново
             credit = int(gap) if 0 < gap <= HEARTBEAT_MAX_GAP_SEC else 0
         conn.execute(
             "INSERT INTO vpn_sessions (user_id, session_id, node_name, started_at, last_seen_at, active_seconds, "
-            "heartbeats) VALUES (?, ?, ?, ?, ?, ?, 1) "
+            "heartbeats) VALUES (?, ?, ?, ?, ?, 0, 1) "
             "ON CONFLICT(user_id, session_id) DO UPDATE SET node_name = excluded.node_name, "
             "last_seen_at = excluded.last_seen_at, active_seconds = vpn_sessions.active_seconds + ?, "
             "heartbeats = vpn_sessions.heartbeats + 1",
-            (int(user_id), session_id, node_name, ts, ts, credit, credit),
+            (int(user_id), session_id, node_name, ts, ts, credit),
         )

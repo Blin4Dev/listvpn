@@ -325,13 +325,10 @@ def _limited_user_ids(log: Callable[[str], None]) -> set[int]:
         for u in users:
             if not isinstance(u, dict) or str(u.get("status") or "").upper() != "LIMITED":
                 continue
-            try:
-                if u.get("telegramId"):
-                    tg_ids.add(int(u["telegramId"]))
-                elif str(u.get("description") or "").isdigit():
-                    desc_ids.add(int(u["description"]))
-            except (TypeError, ValueError):
+            # только свои batman_<id>: id пользователя бота — из имени, чужих пользователей панели не берём
+            if not remnawave.is_own_username(u.get("username")):
                 continue
+            desc_ids.add(int(str(u["username"])[len(provisioning.USERNAME_PREFIX):]))
         start += size
         total = page.get("total") if isinstance(page, dict) else None
         if (total is not None and start >= int(total)) or len(users) < size:

@@ -576,41 +576,6 @@ CREATE TABLE IF NOT EXISTS trial_checks (
     checked INTEGER NOT NULL DEFAULT 0
 );
 
--- опрос: список на приглашение (через 1ч после первого подключения к VPN).
-CREATE TABLE IF NOT EXISTS survey_invites (
-    user_id INTEGER PRIMARY KEY,
-    telegram_id INTEGER,
-    enrolled_at TEXT NOT NULL,
-    connected_at TEXT,
-    invited INTEGER NOT NULL DEFAULT 0,
-    invited_at TEXT,
-    gave_up INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
--- опрос: прогресс прохождения (шаг, накопленные ответы).
-CREATE TABLE IF NOT EXISTS survey_state (
-    user_id INTEGER PRIMARY KEY,
-    telegram_id INTEGER,
-    step INTEGER NOT NULL DEFAULT 0,
-    answers_json TEXT NOT NULL DEFAULT '{}',
-    await_text INTEGER NOT NULL DEFAULT 0,
-    completed INTEGER NOT NULL DEFAULT 0,
-    started_at TEXT,
-    completed_at TEXT,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
--- опрос: финальные ответы (нормализованно - одна строка на выбранный вариант).
-CREATE TABLE IF NOT EXISTS survey_answers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    question INTEGER NOT NULL,
-    answer TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_survey_answers_q ON survey_answers(question);
-CREATE INDEX IF NOT EXISTS idx_survey_answers_user ON survey_answers(user_id);
 
 CREATE TABLE IF NOT EXISTS squads (
     squad_uuid TEXT PRIMARY KEY,
@@ -1174,6 +1139,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         pass
     try:
         conn.execute("UPDATE support_tickets SET queue_at = opened_at WHERE queue_at IS NULL")
+    except sqlite3.Error:
+        pass
+    # система опросов удалена: её таблицы больше не нужны
+    try:
+        for t in ("survey_answers", "survey_state", "survey_invites"):
+            conn.execute(f"DROP TABLE IF EXISTS {t}")
+        conn.execute("DELETE FROM settings WHERE key LIKE 'survey%'")
     except sqlite3.Error:
         pass
     # уникальный provider_payment_id (защита от повторного callback)

@@ -4,11 +4,13 @@
 # Вебхук ЮKassa (/webhooks/payments/yookassa) — в webhook.py (сервис webhook).
 from __future__ import annotations
 
+import hmac
+import os
 import time
 from typing import Any, Optional
 from urllib.parse import parse_qsl
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -27,6 +29,7 @@ CLAIM_LIMIT = (10, 600)
 WITHDRAW_LIMIT = (5, 600)
 TELEMETRY_LIMIT = (30, 60)
 TOKEN_IP_LIMIT = (20, 60)
+SERVICE_MIN_TOKEN_LEN = 32
 REFRESH_IP_LIMIT = (60, 60)
 # initData для обмена на токен — не старше часа (TELEGRAM_INITDATA_MAX_AGE у мини-приложения — сутки)
 INITDATA_MAX_AGE = 3600
@@ -120,6 +123,18 @@ def build_router(core: Any) -> APIRouter:
             raise _err(404, "Подписки нет", "no_subscription")
         return sub
 
+    def service_dep(authorization: Optional[str] = Header(None)) -> None:
+        """серверные вызовы (бот, прокси подписок): статичный Authorization: Bearer <API_SERVICE_TOKEN>.
+        Пользовательские токены bv1 здесь не принимаются."""
+        expected = (os.getenv("API_SERVICE_TOKEN") or "").strip()
+        if len(expected) < SERVICE_MIN_TOKEN_LEN:
+            raise _err(503, "API_SERVICE_TOKEN не задан (минимум 32 символа)", "service_token_not_configured")
+        raw = (authorization or "").strip()
+        given = raw[7:].strip() if raw.lower().startswith("bearer ") else ""
+        if not given or not hmac.compare_digest(given.encode(), expected.encode()):
+            raise HTTPException(401, detail={"message": "Неверный сервисный токен", "code": "token_invalid"},
+                                headers={"WWW-Authenticate": "Bearer"})
+
     # ── 0. токены ──
 
     @r.post("/auth/token")
@@ -183,6 +198,22 @@ def build_router(core: Any) -> APIRouter:
             _limit(f"v1resync:{fresh['id']}", RESYNC_LIMIT)
             store.enqueue_provisioning(int(fresh["id"]), int(sub["id"]), "resync")
         return JSONResponse(status_code=202, content=store.subscription_payload(fresh))
+
+    # ── 1a. серверный: ключ обхода (белые списки) по Telegram ID ──
+
+    @r.get("/service/bypass")
+    def service_bypass(tg_id: int = Query(..., ge=1, le=2 ** 62), _: None = Depends(service_dep)) -> dict[str, Any]:
+        """{"bypass": {enabled, available, until, key, used_bytes?, limit_bytes?}} — тот же объект,
+        что мини-приложение получает в /api/app/subscription. Нет пользователя — 404 user_not_found.
+        Без активной подписки обход считается выключенным (enabled=false, key=null)."""
+        row = db.fetchone("SELECT id FROM users WHERE telegram_id = ?", (int(tg_id),))
+        user = core.get_user(int(row["id"])) if row else None
+        if not user:
+            raise _err(404, "Пользователь не найден", "user_not_found")
+        if user.get("is_banned") or core.subscription_status_for_user(user) not in ("active", "trial"):
+            return {"bypass": {"enabled": False, "available": core.fulfillment.whitelist_available(),
+                               "until": None, "key": None}}
+        return {"bypass": core._bypass_info(int(user["id"]))}
 
     # ── 2. тарифы ──
 

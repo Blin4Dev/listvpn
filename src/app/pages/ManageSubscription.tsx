@@ -95,7 +95,6 @@ export default function ManageSubscription() {
   const [isTrial, setIsTrial] = useState(false);
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
   const [bypass, setBypass] = useState<BypassInfo>(null);
-  const [bypassCopied, setBypassCopied] = useState(false);
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
 
@@ -286,20 +285,6 @@ export default function ManageSubscription() {
           <TrafficRow label="Основной" value={mainTraffic} warn={mainOver} />
           <TrafficRow label="Обходы" value={bypassValue} warn={bypassOver} last />
         </NoirCard>
-        {bypassOn && bypass?.key ? (
-          <div style={{ marginTop: 12 }}>
-            <NoirRow
-              icon="content_copy"
-              title={bypassCopied ? "Ключ белых списков скопирован" : "Скопировать ключ белых списков"}
-              onClick={() => {
-                void copyText(String(bypass.key)).then(() => {
-                  setBypassCopied(true);
-                  window.setTimeout(() => setBypassCopied(false), 2000);
-                });
-              }}
-            />
-          </div>
-        ) : null}
         <div style={{ marginTop: 12 }}>
           <NoirRow title="Сбросить трафик" onClick={requestTrafficReset} />
         </div>

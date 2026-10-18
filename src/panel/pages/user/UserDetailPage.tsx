@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Key, Gift, Percent, X, CheckCircle, CreditCard, ArrowUpRight, ArrowDownLeft, Hash, Ban, Clock, Edit2, Copy, Database, Wallet, Plus, Send, Trash2, Save, RefreshCw, Shield, ArrowLeft, ClipboardList, ExternalLink,
+  Key, Gift, Percent, X, CheckCircle, CreditCard, ArrowUpRight, ArrowDownLeft, Hash, Ban, Clock, Edit2, Copy, Database, Wallet, Plus, Send, Trash2, Save, RefreshCw, Shield, ArrowLeft, ExternalLink,
   AlertTriangle,
 } from 'lucide-react';
 import { UserActionModal } from '../../components/UserActionModal';
@@ -27,10 +27,6 @@ export interface UserDetailData {
   discount?: { percent: number; expires_at: string | null; code: string | null; name: string | null } | null;
   promo_activations?: { id: number; code: string | null; name: string | null; discount_percent: number; expires_at: string | null; created_at: string | null; active: boolean }[];
 }
-
-export interface UserSurveyAnswer { n: number; q: string; answers: string[]; }
-
-export interface UserSurvey { taken: boolean; completed?: boolean; started_at?: string | null; completed_at?: string | null; answers: UserSurveyAnswer[]; }
 
 export interface RwDevice { hwid: string; platform: string | null; os_version: string | null; device_model: string | null; user_agent: string | null; created_at: string | null; updated_at: string | null; }
 
@@ -87,7 +83,6 @@ export const UserDetailPage: React.FC<{
   const [detail, setDetail] = useState<UserDetailData | null>(null);
   const [payments, setPayments] = useState<PaymentRow[]>([]);
   const [rw, setRw] = useState<RwInfo | null>(null);
-  const [survey, setSurvey] = useState<UserSurvey | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [action, setAction] = useState<string | null>(null);
@@ -107,9 +102,8 @@ export const UserDetailPage: React.FC<{
   };
   const loadPayments = async () => { try { setPayments((await apiFetch(`/panel/users/${userId}/payments`)) || []); } catch { /* ignore */ } };
   const loadRw = async () => { try { setRw(await apiFetch(`/panel/users/${userId}/remnawave`)); } catch { /* ignore */ } };
-  const loadSurvey = async () => { try { setSurvey(await apiFetch(`/panel/users/${userId}/survey`)); } catch { /* ignore */ } };
 
-  useEffect(() => { setLoading(true); setRw(null); setSurvey(null); void load(); void loadPayments(); void loadRw(); void loadSurvey(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [userId]);
+  useEffect(() => { setLoading(true); setRw(null); void load(); void loadPayments(); void loadRw(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [userId]);
 
   const doAction = async (act: string, value: any = null, notify = false, confirmMsg?: string, confirm = false, channel?: 'telegram' | 'email') => {
     if (confirmMsg && !window.confirm(confirmMsg)) return;
@@ -533,22 +527,6 @@ export const UserDetailPage: React.FC<{
         )}
       </DCard>
 
-      {survey && survey.taken && (
-        <DCard title="Опрос" icon={ClipboardList}>
-          <InfoRow label="Статус">
-            <span className={`badge ${survey.completed ? 'solid' : 'mute'}`}>{survey.completed ? 'пройден' : 'начат, не завершён'}</span>
-          </InfoRow>
-          {survey.completed_at && <InfoRow label="Пройден"><span className="mono">{fmtDateTime(survey.completed_at)}</span></InfoRow>}
-          <div className="mt-3 flex flex-col gap-2">
-            {survey.answers.filter((a) => a.answers.length > 0).map((a) => (
-              <div key={a.n} className="inset" style={{ padding: '8px 10px' }}>
-                <div className="sub" style={{ marginBottom: 2 }}>{a.n}. {a.q}</div>
-                <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{a.answers.join(', ')}</div>
-              </div>
-            ))}
-          </div>
-        </DCard>
-      )}
     </div>
   );
 };

@@ -33,7 +33,7 @@ class StaffError(Exception):
 # доступ: any / curator / manage (оператор с тикетом этого uid); иначе владелец
 
 R = "GET"
-_USER_VIEW = r"/users/\d+(?:/detail|/payments|/subscriptions|/referrals|/remnawave|/survey)?"
+_USER_VIEW = r"/users/\d+(?:/detail|/payments|/subscriptions|/referrals|/remnawave)?"
 
 ROUTES: list[tuple[set[str], re.Pattern, str]] = [
     (set(m.split()), re.compile(f"^{p}$"), rule) for m, p, rule in [

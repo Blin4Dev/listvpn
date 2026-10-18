@@ -66,10 +66,6 @@ def _local_user_id(telegram_id: Optional[int], email: Optional[str]) -> Optional
         return None
 
 
-# пользователи старого бота в Remnawave: user_<12 символов>. Других (чужие проекты на той же панели) не трогаем.
-LEGACY_PREFIX = "user_"
-
-
 def _as_user(data: Any) -> Optional[dict[str, Any]]:
     if isinstance(data, dict) and "response" in data:
         data = data["response"]
@@ -91,17 +87,6 @@ def _as_list(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _tg_of(u: dict[str, Any]) -> str:
-    v = u.get("telegramId")
-    if v is None:
-        v = u.get("telegram_id")
-    return str(v) if v is not None and str(v) != "" else ""
-
-
-def _email_of(u: dict[str, Any]) -> str:
-    return str(u.get("email") or "").strip().lower()
-
-
 def _num_id(u: dict[str, Any]) -> Optional[int]:
     val = u.get("id")
     if val is None:
@@ -119,110 +104,56 @@ def _by_username(client: Any, username: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def _stream_users(client: Any, **params: Any) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    cursor: Any = None
-    for _ in range(40):
-        q = {k: v for k, v in params.items() if v is not None}
-        q["size"] = int(q.get("size") or 250)
-        if cursor is not None:
-            q["cursor"] = cursor
-        try:
-            page = client.get("/api/users/stream", params=q)
-        except Exception:  # noqa: BLE001
-            break
-        if isinstance(page, dict) and "response" in page:
-            page = page["response"]
-        users = _as_list(page)
-        if not users:
-            break
-        out.extend(users)
-        if not (isinstance(page, dict) and page.get("hasMore")):
-            break
-        cursor = page.get("nextCursor")
-        if cursor is None:
-            break
-    return out
-
-
-def _users_by_telegram(client: Any, telegram_id: int) -> list[dict[str, Any]]:
-    """пользователи панели с этим telegramId (их может быть несколько — из разных проектов)."""
-    tg = int(telegram_id)
-    found = [u for u in _stream_users(client, telegramId=str(tg)) if _tg_of(u) == str(tg)]
-    if found:
-        return found
-    out: list[dict[str, Any]] = []
-    try:
-        start, size = 0, 250
-        while True:
-            page = client.get_users(start=start, size=size)
-            users = _as_list(page)
-            if not users:
-                break
-            out += [u for u in users if _tg_of(u) == str(tg)]
-            start += size
-            total = (page.get("response") or page).get("total") if isinstance(page, dict) else None
-            if (total is not None and start >= int(total)) or len(users) < size:
-                break
-    except Exception:  # noqa: BLE001
-        pass
-    return out
-
-
-def _users_by_email(client: Any, email: str) -> list[dict[str, Any]]:
-    want = email.strip().lower()
-    if not want:
-        return []
-    found = [u for u in _stream_users(client, email=want) if _email_of(u) == want]
-    return found
-
-
-def _owned(u: dict[str, Any], *, user_id: Optional[int], telegram_id: Optional[int],
-           email: Optional[str]) -> bool:
-    """только batman_<наш id> или legacy user_… с тем же telegram/email."""
-    if not isinstance(u, dict) or _num_id(u) is None:
+def _owned(u: dict[str, Any], *, user_id: Optional[int], telegram_id: Optional[int] = None,
+           email: Optional[str] = None) -> bool:
+    """свой пользователь панели — ТОЛЬКО с именем ровно batman_<id пользователя бота>.
+    Никаких поисков по telegramId / email / старым user_…: на панели могут быть чужие проекты."""
+    if not isinstance(u, dict) or _num_id(u) is None or not user_id:
         return False
-    name = str(u.get("username") or "")
-    if user_id and name == rw_username(int(user_id)):
-        return True
-    if not name.startswith(LEGACY_PREFIX):
-        return False
-    desc = str(u.get("description") or "").strip()
-    if user_id and desc.isdigit() and int(desc) != int(user_id):
-        return False
-    if telegram_id and _tg_of(u) == str(int(telegram_id)):
-        return True
-    if email and _email_of(u) == str(email).strip().lower():
-        return True
-    return False
+    return str(u.get("username") or "") == rw_username(int(user_id))
 
 
 def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[int] = None,
            email: Optional[str] = None) -> Optional[dict[str, Any]]:
-    """пользователь Remnawave этого бота:
-    1) по имени batman_<id> (так создаются все новые);
-    2) старые из прошлого бота — только с именем user_…, по telegram_id / email (без переименования).
-    Пользователей с другими именами не берём и не меняем."""
+    """пользователь Remnawave этого бота: только по имени batman_<id>.
+    telegram_id / email используются лишь чтобы найти id пользователя в НАШЕЙ базе."""
     if user_id is None:
         user_id = _local_user_id(telegram_id, email)
-    if user_id:
-        rw = _by_username(client, rw_username(int(user_id)))
-        if rw and _owned(rw, user_id=user_id, telegram_id=telegram_id, email=email):
-            return rw
-    candidates: list[dict[str, Any]] = []
-    if telegram_id:
-        candidates += _users_by_telegram(client, int(telegram_id))
-    if email:
-        candidates += _users_by_email(client, str(email))
-    seen: set[int] = set()
-    for u in candidates:
-        nid = _num_id(u)
-        if nid is None or nid in seen:
-            continue
-        seen.add(nid)
-        if _owned(u, user_id=user_id, telegram_id=telegram_id, email=email):
-            return u
+    if not user_id:
+        return None
+    rw = _by_username(client, rw_username(int(user_id)))
+    if rw and _owned(rw, user_id=user_id):
+        return rw
     return None
+
+
+def own_panel_users(client: Any) -> list[dict[str, Any]]:
+    """все наши пользователи панели (batman_<id>, где id есть в нашей базе) — для массовых действий."""
+    try:
+        try:
+            from . import database as db  # type: ignore
+        except ImportError:
+            import database as db  # type: ignore
+        local = {int(r["id"]) for r in db.fetchall("SELECT id FROM users")}
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict[str, Any]] = []
+    start, size = 0, 250
+    while True:
+        page = client.get_users(start=start, size=size)
+        users = _as_list(page)
+        if not users:
+            break
+        for u in users:
+            name = str(u.get("username") or "")
+            if name.startswith(USERNAME_PREFIX) and name[len(USERNAME_PREFIX):].isdigit() \
+                    and int(name[len(USERNAME_PREFIX):]) in local and _num_id(u) is not None:
+                out.append(u)
+        start += size
+        total = (page.get("response") or page).get("total") if isinstance(page, dict) else None
+        if (total is not None and start >= int(total)) or len(users) < size:
+            break
+    return out
 
 
 def _extract(user: dict[str, Any]) -> dict[str, Any]:
@@ -384,37 +315,22 @@ def _resolve_quiet(client: Any, **kw: Any) -> Optional[dict[str, Any]]:
 
 
 def backfill_descriptions(tg_to_user_id: dict[int, int]) -> dict[str, Any]:
+    """description = id пользователя бота — только у своих batman_<id> (чужих не трогаем)."""
     out: dict[str, Any] = {"ok": False, "updated": 0, "error": None}
     if not is_configured():
         out["error"] = "remnawave_not_configured"
         return out
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
-        start, size = 0, 250
-        while True:
-            page = client.get_users(start=start, size=size)
-            if isinstance(page, dict) and "response" in page:
-                page = page["response"]
-            users = page.get("users") if isinstance(page, dict) else page
-            if not users:
-                break
-            for u in users:
-                try:
-                    tg = int(u.get("telegramId") or 0)
-                except (TypeError, ValueError):
-                    continue
-                uid = tg_to_user_id.get(tg) if tg else None
-                if not uid or str(u.get("description") or "") == str(uid) or u.get("id") is None:
-                    continue
-                try:
-                    client.update_user(id=int(u["id"]), description=str(uid))
-                    out["updated"] += 1
-                except Exception:  # noqa: BLE001
-                    pass
-            start += size
-            total = page.get("total") if isinstance(page, dict) else None
-            if (total is not None and start >= int(total)) or len(users) < size:
-                break
+        for u in own_panel_users(client):
+            uid = str(u.get("username") or "")[len(USERNAME_PREFIX):]
+            if str(u.get("description") or "") == uid:
+                continue
+            try:
+                client.update_user(id=int(u["id"]), description=uid)
+                out["updated"] += 1
+            except Exception:  # noqa: BLE001
+                pass
         out["ok"] = True
         return out
     except Exception as exc:  # noqa: BLE001

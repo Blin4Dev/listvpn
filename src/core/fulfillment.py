@@ -63,6 +63,11 @@ def trial_devices() -> int:
     return _int_setting("trial_devices", TRIAL_DEVICES, 1, 20)
 
 
+def trial_bypass_enabled() -> bool:
+    """вместе с пробным VPN выдавать бесплатный пробный ключ обхода FURK (настройка trial_bypass, по умолчанию вкл.)."""
+    return _int_setting("trial_bypass", 1, 0, 1) == 1
+
+
 def paid_traffic_gb() -> int:
     return _int_setting("paid_traffic_gb", REGULAR_TRAFFIC_GB, 0, 100000)
 DELETE_AFTER_DAYS = 7  # unpaid sub deleted after this many days
@@ -459,16 +464,6 @@ def _create_subscription_row(
     )
     sub = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (db.last_id(),))
     _sync_user_status(int(user["id"]))
-    # один раз записать в опрос после первого подключения
-    try:
-        if user.get("telegram_id"):
-            db.execute(
-                "INSERT OR IGNORE INTO survey_invites (user_id, telegram_id, enrolled_at) "
-                "VALUES (?, ?, ?)",
-                (int(user["id"]), int(user["telegram_id"]), now),
-            )
-    except Exception:  # noqa: BLE001
-        pass
     assert sub is not None
     return sub
 
@@ -497,13 +492,49 @@ def grant_trial(user: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception:  # noqa: BLE001
         pass
+    bypass = _grant_trial_bypass(user)
     return {
         "subscription_id": sub["id"],
         "expires_at": sub.get("expires_at"),
         "devices": t_dev,
         "traffic_gb": t_gb,
         "remnawave": prov,
+        "bypass": bypass,
     }
+
+
+def _grant_trial_bypass(user: dict[str, Any]) -> dict[str, Any]:
+    """бесплатный пробный ключ обхода (FURK POST /keys/trial) вместе с пробным VPN.
+    Срок и трафик задаются в настройках приложения FURK. Best-effort: сбой FURK не ломает
+    выдачу пробного VPN, ошибка уходит в лог."""
+    if not trial_bypass_enabled():
+        return {"ok": False, "skipped": "disabled"}
+    if not whitelist_available():
+        return {"ok": False, "skipped": "furk_not_configured"}
+    uid = int(user["id"])
+    idem = f"trial-{uid}"
+    try:
+        cur = user_whitelist(user)
+        if cur["active"] or cur["key_id"]:
+            return {"ok": True, "skipped": "has_key"}  # ключ уже был — второй бесплатный не выдаём
+        key = furk.create_trial_key(idem=f"blin-{idem}")
+        if not key.get("id"):
+            raise RuntimeError("в ответе FURK нет id ключа")
+        until = None
+        try:
+            if key.get("expires_at"):
+                until = iso(datetime.fromtimestamp(int(key["expires_at"]), tz=timezone.utc))
+        except (TypeError, ValueError, OSError):
+            until = None
+        if not until:
+            until = iso(utcnow() + timedelta(days=trial_days()))
+        db.execute("UPDATE users SET anti_key = ?, anti_key_id = ?, anti_expires_at = ?, anti_last_idem = ? "
+                   "WHERE id = ?", (key.get("subscription_url"), str(key["id"]), until, idem, uid))
+        return {"ok": True, "until": until}
+    except Exception as exc:  # noqa: BLE001
+        code = getattr(exc, "code", None)
+        print(f"[trial] ключ обхода не выдан user {uid}: {type(exc).__name__} {code or ''}: {exc}", flush=True)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "error_code": code}
 
 
 def _apply_provision_to_sub(sub: dict[str, Any], provision: dict[str, Any]) -> None:

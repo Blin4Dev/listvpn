@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  Home, Ticket, DollarSign, Users, Mail, Gift, Percent, Link, Settings, Menu, X, Wallet, Lock, BarChart2, ClipboardList, Server, MessageCircle,
+  Home, Ticket, DollarSign, Users, Mail, Gift, Percent, Link, Settings, Menu, X, Wallet, Lock, BarChart2, Server, MessageCircle,
   Shuffle, Eye, UserCog, Coins, Bell, BellOff, ChevronDown,
 } from 'lucide-react';
 import { UserActionModal } from './components/UserActionModal';
@@ -21,7 +21,6 @@ import { SalaryPage } from './pages/staff/SalaryPage';
 import { StatisticsPage } from './pages/Statistics';
 import { SupportPage } from './pages/Support';
 import { BalancerPage } from './pages/Balancer';
-import { SurveyPage } from './pages/Survey';
 import { TrackingLinksPage } from './pages/TrackingLinks';
 import { UsersPage } from './pages/Users';
 import { WithdrawalsPage } from './pages/Withdrawals';
@@ -59,7 +58,7 @@ export default function App() {
 
 export const NAV = [
   { group: 'Главное', items: [{ name: 'Главная', icon: Home }, { name: 'Статистика', icon: BarChart2 }, { name: 'Финансы', icon: DollarSign }] },
-  { group: 'Пользователи', items: [{ name: 'Пользователи', icon: Users }, { name: 'Выводы', icon: Wallet }, { name: 'Опрос', icon: ClipboardList }] },
+  { group: 'Пользователи', items: [{ name: 'Пользователи', icon: Users }, { name: 'Выводы', icon: Wallet }] },
   { group: 'Поддержка', items: [{ name: 'Поддержка', icon: MessageCircle }, { name: 'Сотрудники', icon: UserCog }, { name: 'Зарплата', icon: Coins }] },
   { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Ticket }, { name: 'Подарки', icon: Gift }, { name: 'Акции', icon: Percent }, { name: 'Ссылки', icon: Link }] },
   { group: 'Другое', items: [{ name: 'Мониторинг', icon: Server }, { name: 'Балансировщик', icon: Shuffle }, { name: 'Настройки', icon: Settings }] },
@@ -68,7 +67,7 @@ export const NAV = [
 // пути страниц (f5, назад, прямые ссылки)
 const PAGE_PATHS: Record<string, string> = {
   'Главная': '/', 'Статистика': '/statistics', 'Финансы': '/finance',
-  'Пользователи': '/users', 'Поддержка': '/support', 'Выводы': '/withdrawals', 'Опрос': '/survey',
+  'Пользователи': '/users', 'Поддержка': '/support', 'Выводы': '/withdrawals',
   'Рассылка': '/mailing', 'Промокоды': '/promocodes', 'Подарки': '/gifts', 'Акции': '/promotions', 'Ссылки': '/links',
   'Мониторинг': '/monitoring', 'Балансировщик': '/balancer', 'Настройки': '/settings', 'Сотрудники': '/staff', 'Зарплата': '/salary',
 };
@@ -289,7 +288,6 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
               {activePage === 'Подарки' && <GiftsPage onToast={addToast} onOpenUser={(id) => setDetailUserId(id)} />}
               {activePage === 'Акции' && <PromotionsPage onToast={addToast} />}
               {activePage === 'Ссылки' && <TrackingLinksPage onToast={addToast} />}
-              {activePage === 'Опрос' && <SurveyPage onToast={addToast} onOpenUser={(id) => setDetailUserId(id)} />}
               {activePage === 'Балансировщик' && <BalancerPage onToast={addToast} />}
               {activePage === 'Мониторинг' && <MonitoringPage onToast={addToast} nodeId={monNodeId} setNodeId={setMonNodeId} />}
               {activePage === 'Настройки' && <SettingsPage onToast={addToast} tab={settingsTab} onTab={setSettingsTab} />}

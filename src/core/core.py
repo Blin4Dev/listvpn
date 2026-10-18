@@ -52,10 +52,6 @@ try:
 except ImportError:
     import forum  # type: ignore
 
-try:
-    from . import survey
-except ImportError:
-    import survey  # type: ignore
 
 try:
     from . import mailer
@@ -139,10 +135,6 @@ try:
     import telegram_stars  # type: ignore
 except Exception:  # noqa: BLE001
     telegram_stars = None  # type: ignore
-try:
-    import applinks  # type: ignore
-except Exception:  # noqa: BLE001
-    applinks = None  # type: ignore
 
 import subdomain  # type: ignore  # домены ссылок подписки из .env
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
@@ -491,6 +483,9 @@ def validate_webapp_init_data(init_data: str) -> dict[str, Any]:
     secret = hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
     calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(calc, received):
+        # чаще всего мини-приложение открыто из другого бота, не того, чей TELEGRAM_BOT_TOKEN в .env
+        print(f"[auth] подпись initData не сошлась: TELEGRAM_BOT_TOKEN в .env — бот {TELEGRAM_BOT_TOKEN.split(':')[0]}",
+              flush=True)
         raise HTTPException(401, detail={"message": "Неверная подпись Telegram"})
 
     try:
@@ -1155,7 +1150,7 @@ def _rw_client():
 
 
 def _rw_find_user(user: dict[str, Any]):
-    """(client, rw_user|none): по имени batman_<id>, для старых — telegram/email (с переименованием)."""
+    """(client, rw_user|none): только пользователь панели с именем batman_<id>."""
     client = _rw_client()
     if not client:
         return None, None
@@ -1245,8 +1240,10 @@ def _rw_sync_devices(user: dict[str, Any], devices: int) -> None:
         return
     try:
         client.update_user(id=_rw_num_id(rw), hwid_device_limit=int(max(1, devices)))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # в БД лимит уже новый; мини-апп берёт лимит из Remnawave, поэтому без этого изменение потеряется
+        forum.report_error("Лимит устройств не применился в Remnawave — повторите в панели",
+                           f"user id{user.get('id')}, {devices} устр.: {type(exc).__name__}: {exc}")
 
 
 def _rw_set_enabled(user: dict[str, Any], enabled: bool) -> None:
@@ -1775,25 +1772,15 @@ def discounted(amount: float, percent: float) -> float:
 MAX_TOTAL_DISCOUNT = 90.0
 
 
-def survey_bonus_percent(user_id: int) -> float:
-    """скидка за опрос (0 если не пройден)."""
-    try:
-        return float(survey.reward_percent(int(user_id)))
-    except Exception:  # noqa: BLE001
-        return 0.0
-
-
 def effective_discount(user_id: int) -> dict[str, Any]:
-    """итоговая скидка: лучший промо/акция + бонус опроса."""
+    """итоговая скидка: лучший промо/акция."""
     base_disc = active_discount_for_user(user_id)
     base = float((base_disc or {}).get("percent") or 0)
-    bonus = survey_bonus_percent(user_id)
-    total = min(MAX_TOTAL_DISCOUNT, base + bonus)
+    total = min(MAX_TOTAL_DISCOUNT, base)
     out: dict[str, Any] = {
         "active": total > 0,
         "percent": total,
         "base": base,
-        "survey": bonus,
     }
     if base_disc:
         out["code"] = base_disc.get("code")
@@ -3782,86 +3769,6 @@ def panel_payment_refund(payment_id: str, admin: dict = Depends(require_panel)) 
                             "Деньги возвращены" if status == "succeeded" else "Возврат в обработке у ЮKassa")
 
 
-@app.get("/api/panel/surveys/stats")
-def panel_survey_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
-    """статистика опроса: сколько прошло + ответы."""
-    total_started = int((db.fetchone("SELECT COUNT(*) c FROM survey_state") or {}).get("c") or 0)
-    total_completed = int((db.fetchone(
-        "SELECT COUNT(*) c FROM survey_state WHERE completed = 1") or {}).get("c") or 0)
-    total_invited = int((db.fetchone(
-        "SELECT COUNT(*) c FROM survey_invites WHERE invited = 1") or {}).get("c") or 0)
-    questions: list[dict[str, Any]] = []
-    for q in survey.questions():
-        n = int(q["n"])
-        if q["kind"] == "text":
-            rows = db.fetchall(
-                "SELECT sa.answer AS answer, sa.created_at AS created_at, sa.user_id AS user_id, "
-                "u.username AS username, u.telegram_id AS telegram_id "
-                "FROM survey_answers sa JOIN users u ON u.id = sa.user_id "
-                "WHERE sa.question = ? ORDER BY sa.id DESC LIMIT 300", (n,))
-            questions.append({
-                "n": n, "q": q["q"], "kind": "text",
-                "answers": [{
-                    "answer": r["answer"], "user_id": r["user_id"],
-                    "username": r.get("username"), "telegram_id": r.get("telegram_id"),
-                    "created_at": r.get("created_at"),
-                } for r in rows],
-            })
-        else:
-            rows = db.fetchall(
-                "SELECT answer, COUNT(*) AS c FROM survey_answers WHERE question = ? "
-                "GROUP BY answer ORDER BY c DESC", (n,))
-            questions.append({
-                "n": n, "q": q["q"], "kind": q["kind"],
-                "options": [{"answer": r["answer"], "count": int(r["c"])} for r in rows],
-            })
-    return {
-        "total_started": total_started,
-        "total_completed": total_completed,
-        "total_invited": total_invited,
-        "reward_percent": survey.reward_value(),
-        "questions": questions,
-        "config": [{"n": q["n"], "kind": q["kind"], "q": q["q"], "options": q.get("options") or [],
-                    "ask_text": list((q.get("text_follow") or {}).keys())} for q in survey.questions()],
-    }
-
-
-@app.put("/api/panel/surveys/questions")
-def panel_survey_questions(body: dict[str, Any] = Body(...), _: dict = Depends(require_owner)) -> dict[str, Any]:
-    """вопросы опроса и скидка (только владелец)."""
-    if len(json.dumps(body, ensure_ascii=False)) > 64_000:
-        raise HTTPException(413, detail={"message": "Слишком много текста"})
-    try:
-        survey.save_questions(body.get("questions"), body.get("reward_percent"))
-    except survey.SurveyError as e:
-        raise HTTPException(400, detail={"message": str(e)})
-    return panel_survey_stats(_)
-
-
-@app.get("/api/panel/users/{user_id}/survey")
-def panel_user_survey(user_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
-    """ответы юзера на опрос."""
-    st = db.fetchone(
-        "SELECT completed, started_at, completed_at FROM survey_state WHERE user_id = ?", (user_id,))
-    if not st:
-        return {"taken": False}
-    rows = db.fetchall(
-        "SELECT question, answer FROM survey_answers WHERE user_id = ? ORDER BY question, id",
-        (user_id,))
-    by_q: dict[int, list[str]] = {}
-    for r in rows:
-        by_q.setdefault(int(r["question"]), []).append(r["answer"])
-    answers = [{"n": int(q["n"]), "q": q["q"], "answers": by_q.get(int(q["n"]), [])}
-               for q in survey.questions()]
-    return {
-        "taken": True,
-        "completed": bool(st.get("completed")),
-        "started_at": st.get("started_at"),
-        "completed_at": st.get("completed_at"),
-        "answers": answers,
-    }
-
-
 @app.get("/api/panel/users/{user_id}/remnawave")
 def panel_user_remnawave(user_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
     """данные remnawave: онлайн, подключения, hwid."""
@@ -4341,7 +4248,7 @@ def _delete_user_keep_history(user_id: int) -> None:
         with db.transaction() as tx:
             tx.execute("UPDATE users SET referred_by = NULL WHERE referred_by = ?", (user_id,))
             for table in ("subscriptions", "app_sessions", "promocode_activations", "onboarding_reminders",
-                          "survey_invites", "survey_state", "trial_checks", "moderation_events"):
+                          "trial_checks", "moderation_events"):
                 try:
                     tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 except Exception:  # noqa: BLE001 — таблицы может не быть в старой БД
@@ -4393,6 +4300,31 @@ def _mass_add_days_worker(sub_ids: list[int], days: int) -> None:
             if user:
                 _rw_sync_expiry(user)
     print(f"[mass] +{days} дн.: продлено подписок {len(sub_ids)}, пользователей {len(done_users)}", flush=True)
+
+
+def _mass_reset_traffic_worker() -> None:
+    """массовый сброс трафика в фоне — только нашим (batman_<id>) пользователям панели."""
+    client = _rw_client()
+    if not client:
+        return
+    try:
+        own = provisioning.own_panel_users(client)
+    except Exception as exc:  # noqa: BLE001
+        forum.report_error("Массовый сброс трафика не удался", f"{type(exc).__name__}: {exc}")
+        return
+    failed = 0
+    for u in own:
+        try:
+            client.reset_user_traffic(int(u["id"]))
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            print(f"[mass] сброс трафика {u.get('username')}: {type(exc).__name__}: {exc}", flush=True)
+    if failed:
+        forum.report_error("Массовый сброс трафика", f"не удалось у {failed} из {len(own)} пользователей")
+    db.execute("UPDATE subscriptions SET traffic_used = 0 WHERE status != 'Deleted'")
+    # трафик снова есть: снимаем grace по трафику
+    grace.end_traffic_all()
+    print(f"[mass] сброс трафика: сброшено {len(own) - failed}, ошибок {failed}", flush=True)
 
 
 class ExchangeBody(BaseModel):
@@ -4841,15 +4773,11 @@ def panel_mass_action(body: MassActionBody, _: dict = Depends(require_panel)) ->
         client = _rw_client()
         if not client:
             raise HTTPException(400, detail={"message": "Remnawave не настроена"})
-        try:
-            client.bulk_all_reset_traffic()
-        except Exception as exc:  # noqa: BLE001
-            forum.report_error("Массовый сброс трафика не удался", f"{type(exc).__name__}: {exc}")
-            raise HTTPException(502, detail={"message": "Remnawave не смогла сбросить трафик"})
-        cur = db.execute("UPDATE subscriptions SET traffic_used = 0 WHERE status != 'Deleted'")
-        # трафик снова есть: снимаем grace по трафику
-        threading.Thread(target=grace.end_traffic_all, name="grace-traffic-end", daemon=True).start()
-        return {"success": True, "affected": cur.rowcount or 0}
+        # не bulk_all_reset_traffic: он сбросил бы трафик всей панели (user_… и чужим тоже)
+        affected = int((db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status != 'Deleted'") or {}).get("c") or 0)
+        threading.Thread(target=_mass_reset_traffic_worker, name="mass-reset-traffic", daemon=True).start()
+        return {"success": True, "affected": affected, "background": True,
+                "message": "Сбрасываем трафик у batman_-пользователей — выполняется в фоне"}
 
     # mass_reset_trial: разрешить пробный снова после окончания
     # действующие пробные не трогаем
@@ -5623,11 +5551,18 @@ def panel_squads_external_apply(_: dict = Depends(require_owner)) -> dict[str, A
     client = _rw_client()
     if client is None:
         raise HTTPException(503, detail={"message": "Remnawave не настроена (укажите URL и API-токен)"})
+    # только свои batman_<id>; add_users_to_external_squad назначил бы сквад всей панели
     try:
-        client.add_users_to_external_squad(uuid)
+        own = provisioning.own_panel_users(client)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, detail={"message": f"Ошибка Remnawave: {exc}"})
-    return {"success": True}
+    failed = 0
+    for u in own:
+        try:
+            client.update_user(id=int(u["id"]), external_squad_uuid=uuid)
+        except Exception:  # noqa: BLE001
+            failed += 1
+    return {"success": failed == 0, "updated": len(own) - failed, "failed": failed}
 
 
 @app.put("/api/panel/squads/{squad_uuid}")
@@ -6696,30 +6631,41 @@ def app_subscription_applink(
 
     which = (app or "incy").lower()
     if which in ("incy", "happ"):
-        if applinks is None:
-            raise HTTPException(503, detail={"message": "Модуль шифрования недоступен"})
-        try:
-            link = applinks.build_link(which, sub_url, name="BatmanVPN")
-            if which == "happ" and link.startswith("happ://add/") and getattr(applinks, "LAST_HAPP_ERROR", None):
-                forum.report_error("Happ: сервис шифрования недоступен — выдана ссылка без шифрования",
-                                   str(applinks.LAST_HAPP_ERROR))
-                applinks.LAST_HAPP_ERROR = None
-        except Exception as exc:  # noqa: BLE001
-            forum.report_error(f"Не удалось сформировать ссылку {which}", f"{type(exc).__name__}: {exc}")
-            raise HTTPException(502, detail={"message": "Не удалось сформировать ссылку. Попробуйте ещё раз или выберите «Другое приложение»."})
-        # telegram не открывает incy/happ://, отдаём https-редирект
-        return {"app": which, "link": link, "encrypted": True, "open_url": _deeplink_redirect_url(link)}
+        # без шифрования: incy://add/<ссылка>, happ://add/<ссылка>
+        link = f"{which}://add/{sub_url}"
+        # telegram не открывает incy/happ:// сам — отдаём https-страницу перехода
+        return {"app": which, "link": link, "encrypted": False,
+                "open_url": _deeplink_redirect_url(link, app=which)}
     # other: просто https
     return {"app": "other", "link": sub_url, "encrypted": False, "open_url": sub_url}
 
 
-def _deeplink_redirect_url(deep_link: str) -> str:
-    """https://сайт/redirect.html?url=<схема> для telegram."""
+def _deeplink_redirect_url(deep_link: str, alt: Optional[str] = None, app: Optional[str] = None) -> str:
+    """https://мини-приложение/redirect.html?url=<схема>[&alt=…&app=…] для telegram.
+    redirect.html лежит в контейнере мини-приложения, поэтому база — MINIAPP_URL
+    (SITE_URL — только если redirect.html выложен и там)."""
     from urllib.parse import quote
-    base = (_env("SITE_URL") or MINIAPP_URL).rstrip("/")
+    base = (MINIAPP_URL or _env("SITE_URL")).rstrip("/")
     if not base:
         return deep_link
-    return f"{base}/redirect.html?url={quote(deep_link, safe='')}"
+    url = f"{base}/redirect.html?url={quote(deep_link, safe='')}"
+    if alt:
+        url += f"&alt={quote(alt, safe='')}"
+    if app:
+        url += f"&app={quote(app, safe='')}"
+    return url
+
+
+def _rw_device_limit(rw: Optional[dict[str, Any]]) -> Optional[int]:
+    """hwidDeviceLimit пользователя Remnawave (None — нет данных / без лимита)."""
+    if not isinstance(rw, dict):
+        return None
+    val = rw.get("hwidDeviceLimit", rw.get("hwid_device_limit"))
+    try:
+        n = int(val) if val is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= 100 else None
 
 
 @app.get("/api/app/devices")
@@ -6738,6 +6684,13 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     # реальные hwid из remnawave
     devices: list[dict[str, Any]] = []
     client, rw = _rw_find_user(fresh)
+    # лимит в Remnawave — источник правды: его могли поменять прямо в панели Remnawave.
+    # Подтягиваем в БД, иначе мини-апп покажет старый лимит, а продление вернёт его в панель.
+    rw_limit = _rw_device_limit(rw)
+    if rw_limit and rw_limit != limit and keys:
+        db.execute("UPDATE subscriptions SET devices_limit = ? WHERE user_id = ? AND status = 'Active'",
+                   (rw_limit, fresh["id"]))
+        limit = rw_limit
     if client and rw:
         try:
             raw = unwrap_rw(client.get_user_hwid_devices(_rw_num_id(rw)))
@@ -6890,7 +6843,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         price = float(base) + devices_price
         stars = int(base_stars) + int(round(devices_price))  # доп. устройства: 1 звезда = 1 рубль
 
-    # скидка: промо/акция + бонус опроса; reset трафика без скидки
+    # скидка: промо/акция; reset трафика без скидки
     full_price = round(float(price), 2)
     percent = 0.0
     if purpose != "traffic_reset":
@@ -7648,8 +7601,15 @@ def internal_payment_chargeback(
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(_: Request, exc: HTTPException):
+async def http_exception_handler(request: Request, exc: HTTPException):
     detail = exc.detail
+    # причина отказа в авторизации — в лог (docker logs blinvpn-api), иначе видно только «401»
+    if exc.status_code in (401, 403) and request.url.path.startswith(("/api/app/", "/api/v1/")):
+        msg = detail.get("message") if isinstance(detail, dict) else detail
+        print(f"[auth] {exc.status_code} {request.method} {request.url.path}: {msg} "
+              f"(initData: {'есть' if request.headers.get('x-telegram-init-data') else 'нет'}, "
+              f"сессия: {'есть' if request.headers.get('x-app-session') or request.headers.get('authorization') else 'нет'})",
+              flush=True)
     headers = getattr(exc, "headers", None)  # WWW-Authenticate и т.п. не теряем
     if isinstance(detail, dict) and "message" in detail:
         return JSONResponse(status_code=exc.status_code, content={"detail": detail, "error": detail.get("message")},
