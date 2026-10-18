@@ -1481,6 +1481,8 @@ def get_plans_meta() -> dict[str, Any]:
         "trial_hwid_max": fulfillment._int_setting("trial_hwid_max", 2, 1, 10),
         "tariff_devices": fulfillment.tariff_devices(),
         "device_prices": {str(k): v for k, v in sorted(fulfillment.device_price_overrides().items())},
+        "extra_device_stars": fulfillment.extra_device_stars(),
+        "device_stars": {str(k): v for k, v in sorted(fulfillment.device_stars_overrides().items())},
         "period_prices": {str(m): fulfillment.period_price(m) for m in fulfillment.SUB_PERIODS},
         "period_stars": {str(m): fulfillment.period_stars(m) for m in fulfillment.SUB_PERIODS},
         # белые списки — отдельные тарифы с анти-ключом FURK (полная цена, 0 = период недоступен)
@@ -2225,6 +2227,9 @@ class PlansUpdateBody(BaseModel):
     tariff_devices: Optional[int] = Field(None, ge=1, le=20)
     # цены доп. устройств по номеру, ₽/мес: {"4": 40, "5": 35}; пусто/null — как у предыдущего
     device_prices: Optional[dict[str, Optional[float]]] = None
+    # то же в звёздах: ⭐/мес по умолчанию и по номеру устройства
+    extra_device_stars: Optional[float] = None
+    device_stars: Optional[dict[str, Optional[float]]] = None
     whitelist_squad_uuid: Optional[str] = None  # устарело, игнорируется
     # {"sbp": {"enabled": true}, ...}
     pay_methods: Optional[dict[str, dict[str, Any]]] = None
@@ -5926,9 +5931,14 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
             db.set_setting(f"{prefix}{m}", f"{_num(v, lo, 1000000):g}")
     if body.tariff_devices is not None:
         db.set_setting("tariff_devices", str(int(body.tariff_devices)))
-    if body.device_prices is not None:
+    if body.extra_device_stars is not None:
+        db.set_setting("extra_device_stars", f"{_num(body.extra_device_stars, 0, 100000):g}")
+    for key in ("device_prices", "device_stars"):
+        vals = getattr(body, key)
+        if vals is None:
+            continue
         tiers: dict[str, float] = {}
-        for n_raw, v in body.device_prices.items():
+        for n_raw, v in vals.items():
             try:
                 n = int(n_raw)
             except (TypeError, ValueError):
@@ -5936,7 +5946,7 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
             if v is None or str(v).strip() == "" or not (1 <= n <= fulfillment.MAX_DEVICE_NO):
                 continue
             tiers[str(n)] = _num(v, 0, 100000)
-        db.set_setting("device_prices", json.dumps(tiers, sort_keys=True))
+        db.set_setting(key, json.dumps(tiers, sort_keys=True))
     if body.pay_methods is not None:
         cur = {m["id"]: {"enabled": m["enabled"]} for m in pay_methods()}
         for key, v in body.pay_methods.items():
@@ -6835,7 +6845,9 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         if int(sub.get("devices_limit") or 1) + extra > 50:
             raise HTTPException(400, detail={"message": "Слишком много устройств в одной подписке"})
         price = round(fulfillment.devices_cost(int(sub.get("devices_limit") or 1), extra) * months, 2)
-        stars = int(round(price))
+        stars = fulfillment.devices_cost_stars(int(sub.get("devices_limit") or 1), extra) * months
+        if stars <= 0:
+            stars = int(round(price))  # цена в ⭐ не задана (0) — как в рублях
         if price <= 0:
             raise HTTPException(400, detail={"message": "Стоимость докупки не рассчитана"})
     else:
@@ -6860,7 +6872,8 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         base_part = float(base)
         devices_part = float(devices_price)
         price = float(base) + devices_price
-        stars = int(base_stars) + int(round(devices_price))  # доп. устройства: 1 звезда = 1 рубль
+        # доп. устройства в звёздах — своя цена за каждый номер (панель → Цены)
+        stars = int(base_stars) + fulfillment.devices_cost_stars(plan_devices, extra + keep) * months
 
     # скидка: промо/акция; reset трафика без скидки
     full_price = round(float(price), 2)

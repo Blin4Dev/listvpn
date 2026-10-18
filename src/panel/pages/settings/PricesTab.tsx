@@ -30,6 +30,8 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
   const [tariffDevices, setTariffDevices] = useState('2');
   // своя цена для каждого доп. устройства (по номеру), ₽/мес; пусто — как у предыдущего
   const [devPrices, setDevPrices] = useState<Record<string, string>>({});
+  const [devStars, setDevStars] = useState<Record<string, string>>({});
+  const [extraStars, setExtraStars] = useState('40');
   const [wlConfigured, setWlConfigured] = useState(false);
   const [wlError, setWlError] = useState('');
   const [furk, setFurk] = useState<{ configured?: boolean; ok?: boolean; balance?: number; credit?: number; error?: string } | null>(null);
@@ -59,6 +61,8 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
         setWlDevices((p) => toStr(m.whitelist_devices, p));
         setTariffDevices(String(m.tariff_devices ?? 2));
         setDevPrices(Object.fromEntries(Object.entries(m.device_prices || {}).map(([k, v]) => [k, String(v)])));
+        setDevStars(Object.fromEntries(Object.entries(m.device_stars || {}).map(([k, v]) => [k, String(v)])));
+        setExtraStars(String(m.extra_device_stars ?? m.extra_device_price ?? 40));
         setWlConfigured(!!m.whitelist_configured);
         setWlError(String(m.whitelist_error || ''));
         try { setFurk(await apiFetch('/panel/furk/status')); } catch { setFurk(null); }
@@ -89,6 +93,9 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           tariff_devices: Number(tariffDevices),
           device_prices: Object.fromEntries(
             Object.entries(devPrices).filter(([, v]) => String(v).trim() !== '').map(([k, v]) => [k, Number(v)])),
+          extra_device_stars: Number(extraStars),
+          device_stars: Object.fromEntries(
+            Object.entries(devStars).filter(([, v]) => String(v).trim() !== '').map(([k, v]) => [k, Number(v)])),
           pay_methods: Object.fromEntries(payMethods.map((x) => [x.id, { enabled: x.enabled }])),
         }),
       });
@@ -120,33 +127,43 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div><label className="field-label">Устройств в тарифе</label><input className="input" type="number" min={1} max={20} value={tariffDevices} onChange={(e) => setTariffDevices(e.target.value)} /></div>
               <div><label className="field-label">Доп. устройство по умолчанию, ₽/мес</label><input className="input" type="number" min={0} value={f.extra} onChange={set('extra')} /></div>
+              <div><label className="field-label">Доп. устройство по умолчанию, ⭐/мес</label><input className="input" type="number" min={0} value={extraStars} onChange={(e) => setExtraStars(e.target.value)} /></div>
             </div>
           </Section>
 
           <Section
             title="Цены доп. устройств"
-            sub="Своя цена за каждое устройство сверх тарифа, ₽ в месяц (умножается на срок). Пустое поле — как у предыдущего устройства."
+            sub="Своя цена за каждое устройство сверх тарифа — в рублях и в звёздах, за месяц (умножается на срок). Пустое поле — как у предыдущего устройства."
           >
             {(() => {
               const plan = Math.max(1, Math.min(20, Number(tariffDevices) || 2));
-              const rows: React.ReactNode[] = [];
-              let inherited = Number(f.extra) || 0;
-              for (let i = 1; i <= plan; i++) { const x = devPrices[String(i)]; if (x != null && String(x).trim() !== '') inherited = Number(x) || 0; }
+              const filled = (x: string | undefined) => x != null && String(x).trim() !== '';
+              // цена n-го устройства с учётом «пусто — как у предыдущего»
+              const tierOf = (vals: Record<string, string>, base: number) => {
+                const out: number[] = []; let cur = base;
+                for (let i = 1; i <= 20; i++) { if (filled(vals[String(i)])) cur = Number(vals[String(i)]) || 0; out.push(cur); }
+                return out;
+              };
+              const rub = tierOf(devPrices, Number(f.extra) || 0);
+              const st = tierOf(devStars, Number(extraStars) || 0);
+              const cols = '120px 1fr 1fr 1.3fr';
+              const rows: React.ReactNode[] = [
+                <div key="h" className="grid gap-3" style={{ gridTemplateColumns: cols }}>
+                  <div className="sub">Устройство</div><div className="sub">₽/мес</div><div className="sub">⭐/мес</div><div className="sub">Итого к тарифу</div>
+                </div>,
+              ];
+              let sumR = 0, sumS = 0;
               for (let n = plan + 1; n <= 20; n++) {
                 const k = String(n);
-                const v = devPrices[k] ?? '';
-                const ph = String(inherited);
-                if (String(v).trim() !== '') inherited = Number(v) || 0;
+                sumR += rub[n - 1]; sumS += st[n - 1];
                 rows.push(
-                  <div key={k} className="flex items-center gap-3">
-                    <div style={{ width: 120, fontWeight: 500 }}>{n}-е устройство</div>
-                    <input className="input" style={{ maxWidth: 160 }} type="number" min={0} placeholder={ph} value={v}
+                  <div key={k} className="grid gap-3 items-center" style={{ gridTemplateColumns: cols }}>
+                    <div style={{ fontWeight: 500 }}>{n}-е</div>
+                    <input className="input" type="number" min={0} placeholder={String(n > 1 ? rub[n - 2] : rub[0])} value={devPrices[k] ?? ''}
                       onChange={(e) => setDevPrices((p) => ({ ...p, [k]: e.target.value }))} />
-                    <div className="faint" style={{ fontSize: 12 }}>итого за {n} устр.: +{(() => {
-                      let sum = 0, cur = Number(f.extra) || 0;
-                      for (let i = 1; i <= n; i++) { const x = devPrices[String(i)]; if (x != null && String(x).trim() !== '') cur = Number(x) || 0; if (i > plan) sum += cur; }
-                      return sum;
-                    })()} ₽/мес к тарифу</div>
+                    <input className="input" type="number" min={0} placeholder={String(n > 1 ? st[n - 2] : st[0])} value={devStars[k] ?? ''}
+                      onChange={(e) => setDevStars((p) => ({ ...p, [k]: e.target.value }))} />
+                    <div className="faint" style={{ fontSize: 12 }}>{n} устр.: +{Math.round(sumR * 100) / 100} ₽ · +{Math.round(sumS)} ⭐ /мес</div>
                   </div>,
                 );
               }

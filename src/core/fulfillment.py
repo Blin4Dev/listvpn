@@ -147,8 +147,8 @@ def tariff_devices() -> int:
 MAX_DEVICE_NO = 50
 
 
-def device_price_overrides() -> dict[int, float]:
-    raw = db.get_setting("device_prices", "") or ""
+def _tier_overrides(key: str) -> dict[int, float]:
+    raw = db.get_setting(key, "") or ""
     out: dict[int, float] = {}
     try:
         data = json.loads(raw) if raw else {}
@@ -165,13 +165,26 @@ def device_price_overrides() -> dict[int, float]:
     return out
 
 
-def device_price_table(upto: int = MAX_DEVICE_NO) -> list[float]:
-    """цена n-го устройства в месяц для n = 1..upto (индекс n-1).
-    Устройства в пределах тарифа оплачены тарифом — вызывающий код считает только сверх него."""
-    base = _float_setting("extra_device_price", 40)
-    over = device_price_overrides()
+def device_price_overrides() -> dict[int, float]:
+    return _tier_overrides("device_prices")
+
+
+def device_stars_overrides() -> dict[int, float]:
+    return _tier_overrides("device_stars")
+
+
+def extra_device_stars() -> float:
+    """⭐/мес за доп. устройство по умолчанию; не задано — как в рублях (1 ⭐ = 1 ₽, как было)."""
+    raw = db.get_setting("extra_device_stars", "") or ""
+    try:
+        return float(raw) if str(raw).strip() != "" else _float_setting("extra_device_price", 40)
+    except (TypeError, ValueError):
+        return _float_setting("extra_device_price", 40)
+
+
+def _tier_table(base: float, over: dict[int, float], upto: int) -> list[float]:
     out: list[float] = []
-    cur = base
+    cur = float(base)
     for n in range(1, int(upto) + 1):
         if n in over:
             cur = over[n]
@@ -179,16 +192,36 @@ def device_price_table(upto: int = MAX_DEVICE_NO) -> list[float]:
     return out
 
 
-def devices_cost(have: int, add: int) -> float:
-    """₽/мес за устройства с номерами have+1 … have+add."""
+def device_price_table(upto: int = MAX_DEVICE_NO) -> list[float]:
+    """цена n-го устройства в ₽/мес для n = 1..upto (индекс n-1).
+    Устройства в пределах тарифа оплачены тарифом — вызывающий код считает только сверх него."""
+    return _tier_table(_float_setting("extra_device_price", 40), device_price_overrides(), upto)
+
+
+def device_stars_table(upto: int = MAX_DEVICE_NO) -> list[float]:
+    """то же в звёздах: своя цена ⭐ для каждого номера (панель → Цены)."""
+    return _tier_table(extra_device_stars(), device_stars_overrides(), upto)
+
+
+def _tier_sum(table_fn, have: int, add: int) -> float:
     have, add = max(0, int(have)), max(0, int(add))
     if add <= 0:
         return 0.0
-    table = device_price_table(min(MAX_DEVICE_NO, have + add))
+    table = table_fn(min(MAX_DEVICE_NO, have + add))
     total = 0.0
     for n in range(have + 1, have + add + 1):
         total += table[n - 1] if n <= len(table) else (table[-1] if table else 0.0)
     return round(total, 2)
+
+
+def devices_cost(have: int, add: int) -> float:
+    """₽/мес за устройства с номерами have+1 … have+add."""
+    return _tier_sum(device_price_table, have, add)
+
+
+def devices_cost_stars(have: int, add: int) -> int:
+    """⭐/мес за устройства с номерами have+1 … have+add."""
+    return int(round(_tier_sum(device_stars_table, have, add)))
 
 
 # ── белые списки: отдельный анти-ключ FURK, как в старом боте ──
