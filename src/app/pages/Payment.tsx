@@ -102,13 +102,17 @@ export default function Payment() {
   const hasPeriod = [1, 3, 6, 12].includes(monthsParam);
   const months = hasPeriod && flowType !== "traffic_reset" ? monthsParam : 1;
   // белые списки (отдельный тариф с анти-ключом): подписка или подарок
-  const whitelist = searchParams.get("wl") === "1" && (!flowType || flowType === "gift");
+  // единый тариф: белые списки включаются сервером автоматически (подписка/продление/подарок)
+  const whitelist = false;
   const subParam = searchParams.get("sub");
   const isDevicesFlow = flowType === "devices";
   const isTrafficReset = flowType === "traffic_reset";
   const isGift = flowType === "gift";
   const purpose: "subscription" | "devices" | "traffic_reset" | "gift" = isTrafficReset ? "traffic_reset" : isDevicesFlow ? "devices" : isGift ? "gift" : "subscription";
-  const extraDevices = isDevicesFlow ? Math.max(0, parseInt(searchParams.get("count") || "0", 10)) : 0;
+  const isSubFlow = purpose === "subscription";
+  // подписка/продление: сколько устройств всего выбрано на экране тарифов (?dev=N)
+  const devParam = parseInt(searchParams.get("dev") || "0", 10);
+  const totalDevices = isSubFlow && devParam > 0 ? Math.min(20, devParam) : null;
 
   const [methods, setMethods] = useState<PayMethodInfo[]>(FALLBACK_METHODS);
   const [method, setMethod] = useState<PaymentMethod>("sbp");
@@ -152,6 +156,11 @@ export default function Payment() {
 
   const planDevices = isDevicesFlow ? 1 : tariffDevices;
   const isStars = method === "tg_stars";
+  const extraDevices = isDevicesFlow
+    ? Math.max(0, parseInt(searchParams.get("count") || "0", 10))
+    : isSubFlow && totalDevices != null
+      ? Math.max(0, totalDevices - planDevices)
+      : 0;
 
   useEffect(() => {
     if (!methodsReady) return;
@@ -171,6 +180,7 @@ export default function Payment() {
       if (!alive) return;
       setQuote(q);
       setQuoteReady(true);
+
     })();
     return () => { alive = false; };
   }, [planDevices, method, extraDevices, useRefBal, purpose, subParam, months, whitelist, methodsReady, isStars]);
@@ -247,18 +257,23 @@ export default function Payment() {
     }
   };
 
+  // устройства в подписке (сервер учитывает и те, что уже есть сверх тарифа)
+  const devNow = Number(quote?.devices_total || totalDevices || planDevices);
+  const devExtra = Math.max(0, devNow - planDevices);
+  const showBreakdown = isSubFlow && devExtra > 0 && quote?.base_price != null;
+
   // подписку покупают через выбор тарифа
   if (purpose === "subscription" && !hasPeriod) {
     return <Navigate to={`/tariffs${returnTo ? `?return=${encodeURIComponent(returnTo)}` : ""}`} replace />;
   }
 
   const what = isGift
-    ? `Подарок другу: ${periodLabel(months)} · ${planDevices} ${deviceWord(planDevices)}${whitelist ? " · белые списки" : ""}`
+    ? `Подарок другу: ${periodLabel(months)} · ${planDevices} ${deviceWord(planDevices)}${quote?.whitelist ? " · белые списки" : ""}`
     : isTrafficReset
     ? `Досрочный сброс трафика${trafficNow?.available && trafficNow.used_bytes != null ? ` · потрачено ${formatBytesRu(trafficNow.used_bytes)}${trafficNow.limit_bytes ? ` из ${formatBytesRu(trafficNow.limit_bytes)}` : ""}` : ""}`
     : isDevicesFlow
       ? `Доп. устройства: +${extraDevices} на ${periodLabel(months)}`
-      : `${periodLabel(months)} · ${planDevices} ${deviceWord(planDevices)}${whitelist ? " · белые списки" : ""}`;
+      : `${periodLabel(months)} · ${devNow} ${deviceWord(devNow)}${quote?.whitelist ? " · белые списки" : ""}`;
 
   const v = (n: number) => (quoteReady ? fmt(n) : "…");
 
@@ -271,6 +286,12 @@ export default function Payment() {
       <div style={{ marginTop: 8, fontSize: 14.5, color: N.muted, lineHeight: 1.4 }}>{what}</div>
 
       <NoirCard style={{ marginTop: 20, padding: "12px 18px 18px" }}>
+        {showBreakdown && quote?.base_price != null ? (
+          <>
+            <SumRow label={`Тариф · ${periodLabel(months)}`} value={v(Number(quote.base_price))} />
+            <SumRow label={`Доп. устройства · ${devExtra} × ${months} мес`} value={v(Number(quote.devices_price || 0))} />
+          </>
+        ) : null}
         <SumRow
           label="Сумма"
           value={

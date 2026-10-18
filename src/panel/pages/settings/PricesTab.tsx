@@ -119,27 +119,14 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
 
           <Section
             title="Белые списки"
-            sub="Отдельные тарифы, как в старом боте: полная цена (ВПН + анти-ключ FURK на 500 ГБ). Покупка продлевает основную подписку на тот же срок и выдаёт/продлевает анти-ключ. Цена 0 — срок недоступен."
+            sub="Единый тариф: каждая покупка, продление и подарок — ВПН + анти-ключ FURK (500 ГБ) на тот же срок, по цене периода выше. Отдельных цен для белых списков больше нет."
           >
             <div className="inset" style={{ padding: '10px 14px', fontSize: 13.5 }}>
               {!wlConfigured
-                ? `FurkVPN API не подключён — опция скрыта. Добавьте FURK_API_KEY в .env (ключ из @VPNpartenrsbot).${wlError ? ` (${wlError})` : ''}`
+                ? `FurkVPN API не подключён — подписки выдаются без белых списков. Добавьте FURK_API_KEY в .env (ключ из @VPNpartenrsbot).${wlError ? ` (${wlError})` : ''}`
                 : furk && furk.ok === false
                   ? `FurkVPN API не отвечает или ключ неверный (${furk.error || 'ошибка'}).`
                   : `FurkVPN API подключён${furk?.balance != null ? ` · баланс ${furk.balance} ₽${furk.credit ? ` (+ кредит ${furk.credit} ₽)` : ''}` : ''}. При нулевом балансе ключи не выдаются — админу придёт алерт.`}
-            </div>
-            <div className="flex flex-col gap-3">
-              <div className="grid gap-3" style={{ gridTemplateColumns: '1.1fr 1fr 1fr 0.8fr' }}>
-                <div className="sub">Период</div><div className="sub">Цена, ₽</div><div className="sub">Цена, ⭐</div><div className="sub">Устройств</div>
-              </div>
-              {PERIODS.map((k) => (
-                <div key={k} className="grid gap-3 items-center" style={{ gridTemplateColumns: '1.1fr 1fr 1fr 0.8fr' }}>
-                  <div style={{ fontWeight: 500 }}>{PERIOD_TITLE[k]}</div>
-                  <input className="input" type="number" min={0} value={wlPrices[k]} onChange={(e) => setWlPrices((p) => ({ ...p, [k]: e.target.value }))} />
-                  <input className="input" type="number" min={0} value={wlStars[k]} onChange={(e) => setWlStars((p) => ({ ...p, [k]: e.target.value }))} />
-                  <input className="input" type="number" min={1} max={50} value={wlDevices[k]} onChange={(e) => setWlDevices((p) => ({ ...p, [k]: e.target.value }))} />
-                </div>
-              ))}
             </div>
           </Section>
 

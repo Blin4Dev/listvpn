@@ -29,7 +29,7 @@ const download = (name: string, text: string) => {
 const CreateModal: React.FC<{ data: Data; onClose: () => void; onCreated: (c: Created) => void; onToast: Toast }> = ({ data, onClose, onCreated, onToast }) => {
   const [count, setCount] = useState('1');
   const [months, setMonths] = useState(data.periods[0] || 1);
-  const [whitelist, setWhitelist] = useState(false);
+  const whitelist = true; // единый тариф: подарок всегда с белыми списками
   const [note, setNote] = useState('');
   const [limited, setLimited] = useState(false);
   const [days, setDays] = useState('30');
@@ -70,11 +70,6 @@ const CreateModal: React.FC<{ data: Data; onClose: () => void; onCreated: (c: Cr
             <input className="input" maxLength={200} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Розыгрыш в канале" />
           </div>
         </div>
-        <label className="flex items-center justify-between gap-3">
-          <span><span style={{ fontWeight: 600, fontSize: 14 }}>С белыми списками</span><br />
-            <span className="faint" style={{ fontSize: 12 }}>{data.whitelist_available ? 'Как анти-тариф: VPN + белые списки (FurkVPN)' : 'Белые списки не настроены — нет FURK_API_KEY'}</span></span>
-          <Toggle on={whitelist && data.whitelist_available} onChange={() => data.whitelist_available && setWhitelist(!whitelist)} />
-        </label>
         <label className="flex items-center justify-between gap-3">
           <span><span style={{ fontWeight: 600, fontSize: 14 }}>Ограничить срок действия кода</span><br />
             <span className="faint" style={{ fontSize: 12 }}>Не успели активировать — код сгорает</span></span>

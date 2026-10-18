@@ -313,6 +313,15 @@ export type PaymentQuote = {
   // итог к оплате (₽ или ⭐)
   total?: number;
   method_enabled?: boolean;
+  // подписка/продление: устройства и разбивка цены (до скидки)
+  plan_devices?: number;
+  devices_total?: number;
+  min_devices?: number;
+  max_devices?: number;
+  extra_device_price?: number;
+  base_price?: number | null;
+  devices_price?: number;
+  whitelist?: boolean; // единый тариф: в заказ входят белые списки
 };
 
 export type PayMethodInfo = { id: PaymentMethod; title: string; enabled: boolean };

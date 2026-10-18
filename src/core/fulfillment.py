@@ -767,8 +767,12 @@ def grant_subscription(
             base = utcnow()
         new_exp = base + timedelta(days=added_days)
         prev_devices = int(target.get("devices_limit") or 1)
-        # trial→paid: число устройств как у платной, не max(старое, платное)
-        new_devices = total_devices if upgrading_trial else max(int(target.get("devices_limit") or 1), total_devices)
+        # trial→paid: число устройств как у платной, не max(старое, платное).
+        # Отдельно купленные доп. устройства (со своим сроком) идут сверху: иначе докупка
+        # при продлении «растворялась» бы в них (5 = 3 + 2 доп., продлили на 4 → осталось бы 5)
+        addons = 0 if upgrading_trial else active_addon_devices(target.get("id"))
+        base_now = max(1, prev_devices - addons)
+        new_devices = total_devices if upgrading_trial else max(base_now, total_devices) + addons
         new_devices = max(1, new_devices)
         squads = squads_for()
         prov = provisioning.provision(

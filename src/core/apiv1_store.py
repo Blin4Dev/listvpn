@@ -131,7 +131,7 @@ def _purchase_code(p: dict[str, Any]) -> str:
     purpose = p.get("purpose") or "subscription"
     months = int(p.get("months") or 1)
     if purpose in ("subscription", "extend"):
-        return f"wl{months}" if p.get("whitelist") else tariff_code(months)
+        return tariff_code(months)  # единый тариф: белые списки входят в каждый
     return str(purpose)
 
 

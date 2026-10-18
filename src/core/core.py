@@ -5384,10 +5384,9 @@ def panel_gifts(status: str = Query("", max_length=16), q: str = Query("", max_l
 
 @app.post("/api/panel/gifts")
 def panel_gifts_create(body: AdminGiftBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
-    if body.whitelist and not fulfillment.whitelist_available():
-        raise HTTPException(400, detail={"message": "Белые списки не настроены (нет FURK_API_KEY) — выдать их в подарке нельзя"})
+    # единый тариф: подарок всегда с белыми списками (выдаются при активации, если FURK настроен)
     try:
-        r = reflevels.create_admin_gifts(body.count, body.months, body.whitelist, body.note or "", body.valid_days,
+        r = reflevels.create_admin_gifts(body.count, body.months, True, body.note or "", body.valid_days,
                                          body.one_per_user)
     except reflevels.RewardError as e:
         raise HTTPException(e.status, detail={"message": e.message})
@@ -6771,12 +6770,17 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     months = req_months if purpose != "traffic_reset" else 1
     if purpose not in ("subscription", "extend", "devices", "traffic_reset", "gift"):
         raise HTTPException(400, detail={"message": "Неизвестный тип платежа"})
-    whitelist = bool(body.whitelist) and purpose in ("subscription", "extend", "gift")
-    if whitelist and not fulfillment.whitelist_period_available(months):
-        raise HTTPException(400, detail={"message": "Белые списки на этот срок сейчас недоступны"})
+    # единый тариф: подписка/продление/подарок всегда идут с белыми списками (анти-ключ FURK на тот же срок),
+    # цена — обычная цена периода из панели; флаг клиента больше не нужен
+    whitelist = purpose in ("subscription", "extend", "gift") and fulfillment.whitelist_available()
     plan_devices = fulfillment.tariff_devices() if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
     extra = min(50, max(0, int(body.extra_devices or 0)))
     extra_price = float(meta["extra_device_price"])
+    # разбивка для экрана оплаты (подписка/продление): тариф + доп. устройства
+    base_part: Optional[float] = None
+    devices_part = 0.0
+    keep = 0
+    min_devices = plan_devices
 
     if purpose == "traffic_reset":
         tr_price = float(db.get_setting("traffic_reset_price", "0") or 0)
@@ -6787,14 +6791,10 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         price = tr_price
         stars = int(round(tr_price))
     elif purpose == "gift":
-        # подарок другу: тариф на период; с белыми списками — по цене анти-тарифа (как в старом боте)
+        # подарок другу: единый тариф на период (ВПН + белые списки)
         extra = 0
-        if whitelist:
-            price = float(fulfillment.whitelist_price(months))
-            stars = int(fulfillment.whitelist_stars(months))
-        else:
-            price = float(fulfillment.period_price(months))
-            stars = int(fulfillment.period_stars(months))
+        price = float(fulfillment.period_price(months))
+        stars = int(fulfillment.period_stars(months))
     elif purpose == "devices":
         # доп. устройства со своим сроком: цена × кол-во × месяцы
         if extra <= 0:
@@ -6829,17 +6829,20 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         if target and target.get("no_renew"):
             raise HTTPException(400, detail={"message": "Продление этой подписки недоступно"})
         # тариф = период (фикс. число устройств); устройства сверх тарифа, что уже есть, — по цене доп.
-        # белые списки — отдельный тариф (anti_N): его полная цена вместо обычной, как в старом боте
-        if whitelist:
-            base = fulfillment.whitelist_price(months)
-            base_stars = fulfillment.whitelist_stars(months)
-        else:
-            base = fulfillment.period_price(months)
-            base_stars = fulfillment.period_stars(months)
+        # единый тариф: ВПН + белые списки по одной цене периода
+        base = fulfillment.period_price(months)
+        base_stars = fulfillment.period_stars(months)
         total_devices = plan_devices + extra
+        if total_devices > MAX_PLAN_DEVICES:
+            raise HTTPException(400, detail={"message": f"Устройств: не больше {MAX_PLAN_DEVICES}"})
         keep = fulfillment.retained_devices(
             int(user["id"]), purpose, body.subscription_id, total_devices)
+        # устройства, которые уже есть сверх тарифа, при продлении остаются (и оплачиваются) — меньше нельзя
+        min_devices = plan_devices + fulfillment.retained_devices(
+            int(user["id"]), purpose, body.subscription_id, plan_devices)
         devices_price = (extra + keep) * extra_price * months
+        base_part = float(base)
+        devices_part = float(devices_price)
         price = float(base) + devices_price
         stars = int(base_stars) + int(round(devices_price))  # доп. устройства: 1 звезда = 1 рубль
 
@@ -6854,7 +6857,10 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
 
     return {"price": round(float(price), 2), "stars": int(stars), "months": months,
             "extra": extra, "purpose": purpose, "full_price": full_price, "discount_percent": percent,
-            "plan_devices": plan_devices, "whitelist": whitelist}
+            "plan_devices": plan_devices, "whitelist": whitelist,
+            "devices_total": plan_devices + extra + keep, "min_devices": min_devices,
+            "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
+            "base_price": base_part, "devices_price": round(devices_part, 2)}
 
 
 def _referral_split(bal: float, price: float, pmin: float) -> float:
@@ -6898,6 +6904,15 @@ def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_fr
         "charge": 0 if is_stars else prev["charge"],
         "provider_min": prev["provider_min"],
         "is_stars": is_stars,
+        # устройства (подписка/продление): сколько будет, минимум, разбивка цены до скидки
+        "plan_devices": q.get("plan_devices"),
+        "devices_total": q.get("devices_total"),
+        "whitelist": bool(q.get("whitelist")),
+        "min_devices": q.get("min_devices"),
+        "max_devices": q.get("max_devices"),
+        "extra_device_price": q.get("extra_device_price"),
+        "base_price": q.get("base_price"),
+        "devices_price": q.get("devices_price"),
     }
 
 

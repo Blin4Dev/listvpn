@@ -359,7 +359,8 @@ def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
         if claim.rowcount == 0:
             raise RewardError("Этот подарок уже активирован")
     months = int(row.get("months") or REWARD_MONTHS)
-    whitelist = bool(row.get("whitelist") if row.get("whitelist") is not None else 1)
+    # единый тариф: любой подарок — ВПН + белые списки (если FURK настроен), даже выпущенный раньше без них
+    whitelist = True
     try:
         grant = _grant_month(user, months=months, whitelist=whitelist)
     except Exception as exc:  # noqa: BLE001

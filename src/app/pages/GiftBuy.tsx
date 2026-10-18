@@ -38,9 +38,8 @@ export default function GiftBuy() {
   const [botLink, setBotLink] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  // подарок с белыми списками (анти-тариф, как в старом боте)
+  // единый тариф: подарок всегда с белыми списками (если FURK настроен)
   const [wlAvailable, setWlAvailable] = useState(false);
-  const [wl, setWl] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -63,9 +62,8 @@ export default function GiftBuy() {
   }, []);
 
   const choose = (m: number) =>
-    navigate(`/payment?type=gift&months=${m}${wl ? "&wl=1" : ""}&return=${encodeURIComponent("/gift/buy")}`);
-  const wlPeriods = periods.filter((p) => Number(p.whitelist_price) > 0);
-  const shown = wl ? wlPeriods : periods;
+    navigate(`/payment?type=gift&months=${m}&return=${encodeURIComponent("/gift/buy")}`);
+  const shown = periods;
 
   const send = (code: string) => {
     const text = `Дарю тебе подписку ${BRAND_NAME}! Открой бота → «Подарки» и введи код ${code}`;
@@ -88,7 +86,7 @@ export default function GiftBuy() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {shown.map((p, i) => {
-          const full = Math.round(wl ? p.whitelist_price : p.price);
+          const full = Math.round(p.price);
           const final = discount > 0 ? applyDiscount(full, discount) : full;
           return (
             <button
@@ -118,7 +116,7 @@ export default function GiftBuy() {
             >
               <span style={{ flex: 1 }}>
                 <span style={{ display: "block", fontSize: 17.5, fontWeight: 500 }}>{periodTitle(p.months)}</span>
-                <span style={{ display: "block", marginTop: 5, fontSize: 14.5, color: N.muted }}>{p.days} {daysWord(p.days)}{wl ? " + белые списки" : ""}</span>
+                <span style={{ display: "block", marginTop: 5, fontSize: 14.5, color: N.muted }}>{p.days} {daysWord(p.days)}{wlAvailable ? " + белые списки" : ""}</span>
               </span>
               <span style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 {final < full ? <span style={{ fontSize: 14, color: N.dim, textDecoration: "line-through" }}>{full} ₽</span> : null}
@@ -129,32 +127,6 @@ export default function GiftBuy() {
         })}
       </div>
 
-      {wlAvailable && wlPeriods.length ? (
-        <NoirCard style={{ ...rise(shown.length), marginTop: 18, padding: "18px 18px 20px", display: "flex", alignItems: "center", gap: 16 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 17.5, fontWeight: 600, color: N.text }}>С белыми списками</div>
-            <div style={{ marginTop: 8, fontSize: 14, lineHeight: 1.45, color: N.muted }}>
-              Друг получит подписку и отдельный ключ для обхода белых списков.
-            </div>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={wl}
-            aria-label="С белыми списками"
-            onClick={() => setWl((v) => !v)}
-            style={{
-              ...btnReset, position: "relative", flex: "none", width: 56, height: 32, borderRadius: 16, border: "none",
-              background: wl ? N.red : "rgba(255,255,255,0.14)", transition: "background 0.2s ease", cursor: "pointer",
-            }}
-          >
-            <span style={{
-              position: "absolute", top: 3, left: wl ? 27 : 3, width: 26, height: 26, borderRadius: "50%", background: "#fff",
-              boxShadow: "0 2px 6px rgba(0,0,0,0.35)", transition: "left 0.22s cubic-bezier(0.22, 1, 0.36, 1)",
-            }} />
-          </button>
-        </NoirCard>
-      ) : null}
     </NoirScreen>
   );
 }
