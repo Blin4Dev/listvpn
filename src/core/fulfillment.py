@@ -1,6 +1,7 @@
 # платежи, выдача, fulfill (общее для core/webhook/bot)
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import uuid as _uuid
@@ -137,7 +138,57 @@ def period_stars(months: int) -> int:
 
 
 def tariff_devices() -> int:
-    return _int_setting("tariff_devices", 3, 1, 20)
+    return _int_setting("tariff_devices", 2, 1, 20)  # 2 в тарифе, дальше доплата за каждое
+
+
+# ── цены доп. устройств по номеру: 4-е — своя цена, 5-е — своя… (₽/мес) ──
+# настройка device_prices = {"4": 40, "6": 35}; номер без цены берёт цену предыдущего,
+# до первого заданного — общую extra_device_price
+MAX_DEVICE_NO = 50
+
+
+def device_price_overrides() -> dict[int, float]:
+    raw = db.get_setting("device_prices", "") or ""
+    out: dict[int, float] = {}
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            try:
+                n, price = int(k), float(v)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= MAX_DEVICE_NO and price >= 0:
+                out[n] = price
+    return out
+
+
+def device_price_table(upto: int = MAX_DEVICE_NO) -> list[float]:
+    """цена n-го устройства в месяц для n = 1..upto (индекс n-1).
+    Устройства в пределах тарифа оплачены тарифом — вызывающий код считает только сверх него."""
+    base = _float_setting("extra_device_price", 40)
+    over = device_price_overrides()
+    out: list[float] = []
+    cur = base
+    for n in range(1, int(upto) + 1):
+        if n in over:
+            cur = over[n]
+        out.append(float(cur))
+    return out
+
+
+def devices_cost(have: int, add: int) -> float:
+    """₽/мес за устройства с номерами have+1 … have+add."""
+    have, add = max(0, int(have)), max(0, int(add))
+    if add <= 0:
+        return 0.0
+    table = device_price_table(min(MAX_DEVICE_NO, have + add))
+    total = 0.0
+    for n in range(have + 1, have + add + 1):
+        total += table[n - 1] if n <= len(table) else (table[-1] if table else 0.0)
+    return round(total, 2)
 
 
 # ── белые списки: отдельный анти-ключ FURK, как в старом боте ──

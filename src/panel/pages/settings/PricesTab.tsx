@@ -27,7 +27,9 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
   const [wlPrices, setWlPrices] = useState<Record<string, string>>({ '1': '399', '3': '1488', '6': '2222', '12': '0' });
   const [wlStars, setWlStars] = useState<Record<string, string>>({ '1': '600', '3': '1800', '6': '2500', '12': '0' });
   const [wlDevices, setWlDevices] = useState<Record<string, string>>({ '1': '2', '3': '5', '6': '5', '12': '5' });
-  const [tariffDevices, setTariffDevices] = useState('3');
+  const [tariffDevices, setTariffDevices] = useState('2');
+  // своя цена для каждого доп. устройства (по номеру), ₽/мес; пусто — как у предыдущего
+  const [devPrices, setDevPrices] = useState<Record<string, string>>({});
   const [wlConfigured, setWlConfigured] = useState(false);
   const [wlError, setWlError] = useState('');
   const [furk, setFurk] = useState<{ configured?: boolean; ok?: boolean; balance?: number; credit?: number; error?: string } | null>(null);
@@ -55,7 +57,8 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
         setWlPrices((p) => toStr(m.whitelist_prices, p));
         setWlStars((p) => toStr(m.whitelist_stars, p));
         setWlDevices((p) => toStr(m.whitelist_devices, p));
-        setTariffDevices(String(m.tariff_devices ?? 3));
+        setTariffDevices(String(m.tariff_devices ?? 2));
+        setDevPrices(Object.fromEntries(Object.entries(m.device_prices || {}).map(([k, v]) => [k, String(v)])));
         setWlConfigured(!!m.whitelist_configured);
         setWlError(String(m.whitelist_error || ''));
         try { setFurk(await apiFetch('/panel/furk/status')); } catch { setFurk(null); }
@@ -84,6 +87,8 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           whitelist_stars: Object.fromEntries(PERIODS.map((k) => [k, Number(wlStars[k])])),
           whitelist_devices: Object.fromEntries(PERIODS.map((k) => [k, Number(wlDevices[k])])),
           tariff_devices: Number(tariffDevices),
+          device_prices: Object.fromEntries(
+            Object.entries(devPrices).filter(([, v]) => String(v).trim() !== '').map(([k, v]) => [k, Number(v)])),
           pay_methods: Object.fromEntries(payMethods.map((x) => [x.id, { enabled: x.enabled }])),
         }),
       });
@@ -114,7 +119,39 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div><label className="field-label">Устройств в тарифе</label><input className="input" type="number" min={1} max={20} value={tariffDevices} onChange={(e) => setTariffDevices(e.target.value)} /></div>
+              <div><label className="field-label">Доп. устройство по умолчанию, ₽/мес</label><input className="input" type="number" min={0} value={f.extra} onChange={set('extra')} /></div>
             </div>
+          </Section>
+
+          <Section
+            title="Цены доп. устройств"
+            sub="Своя цена за каждое устройство сверх тарифа, ₽ в месяц (умножается на срок). Пустое поле — как у предыдущего устройства."
+          >
+            {(() => {
+              const plan = Math.max(1, Math.min(20, Number(tariffDevices) || 2));
+              const rows: React.ReactNode[] = [];
+              let inherited = Number(f.extra) || 0;
+              for (let i = 1; i <= plan; i++) { const x = devPrices[String(i)]; if (x != null && String(x).trim() !== '') inherited = Number(x) || 0; }
+              for (let n = plan + 1; n <= 20; n++) {
+                const k = String(n);
+                const v = devPrices[k] ?? '';
+                const ph = String(inherited);
+                if (String(v).trim() !== '') inherited = Number(v) || 0;
+                rows.push(
+                  <div key={k} className="flex items-center gap-3">
+                    <div style={{ width: 120, fontWeight: 500 }}>{n}-е устройство</div>
+                    <input className="input" style={{ maxWidth: 160 }} type="number" min={0} placeholder={ph} value={v}
+                      onChange={(e) => setDevPrices((p) => ({ ...p, [k]: e.target.value }))} />
+                    <div className="faint" style={{ fontSize: 12 }}>итого за {n} устр.: +{(() => {
+                      let sum = 0, cur = Number(f.extra) || 0;
+                      for (let i = 1; i <= n; i++) { const x = devPrices[String(i)]; if (x != null && String(x).trim() !== '') cur = Number(x) || 0; if (i > plan) sum += cur; }
+                      return sum;
+                    })()} ₽/мес к тарифу</div>
+                  </div>,
+                );
+              }
+              return <div className="flex flex-col gap-2">{rows}</div>;
+            })()}
           </Section>
 
           <Section
@@ -143,7 +180,6 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
 
           <Section title="Платная подписка">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div><label className="field-label">Цена доп. устройства, ₽/мес</label><input className="input" type="number" min={0} value={f.extra} onChange={set('extra')} /></div>
               <div><label className="field-label">Трафик в месяц, ГБ (0 = без лимита)</label><input className="input" type="number" min={0} value={f.paidGb} onChange={set('paidGb')} /></div>
               <div><label className="field-label">Досрочный сброс трафика, ₽ (0 = выкл.)</label><input className="input" type="number" min={0} value={f.trafficReset} onChange={set('trafficReset')} /></div>
             </div>

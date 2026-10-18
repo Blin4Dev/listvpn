@@ -73,14 +73,15 @@ export default function Tariffs() {
 
   const [loaded, setLoaded] = useState(false);
   const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
-  const [devices, setDevices] = useState(3);
+  const [devices, setDevices] = useState(2);
   const [wlAvailable, setWlAvailable] = useState(false);
   const [discount, setDiscount] = useState(0);
   // устройства: сколько всего (минимум — тариф или то, что уже есть в подписке), цена доп. устройства в месяц
   const [devTotal, setDevTotal] = useState<number | null>(null);
-  const [devMin, setDevMin] = useState(3);
+  const [devMin, setDevMin] = useState(2);
   const [devMax, setDevMax] = useState(20);
   const [devPrice, setDevPrice] = useState(0);
+  const [devTable, setDevTable] = useState<number[]>([]); // цена n-го устройства в месяц
 
   useEffect(() => {
     void (async () => {
@@ -99,10 +100,11 @@ export default function Tariffs() {
         const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
           subscription_id: null, use_referral_balance: false, whitelist: false });
         if (!q) throw new Error("no quote");
-        const min = Number(q.min_devices || q.plan_devices || 3);
+        const min = Number(q.min_devices || q.plan_devices || 2);
         setDevMin(min);
         setDevMax(Number(q.max_devices || 20));
         setDevPrice(Number(q.extra_device_price || 0));
+        if (Array.isArray(q.device_prices)) setDevTable(q.device_prices.map(Number));
         setDevTotal(min);
       } catch { /* без выбора устройств */ }
       setLoaded(true);
@@ -120,8 +122,12 @@ export default function Tariffs() {
   // единый тариф: ВПН + белые списки на тот же срок, одна цена
   const shown = periods;
   const devNow = devTotal ?? devices;
-  const devExtra = Math.max(0, devNow - devices);
-  const showDevices = devTotal != null && devPrice > 0;
+  const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
+  // ₽/мес за устройства сверх тарифа: у каждого номера своя цена (панель → Цены)
+  let devMonthly = 0;
+  for (let n = devices + 1; n <= devNow; n++) devMonthly += priceOf(n);
+  const nextPrice = priceOf(devNow + 1);
+  const showDevices = devTotal != null && (devPrice > 0 || devTable.some((x) => x > 0));
   const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
 
   const rise = (i: number): React.CSSProperties => ({
@@ -143,7 +149,7 @@ export default function Tariffs() {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 17, fontWeight: 600, color: N.text, letterSpacing: "-0.01em" }}>Устройства</div>
               <div style={{ marginTop: 4, fontSize: 13.5, lineHeight: 1.4, color: N.muted }}>
-                {devices} в тарифе · +{Math.round(devPrice)} ₽/мес за каждое следующее
+                {devices} в тарифе · следующее +{Math.round(devNow >= devMax ? priceOf(devNow) : nextPrice)} ₽/мес
               </div>
             </div>
             <StepBtn icon="remove" label="Меньше устройств" disabled={devNow <= devMin} onClick={() => setDev(devNow - 1)} />
@@ -166,7 +172,7 @@ export default function Tariffs() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {shown.map((p, i) => {
-          const full = Math.round(p.price + devExtra * devPrice * p.months);
+          const full = Math.round(p.price + devMonthly * p.months);
           const final = discount > 0 ? applyDiscount(full, discount) : full;
           return (
             <button

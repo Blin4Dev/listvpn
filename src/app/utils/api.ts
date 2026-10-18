@@ -321,6 +321,7 @@ export type PaymentQuote = {
   extra_device_price?: number;
   base_price?: number | null;
   devices_price?: number;
+  device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
   whitelist?: boolean; // единый тариф: в заказ входят белые списки
 };
 

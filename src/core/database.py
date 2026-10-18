@@ -1148,6 +1148,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM settings WHERE key LIKE 'survey%'")
     except sqlite3.Error:
         pass
+    # тариф по умолчанию — 2 устройства + доплата за каждое следующее (раньше было 3); один раз
+    try:
+        done = conn.execute("SELECT value FROM settings WHERE key = 'tariff_devices_v2'").fetchone()
+        if not done:
+            conn.execute("UPDATE settings SET value = '2' WHERE key = 'tariff_devices' AND value = '3'")
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tariff_devices_v2', '1')")
+    except sqlite3.Error:
+        pass
     # уникальный provider_payment_id (защита от повторного callback)
     try:
         conn.execute(

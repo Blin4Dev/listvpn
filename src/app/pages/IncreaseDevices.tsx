@@ -20,6 +20,7 @@ type DevicesInfo = {
   limit?: number;
   can_buy?: boolean;
   extra_device_price?: number;
+  device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
   addon_months?: number[];
   addons?: { count: number; expires_at: string }[];
 };
@@ -70,6 +71,7 @@ export default function IncreaseDevices() {
   const [loaded, setLoaded] = useState(false);
   const [current, setCurrent] = useState(1);
   const [price, setPrice] = useState(49);
+  const [table, setTable] = useState<number[]>([]);
   const [periods, setPeriods] = useState<number[]>([...PERIODS]);
   const [subId, setSubId] = useState<number | null>(null);
   const [subUntil, setSubUntil] = useState<string | null>(null);
@@ -87,6 +89,7 @@ export default function IncreaseDevices() {
         const d = await appFetch<DevicesInfo>("/devices");
         if (d.limit) setCurrent(Math.max(1, Number(d.limit)));
         if (d.extra_device_price) setPrice(Number(d.extra_device_price));
+        if (Array.isArray(d.device_prices)) setTable(d.device_prices.map(Number));
         if (Array.isArray(d.addon_months) && d.addon_months.length) setPeriods(d.addon_months);
       } catch { /* defaults */ }
       try {
@@ -104,7 +107,12 @@ export default function IncreaseDevices() {
 
   const maxAdd = Math.max(0, MAX_DEVICES - current);
   const count = Math.min(Math.max(1, add), Math.max(1, maxAdd));
-  const estimate = price * count * months;
+  // у каждого устройства (по номеру) своя цена — настраивается в панели
+  const priceOf = (n: number) => (table.length ? Number(table[Math.min(n, table.length) - 1] ?? price) : price);
+  let perMonth = 0;
+  for (let n = current + 1; n <= current + count; n++) perMonth += priceOf(n);
+  const estimate = perMonth * months;
+  const nextPrice = priceOf(current + 1);
 
   // цена с сервера (скидки), с небольшой задержкой при щёлканье
   useEffect(() => {
@@ -164,7 +172,7 @@ export default function IncreaseDevices() {
         <div style={{ marginTop: 10, fontSize: 15.5, lineHeight: 1.5, color: N.muted }}>
           {isTrial
             ? "В пробной подписке докупать устройства нельзя. Оформите подписку — и сможете добавить сколько нужно."
-            : `Сейчас ${current}. Одно дополнительное устройство стоит ${price} ₽ в месяц. Выберите, сколько добавить и на какой срок.`}
+            : `Сейчас ${current}. Следующее устройство стоит ${nextPrice} ₽ в месяц. Выберите, сколько добавить и на какой срок.`}
         </div>
       </div>
 

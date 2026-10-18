@@ -1480,6 +1480,7 @@ def get_plans_meta() -> dict[str, Any]:
         "trial_hwid_enabled": db.get_setting("trial_hwid_enabled", "1") in ("1", "true", "True", "yes"),
         "trial_hwid_max": fulfillment._int_setting("trial_hwid_max", 2, 1, 10),
         "tariff_devices": fulfillment.tariff_devices(),
+        "device_prices": {str(k): v for k, v in sorted(fulfillment.device_price_overrides().items())},
         "period_prices": {str(m): fulfillment.period_price(m) for m in fulfillment.SUB_PERIODS},
         "period_stars": {str(m): fulfillment.period_stars(m) for m in fulfillment.SUB_PERIODS},
         # белые списки — отдельные тарифы с анти-ключом FURK (полная цена, 0 = период недоступен)
@@ -2222,6 +2223,8 @@ class PlansUpdateBody(BaseModel):
     whitelist_stars: Optional[dict[str, float]] = None
     whitelist_devices: Optional[dict[str, float]] = None
     tariff_devices: Optional[int] = Field(None, ge=1, le=20)
+    # цены доп. устройств по номеру, ₽/мес: {"4": 40, "5": 35}; пусто/null — как у предыдущего
+    device_prices: Optional[dict[str, Optional[float]]] = None
     whitelist_squad_uuid: Optional[str] = None  # устарело, игнорируется
     # {"sbp": {"enabled": true}, ...}
     pay_methods: Optional[dict[str, dict[str, Any]]] = None
@@ -5923,6 +5926,17 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
             db.set_setting(f"{prefix}{m}", f"{_num(v, lo, 1000000):g}")
     if body.tariff_devices is not None:
         db.set_setting("tariff_devices", str(int(body.tariff_devices)))
+    if body.device_prices is not None:
+        tiers: dict[str, float] = {}
+        for n_raw, v in body.device_prices.items():
+            try:
+                n = int(n_raw)
+            except (TypeError, ValueError):
+                continue
+            if v is None or str(v).strip() == "" or not (1 <= n <= fulfillment.MAX_DEVICE_NO):
+                continue
+            tiers[str(n)] = _num(v, 0, 100000)
+        db.set_setting("device_prices", json.dumps(tiers, sort_keys=True))
     if body.pay_methods is not None:
         cur = {m["id"]: {"enabled": m["enabled"]} for m in pay_methods()}
         for key, v in body.pay_methods.items():
@@ -6709,6 +6723,7 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     addons = fulfillment.device_addons_for((active_sub or {}).get("id"))
     return {"devices": devices, "used": len(devices), "limit": limit, "can_buy": can_buy,
             "extra_device_price": float(meta["extra_device_price"]),
+            "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
             "addon_months": list(fulfillment.DEVICE_ADDON_MONTHS),
             "addons": [{"count": int(a["count"]), "expires_at": a["expires_at"]} for a in addons]}
 
@@ -6819,7 +6834,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             raise HTTPException(400, detail={"message": "В пробной подписке докупить устройства нельзя — сначала оформите подписку"})
         if int(sub.get("devices_limit") or 1) + extra > 50:
             raise HTTPException(400, detail={"message": "Слишком много устройств в одной подписке"})
-        price = round(extra_price * extra * months, 2)
+        price = round(fulfillment.devices_cost(int(sub.get("devices_limit") or 1), extra) * months, 2)
         stars = int(round(price))
         if price <= 0:
             raise HTTPException(400, detail={"message": "Стоимость докупки не рассчитана"})
@@ -6840,7 +6855,8 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         # устройства, которые уже есть сверх тарифа, при продлении остаются (и оплачиваются) — меньше нельзя
         min_devices = plan_devices + fulfillment.retained_devices(
             int(user["id"]), purpose, body.subscription_id, plan_devices)
-        devices_price = (extra + keep) * extra_price * months
+        # цена устройства зависит от его номера (4-е, 5-е…) — см. «Цены» в панели
+        devices_price = fulfillment.devices_cost(plan_devices, extra + keep) * months
         base_part = float(base)
         devices_part = float(devices_price)
         price = float(base) + devices_price
@@ -6860,6 +6876,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             "plan_devices": plan_devices, "whitelist": whitelist,
             "devices_total": plan_devices + extra + keep, "min_devices": min_devices,
             "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
+            "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
             "base_price": base_part, "devices_price": round(devices_part, 2)}
 
 
@@ -6911,6 +6928,7 @@ def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_fr
         "min_devices": q.get("min_devices"),
         "max_devices": q.get("max_devices"),
         "extra_device_price": q.get("extra_device_price"),
+        "device_prices": q.get("device_prices"),
         "base_price": q.get("base_price"),
         "devices_price": q.get("devices_price"),
     }
