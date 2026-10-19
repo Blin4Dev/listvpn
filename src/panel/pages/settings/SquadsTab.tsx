@@ -155,13 +155,6 @@ const ExternalSquadCard: React.FC<{ onToast: (t: string, m: string, ty: ToastTyp
       onToast('Готово', pick ? 'Внешний сквад будет назначаться всем пользователям' : 'Внешний сквад не назначается', 'success');
     } catch (e) { onToast('Не сохранено', parseApiErr(e, 'Ошибка'), 'error'); } finally { setBusy(''); }
   };
-  const applyAll = async () => {
-    const name = st.squads.find((x) => x.uuid === st.selected)?.name || 'выбранный сквад';
-    if (!window.confirm(`Назначить «${name}» всем пользователям в Remnawave прямо сейчас? Это затронет всех пользователей панели Remnawave, включая созданных не ботом.`)) return;
-    setBusy('apply');
-    try { await apiFetch('/panel/squads/external/apply', { method: 'POST' }); onToast('Готово', 'Remnawave назначает сквад всем пользователям', 'success'); load(); }
-    catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось'), 'error'); } finally { setBusy(''); }
-  };
   const missing = st.selected && !st.squads.some((x) => x.uuid === st.selected) && !st.error;
   return (
     <div className="card" style={{ padding: 24 }}>
@@ -188,9 +181,6 @@ const ExternalSquadCard: React.FC<{ onToast: (t: string, m: string, ty: ToastTyp
       {!st.error && st.squads.length === 0 && <p className="sub" style={{ marginTop: 10, fontSize: 13 }}>В Remnawave нет внешних сквадов — создайте их в панели Remnawave и обновите список.</p>}
       <div className="flex items-center gap-3 mt-6" style={{ flexWrap: 'wrap' }}>
         <button className="btn solid" disabled={!dirty || !!busy} onClick={() => void save()}>{busy === 'save' ? <Spinner size={15} /> : null} Сохранить</button>
-        {st.selected && !dirty && !missing && (
-          <button className="btn" disabled={!!busy} onClick={() => void applyAll()}>{busy === 'apply' ? <Spinner size={15} /> : null} Назначить всем существующим</button>
-        )}
       </div>
     </div>
   );

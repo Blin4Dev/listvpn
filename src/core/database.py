@@ -1165,7 +1165,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         pass
     # канал для проверки подписки сменился: задание «Подпишись на канал» — на новый канал
     try:
-        conn.execute("UPDATE tasks SET channel_id = '-1004443404755' WHERE channel_id = '-1003036752851'")
+        conn.execute("UPDATE tasks SET channel_id = '@BATMANNETWORK', url = 'https://t.me/BATMANNETWORK' "
+                     "WHERE code = 'channel' AND kind = 'channel'")
     except sqlite3.Error:
         pass
     # уникальный provider_payment_id (защита от повторного callback)

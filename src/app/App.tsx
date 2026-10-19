@@ -127,6 +127,21 @@ function AnimatedLayout() {
   );
 }
 
+// «Пропустить» подписку на канал: не спрашиваем снова 7 дней (на этом устройстве)
+const CHANNEL_SKIP_KEY = "blinvpn_channel_skip";
+const CHANNEL_SKIP_MS = 7 * 86_400_000;
+function channelSkipped(): boolean {
+  try {
+    const t = Number(localStorage.getItem(CHANNEL_SKIP_KEY) || 0);
+    return t > 0 && Date.now() - t < CHANNEL_SKIP_MS;
+  } catch {
+    return false;
+  }
+}
+function rememberChannelSkip(): void {
+  try { localStorage.setItem(CHANNEL_SKIP_KEY, String(Date.now())); } catch { /* приватный режим */ }
+}
+
 export default function App() {
   const [auth, setAuth] = useState<"checking" | "authed" | "anon">("checking");
   const [gate, setGate] = useState<"checking" | "open" | "blocked">("checking");
@@ -163,7 +178,10 @@ export default function App() {
       .then((m) => {
         if (!mounted) return;
         setMembership(m);
-        setGate(m.required && !m.subscribed ? "blocked" : "open");
+        if (m.subscribed) setGate("open");
+        // обязательна — без подписки дальше нельзя; необязательна — предлагаем, можно пропустить
+        else if (m.required) setGate("blocked");
+        else setGate(channelSkipped() ? "open" : "blocked");
       })
       .catch(() => mounted && setGate("open"));
     return () => {
@@ -182,7 +200,11 @@ export default function App() {
         <RoutedApp />
         {/* оферта теперь на экране входа (EnterScreen) */}
         {introReady && terms === "ok" && gate === "blocked" && membership ? (
-          <ChannelGate membership={membership} onPassed={() => setGate("open")} />
+          <ChannelGate
+            membership={membership}
+            onPassed={() => setGate("open")}
+            onSkip={membership.required ? undefined : () => { rememberChannelSkip(); setGate("open"); }}
+          />
         ) : null}
       </>
     );

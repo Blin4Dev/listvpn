@@ -103,7 +103,7 @@ def build_router(core: Any) -> APIRouter:
 
     def auth_channel(user: dict = Depends(auth)) -> dict[str, Any]:
         """действия с деньгами/наградами — как в мини-приложении, только с подпиской на канал."""
-        if user.get("telegram_id") and core.REQUIRED_CHANNEL_ID and not core._check_channel_membership(user):
+        if user.get("telegram_id") and core.channel_required() and not core._check_channel_membership(user):
             raise HTTPException(403, detail={"message": "Подпишитесь на канал BatmanVPN, чтобы продолжить",
                                              "code": "channel_required", "channel_url": core.REQUIRED_CHANNEL_URL})
         return user

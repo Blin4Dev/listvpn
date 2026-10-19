@@ -158,9 +158,15 @@ def _env_int(key: str, default: int) -> int:
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_WEBHOOK_SECRET = _env("TELEGRAM_WEBHOOK_SECRET")
 # обязательная подписка на канал (только telegram-вход)
-REQUIRED_CHANNEL_ID = _env("REQUIRED_CHANNEL_ID", "-1004443404755")
-REQUIRED_CHANNEL_URL = _env("REQUIRED_CHANNEL_URL", "https://t.me/blinvpn")
-CHANNEL_CHECK_TTL = _env_int("CHANNEL_CHECK_TTL", 600)  # кэш проверки подписки, сек
+# канал зашит в код: .env (REQUIRED_CHANNEL_ID / REQUIRED_CHANNEL_URL) больше не влияет
+REQUIRED_CHANNEL_ID = "@BATMANNETWORK"
+REQUIRED_CHANNEL_URL = "https://t.me/BATMANNETWORK"
+CHANNEL_CHECK_TTL = _env_int("CHANNEL_CHECK_TTL", 600)
+
+
+def channel_required() -> bool:
+    """обязательна ли подписка на канал (панель → Цены → «Канал»); по умолчанию — нет, можно пропустить."""
+    return bool(REQUIRED_CHANNEL_ID) and db.get_setting("channel_required", "0") in ("1", "true", "True", "yes")  # кэш проверки подписки, сек
 TELEGRAM_ADMIN_ID = _env("TELEGRAM_ADMIN_ID")
 BOT_USERNAME = _env("BOT_USERNAME") or _env("VITE_BOT_USERNAME") or "blinvpn_bot"
 PANEL_SETUP_TOKEN = _env("PANEL_SETUP_TOKEN")
@@ -1502,6 +1508,8 @@ def get_plans_meta() -> dict[str, Any]:
         "base_price": _float_setting("base_price", 99),
         "extra_device_price": _float_setting("extra_device_price", 40),
         "trial_enabled": trial_enabled(),
+        "channel_required": channel_required(),
+        "channel_url": REQUIRED_CHANNEL_URL,
         "trial_miniapp_enabled": trial_source_enabled("miniapp"),
         "trial_web_enabled": trial_source_enabled("web"),
         "trial_days": fulfillment.trial_days(),
@@ -2243,6 +2251,8 @@ class PlansUpdateBody(BaseModel):
     # пробный отдельно: в мини-приложении (Telegram) и на сайте
     trial_miniapp_enabled: Optional[bool] = None
     trial_web_enabled: Optional[bool] = None
+    # подписка на канал: обязательна (без неё нельзя) или можно пропустить
+    channel_required: Optional[bool] = None
     trial_days: Optional[int] = None
     trial_traffic_gb: Optional[int] = None
     trial_devices: Optional[int] = None
@@ -5586,29 +5596,6 @@ def panel_squads_external_set(body: ExternalSquadBody, _: dict = Depends(require
     return _external_state()
 
 
-@app.post("/api/panel/squads/external/apply")
-def panel_squads_external_apply(_: dict = Depends(require_owner)) -> dict[str, Any]:
-    """назначить выбранный внешний сквад всем уже существующим пользователям Remnawave."""
-    uuid = provisioning.external_squad()
-    if not uuid:
-        raise HTTPException(400, detail={"message": "Сначала выберите внешний сквад"})
-    client = _rw_client()
-    if client is None:
-        raise HTTPException(503, detail={"message": "Remnawave не настроена (укажите URL и API-токен)"})
-    # только свои batman_<id>; add_users_to_external_squad назначил бы сквад всей панели
-    try:
-        own = provisioning.own_panel_users(client)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, detail={"message": f"Ошибка Remnawave: {exc}"})
-    failed = 0
-    for u in own:
-        try:
-            client.update_user(id=int(u["id"]), external_squad_uuid=uuid)
-        except Exception:  # noqa: BLE001
-            failed += 1
-    return {"success": failed == 0, "updated": len(own) - failed, "failed": failed}
-
-
 @app.put("/api/panel/squads/{squad_uuid}")
 def panel_squad_update(
     squad_uuid: str, body: SquadUpdateBody, _: dict = Depends(require_owner)
@@ -5936,6 +5923,8 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
         db.set_setting("trial_enabled", "1" if body.trial_enabled else "0")
     if body.trial_miniapp_enabled is not None:
         db.set_setting("trial_miniapp_enabled", "1" if body.trial_miniapp_enabled else "0")
+    if body.channel_required is not None:
+        db.set_setting("channel_required", "1" if body.channel_required else "0")
     if body.trial_web_enabled is not None:
         db.set_setting("trial_web_enabled", "1" if body.trial_web_enabled else "0")
     if body.trial_days is not None:
@@ -6287,8 +6276,8 @@ def require_channel_dep(
     user: dict = Depends(_app_user_from_init),
     x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
 ) -> dict[str, Any]:
-    """действия: tg без подписки на канал -> 403."""
-    if user.get("telegram_id") and REQUIRED_CHANNEL_ID:
+    """действия: tg без подписки на канал -> 403 (только если подписка обязательна в панели)."""
+    if user.get("telegram_id") and channel_required():
         if not _check_channel_membership(user, force=False):
             raise HTTPException(403, detail={
                 "message": "Подпишитесь на канал BatmanVPN, чтобы продолжить",
@@ -6304,17 +6293,19 @@ def app_membership(
     user: dict = Depends(_app_user_from_init),
     x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
 ) -> dict[str, Any]:
-    """статус обязательной подписки; для email required=false."""
+    """статус подписки на канал. required — обязательна (без неё дальше нельзя);
+    если не обязательна, мини-приложение предлагает подписаться с кнопкой «Пропустить». Для email — не спрашиваем."""
     fresh = get_user(int(user["id"])) or user
     if not fresh.get("telegram_id") or not REQUIRED_CHANNEL_ID:
         return {"required": False, "subscribed": True, "channel_url": REQUIRED_CHANNEL_URL}
+    required = channel_required()
     # принудительная перепроверка: rate limit
     if force:
         allowed, _ = ratelimit.rate_limit(f"membership:{fresh['id']}", 6, 60)
         force = 1 if allowed else 0
     subscribed = _check_channel_membership(fresh, force=bool(force))
     return {
-        "required": True,
+        "required": required,
         "subscribed": bool(subscribed),
         "channel_url": REQUIRED_CHANNEL_URL,
     }

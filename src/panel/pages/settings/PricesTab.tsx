@@ -21,6 +21,9 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
   const [trialEnabled, setTrialEnabled] = useState(true);
   // пробный отдельно: в мини-приложении (Telegram) и на сайте
   const [trialMiniapp, setTrialMiniapp] = useState(true);
+  // подписка на канал: обязательна или можно пропустить
+  const [channelRequired, setChannelRequired] = useState(false);
+  const [channelUrl, setChannelUrl] = useState('');
   const [trialWeb, setTrialWeb] = useState(true);
   // тарифы по периодам (₽ и ⭐) и отдельные тарифы с белыми списками (анти-ключ FURK, как в старом боте)
   const PERIODS = ['1', '3', '6', '12'] as const;
@@ -56,6 +59,8 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
         });
         setTrialEnabled(m.trial_enabled !== false);
         setTrialMiniapp(m.trial_miniapp_enabled !== false);
+        setChannelRequired(!!m.channel_required);
+        setChannelUrl(String(m.channel_url || ''));
         setTrialWeb(m.trial_web_enabled !== false);
         const toStr = (o: Record<string, number> | undefined, fb: Record<string, string>) =>
           Object.fromEntries(PERIODS.map((k) => [k, o && o[k] != null ? String(o[k]) : fb[k]]));
@@ -90,6 +95,7 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           paid_traffic_gb: Number(f.paidGb), traffic_reset_price: Number(f.trafficReset),
           trial_enabled: trialEnabled, trial_days: Number(f.trialDays),
           trial_miniapp_enabled: trialMiniapp, trial_web_enabled: trialWeb,
+          channel_required: channelRequired,
           trial_traffic_gb: Number(f.trialGb), trial_devices: Number(f.trialDevices),
           period_prices: Object.fromEntries(PERIODS.map((k) => [k, Number(periodPrices[k])])),
           period_stars: Object.fromEntries(PERIODS.map((k) => [k, Number(periodStars[k])])),
@@ -205,6 +211,20 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div><label className="field-label">Трафик в месяц, ГБ (0 = без лимита)</label><input className="input" type="number" min={0} value={f.paidGb} onChange={set('paidGb')} /></div>
               <div><label className="field-label">Досрочный сброс трафика, ₽ (0 = выкл.)</label><input className="input" type="number" min={0} value={f.trafficReset} onChange={set('trafficReset')} /></div>
+            </div>
+          </Section>
+
+          <Section title="Подписка на канал" sub={`Канал ${channelUrl.replace(/^https?:\/\//, '') || 't.me/BATMANNETWORK'}. Только для входа через Telegram; бот должен быть админом канала.`}>
+            <div className="inset flex items-center justify-between gap-3" style={{ padding: 14 }}>
+              <div>
+                <div style={{ fontWeight: 500 }}>Подписка обязательна</div>
+                <div className="faint" style={{ fontSize: 12 }}>
+                  {channelRequired
+                    ? 'Без подписки мини-приложение не пустит дальше, оплата и пробный — недоступны'
+                    : 'Предлагаем подписаться, но можно нажать «Пропустить» (спросим снова через 7 дней)'}
+                </div>
+              </div>
+              <Toggle on={channelRequired} onChange={() => setChannelRequired(!channelRequired)} />
             </div>
           </Section>
 

@@ -37,6 +37,16 @@ def admin_chat_id() -> str:
     return _env("TELEGRAM_ADMIN_ID")
 
 
+def admin_chat_ids() -> list[Any]:
+    """TELEGRAM_ADMIN_ID может быть списком через запятую: 8096013973, 6782643627."""
+    out: list[Any] = []
+    for part in admin_chat_id().replace(",", " ").split():
+        cid = _as_chat(part)
+        if cid not in out:
+            out.append(cid)
+    return out
+
+
 def admin_ids() -> set[int]:
     """telegram-id админов: TELEGRAM_ADMIN_ID + forum_admin_ids (не членство в группе)."""
     raw = f"{_env('TELEGRAM_ADMIN_ID')} {db.get_setting('forum_admin_ids', '')}"
@@ -138,35 +148,37 @@ def send(topic: str, text: str, *, reply_markup: Optional[dict] = None) -> Optio
         _push_owner(topic, text)
     cid = chat_id()
     thread = topic_id(topic)
+    targets: list[Any] = [_as_chat(cid)] if cid else admin_chat_ids()  # нет форума — в лс каждому админу
     if not cid:
-        cid = admin_chat_id()
         thread = None
-    if not cid:
-        return None
-    payload: dict[str, Any] = {
-        "chat_id": _as_chat(cid),
-        "text": text,
-        "parse_mode": "HTML",
-        "link_preview_options": {"is_disabled": True},
-    }
-    if thread is not None:
-        payload["message_thread_id"] = thread
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-    return notifier.call("sendMessage", payload)
+    first: Optional[dict[str, Any]] = None
+    for target in targets:
+        payload: dict[str, Any] = {
+            "chat_id": target,
+            "text": text,
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": True},
+        }
+        if thread is not None:
+            payload["message_thread_id"] = thread
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        res = notifier.call("sendMessage", payload)
+        if first is None and res is not None:
+            first = res
+    return first
 
 
 def send_document(topic: str, file_path: str, *, caption: str = "") -> bool:
     cid = chat_id()
     thread = topic_id(topic)
+    targets: list[Any] = [_as_chat(cid)] if cid else admin_chat_ids()
     if not cid:
-        cid = admin_chat_id()
         thread = None
-    if not cid:
-        return False
-    return notifier.send_document(
-        _as_chat(cid), file_path, caption=caption, message_thread_id=thread
-    )
+    ok = False
+    for target in targets:
+        ok = notifier.send_document(target, file_path, caption=caption, message_thread_id=thread) or ok
+    return ok
 
 
 def delete_message(chat: Any, message_id: int) -> bool:

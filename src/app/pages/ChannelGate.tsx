@@ -3,18 +3,21 @@ import { fetchMembership, tgWebApp, type Membership } from "../utils/api";
 import { N, NoirBadge, NoirButton, NoirDialog, NoirTextButton } from "../components/noir";
 import { BRAND_NAME } from "../utils/brand";
 
-// оверлей подписки на канал; закрыть только после успешной проверки
+// оверлей подписки на канал. Обязательна — закрыть только после проверки;
+// необязательна (onSkip задан) — есть «Пропустить»
 export default function ChannelGate({
   membership,
   onPassed,
+  onSkip,
 }: {
   membership: Membership;
   onPassed: () => void;
+  onSkip?: () => void;
 }) {
   const [checking, setChecking] = useState(false);
   const [err, setErr] = useState("");
 
-  const channelUrl = membership.channel_url || "https://t.me/blinvpn";
+  const channelUrl = membership.channel_url || "https://t.me/BATMANNETWORK";
 
   const openChannel = () => {
     const wa = tgWebApp();
@@ -41,17 +44,24 @@ export default function ChannelGate({
           Подпишитесь на канал
         </div>
         <div style={{ marginTop: 8, fontSize: 15, lineHeight: 1.5, color: N.muted }}>
-          Чтобы пользоваться {BRAND_NAME}, подпишитесь на наш канал — там новости и статус серверов.
+          {onSkip
+            ? <>Там новости {BRAND_NAME} и статус серверов — так вы ничего не пропустите.</>
+            : <>Чтобы пользоваться {BRAND_NAME}, подпишитесь на наш канал — там новости и статус серверов.</>}
         </div>
       </div>
       <div style={{ marginTop: 22 }}>
-        <NoirButton primary icon="send" onClick={openChannel}>Подписаться</NoirButton>
-        <div style={{ marginTop: 4 }}>
-          <NoirTextButton disabled={checking} onClick={() => void recheck()} color={N.text}>
-            {checking ? "Проверяем…" : "Я подписался — проверить"}
-          </NoirTextButton>
-        </div>
+        <NoirButton primary icon="send" onClick={() => { openChannel(); if (onSkip) onSkip(); }}>Подписаться</NoirButton>
+        {onSkip ? null : (
+          <div style={{ marginTop: 4 }}>
+            <NoirTextButton disabled={checking} onClick={() => void recheck()} color={N.text}>
+              {checking ? "Проверяем…" : "Я подписался — проверить"}
+            </NoirTextButton>
+          </div>
+        )}
         {err ? <div style={{ fontSize: 14, color: "#FF6B6B", textAlign: "center", marginTop: 2 }}>{err}</div> : null}
+        {onSkip ? (
+          <NoirTextButton onClick={onSkip}>Пропустить</NoirTextButton>
+        ) : null}
       </div>
     </NoirDialog>
   );
