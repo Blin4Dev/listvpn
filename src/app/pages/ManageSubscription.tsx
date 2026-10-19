@@ -214,13 +214,14 @@ export default function ManageSubscription() {
   const mainTraffic = traffic?.available ? trafficValue(traffic.used_bytes, traffic.limit_bytes) : "без лимита";
   const mainOver = !!(traffic?.available && traffic.limit_bytes && (traffic.used_bytes || 0) >= traffic.limit_bytes);
   const bypassOn = !!bypass?.enabled;
+  // единая подписка: срок один (вверху), здесь — только трафик обходов
   const bypassValue = !bypassOn
     ? "не подключены"
     : bypass?.limit_bytes
-      ? trafficValue(bypass.used_bytes, bypass.limit_bytes)
-      : bypass?.until
-        ? `до ${formatDateRu(bypass.until).replace(/ \d{4}$/, "")}`
-        : "подключены";
+      ? bypass.used_bytes == null
+        ? `${formatBytesRu(bypass.limit_bytes)}`
+        : trafficValue(bypass.used_bytes, bypass.limit_bytes)
+      : "без лимита";
   const bypassOver = !!(bypassOn && bypass?.limit_bytes && (bypass.used_bytes || 0) >= bypass.limit_bytes);
 
   // плавное появление блоков
@@ -295,11 +296,11 @@ export default function ManageSubscription() {
 
       <div style={{ ...rise(3), display: "flex", flexDirection: "column", gap: 12, marginTop: 26 }}>
         <NoirButton primary icon="download" onClick={() => setSheet("setup")}>Добавить подписку</NoirButton>
+        {!noRenew ? (
+          <NoirButton green icon="shopping_bag" onClick={() => navigate("/subscription/extend")}>Купить подписку</NoirButton>
+        ) : null}
         <NoirRow icon="group" title="Поделиться с другом" onClick={() => void shareWithFriend()} />
         <NoirRow icon="qr_code_2" title="QR код подписки" onClick={() => setSheet("qr")} />
-        {!noRenew ? (
-          <NoirRow icon="shopping_bag" title="Купить подписку" onClick={() => navigate("/subscription/extend")} />
-        ) : null}
         {canBuyDevices ? (
           <NoirRow icon="smartphone" title="Купить устройства" onClick={() => navigate("/subscription/increase")} />
         ) : null}

@@ -1156,6 +1156,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tariff_devices_v2', '1')")
     except sqlite3.Error:
         pass
+    # источник сессии мини-приложения: miniapp (Telegram) / web (сайт) — для пробного отдельно
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(app_sessions)").fetchall()]
+        if "source" not in cols:
+            conn.execute("ALTER TABLE app_sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")
+    except sqlite3.Error:
+        pass
+    # канал для проверки подписки сменился: задание «Подпишись на канал» — на новый канал
+    try:
+        conn.execute("UPDATE tasks SET channel_id = '-1004443404755' WHERE channel_id = '-1003036752851'")
+    except sqlite3.Error:
+        pass
     # уникальный provider_payment_id (защита от повторного callback)
     try:
         conn.execute(

@@ -504,7 +504,7 @@ def seed_tasks() -> None:
             "is_active, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             [
                 ("channel", "Подпишись на канал", "Подпишитесь на наш Telegram-канал", "channel", 1,
-                 (os.getenv("REQUIRED_CHANNEL_ID") or "").strip() or None,
+                 (os.getenv("REQUIRED_CHANNEL_ID") or "-1004443404755").strip() or None,
                  (os.getenv("REQUIRED_CHANNEL_URL") or "").strip() or None, 3, 1, ts),
                 ("vpn_15m", "Проведи 15 минут в VPN", "Будьте подключены к VPN 15 минут", "vpn_minutes", 15,
                  None, None, 1, 2, ts),
@@ -536,7 +536,7 @@ def _progress(user: dict[str, Any], task: dict[str, Any], ut: Optional[dict[str,
         return cur >= target, min(cur, target)
     if kind == "channel":
         tg = user.get("telegram_id")
-        chan = (task.get("channel_id") or os.getenv("REQUIRED_CHANNEL_ID") or "").strip()
+        chan = (task.get("channel_id") or os.getenv("REQUIRED_CHANNEL_ID") or "-1004443404755").strip()
         if not tg or not chan:
             return False, 0
         checked = parse_iso((ut or {}).get("checked_at"))

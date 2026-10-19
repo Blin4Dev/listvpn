@@ -340,15 +340,19 @@ export function NoirButton({
   children,
   onClick,
   primary,
+  green,
   disabled,
   icon,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   primary?: boolean;
+  /** зелёная кнопка того же размера (покупка) */
+  green?: boolean;
   disabled?: boolean;
   icon?: string;
 }) {
+  const filled = primary || green;
   return (
     <button
       type="button"
@@ -361,8 +365,8 @@ export function NoirButton({
         width: "100%",
         height: 56,
         borderRadius: 18,
-        border: primary ? "none" : `1px solid ${N.cardBorder}`,
-        background: disabled ? "rgba(60, 10, 12, 0.85)" : primary ? N.red : N.card,
+        border: filled ? "none" : `1px solid ${N.cardBorder}`,
+        background: disabled ? "rgba(60, 10, 12, 0.85)" : green ? "#16A34A" : primary ? N.red : N.card,
         color: disabled ? "rgba(170,160,160,0.75)" : N.text,
         fontSize: 17,
         fontWeight: 500,
@@ -371,7 +375,9 @@ export function NoirButton({
         justifyContent: "center",
         gap: 10,
         cursor: disabled ? "default" : "pointer",
-        boxShadow: primary && !disabled ? "0 14px 38px -12px rgba(224, 0, 0, 0.75)" : "none",
+        boxShadow: disabled ? "none"
+          : green ? "0 14px 38px -12px rgba(22, 163, 74, 0.75)"
+          : primary ? "0 14px 38px -12px rgba(224, 0, 0, 0.75)" : "none",
       }}
     >
       {icon ? <MSIcon name={icon} style={{ fontSize: 22, color: "inherit", fontVariationSettings: "'wght' 300" }} /> : null}

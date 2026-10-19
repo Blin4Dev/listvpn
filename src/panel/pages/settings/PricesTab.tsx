@@ -19,6 +19,9 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
     trialDays: '3', trialGb: '5', trialDevices: '1',
   });
   const [trialEnabled, setTrialEnabled] = useState(true);
+  // пробный отдельно: в мини-приложении (Telegram) и на сайте
+  const [trialMiniapp, setTrialMiniapp] = useState(true);
+  const [trialWeb, setTrialWeb] = useState(true);
   // тарифы по периодам (₽ и ⭐) и отдельные тарифы с белыми списками (анти-ключ FURK, как в старом боте)
   const PERIODS = ['1', '3', '6', '12'] as const;
   const PERIOD_TITLE: Record<string, string> = { '1': '1 месяц', '3': '3 месяца', '6': '6 месяцев', '12': '1 год' };
@@ -52,6 +55,8 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           trialDays: String(m.trial_days ?? 3), trialGb: String(m.trial_traffic_gb ?? 5), trialDevices: String(m.trial_devices ?? 1),
         });
         setTrialEnabled(m.trial_enabled !== false);
+        setTrialMiniapp(m.trial_miniapp_enabled !== false);
+        setTrialWeb(m.trial_web_enabled !== false);
         const toStr = (o: Record<string, number> | undefined, fb: Record<string, string>) =>
           Object.fromEntries(PERIODS.map((k) => [k, o && o[k] != null ? String(o[k]) : fb[k]]));
         setPeriodPrices((p) => toStr(m.period_prices, p));
@@ -84,6 +89,7 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           base_price: Number(f.base), extra_device_price: Number(f.extra),
           paid_traffic_gb: Number(f.paidGb), traffic_reset_price: Number(f.trafficReset),
           trial_enabled: trialEnabled, trial_days: Number(f.trialDays),
+          trial_miniapp_enabled: trialMiniapp, trial_web_enabled: trialWeb,
           trial_traffic_gb: Number(f.trialGb), trial_devices: Number(f.trialDevices),
           period_prices: Object.fromEntries(PERIODS.map((k) => [k, Number(periodPrices[k])])),
           period_stars: Object.fromEntries(PERIODS.map((k) => [k, Number(periodStars[k])])),
@@ -207,6 +213,24 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
               <div style={{ fontWeight: 500 }}>Пробный период включён</div>
               <Toggle on={trialEnabled} onChange={() => setTrialEnabled(!trialEnabled)} />
             </div>
+            {trialEnabled && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="inset flex items-center justify-between gap-3" style={{ padding: 14 }}>
+                  <div>
+                    <div style={{ fontWeight: 500 }}>В мини-приложении</div>
+                    <div className="faint" style={{ fontSize: 12 }}>Telegram Mini App</div>
+                  </div>
+                  <Toggle on={trialMiniapp} onChange={() => setTrialMiniapp(!trialMiniapp)} />
+                </div>
+                <div className="inset flex items-center justify-between gap-3" style={{ padding: 14 }}>
+                  <div>
+                    <div style={{ fontWeight: 500 }}>На сайте</div>
+                    <div className="faint" style={{ fontSize: 12 }}>Вход через браузер (почта / Telegram)</div>
+                  </div>
+                  <Toggle on={trialWeb} onChange={() => setTrialWeb(!trialWeb)} />
+                </div>
+              </div>
+            )}
             {trialEnabled && (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div><label className="field-label">Срок, дней</label><input className="input" type="number" min={1} max={365} value={f.trialDays} onChange={set('trialDays')} /></div>

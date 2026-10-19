@@ -287,7 +287,7 @@ def user_whitelist(user: Optional[dict[str, Any]]) -> dict[str, Any]:
 
 
 def grant_whitelist(user: dict[str, Any], months: int = 1, idem: Optional[str] = None,
-                    *, days: Optional[int] = None) -> dict[str, Any]:
+                    *, days: Optional[int] = None, until: Optional[datetime] = None) -> dict[str, Any]:
     """выпустить/продлить анти-ключ FURK на months или days (логика старого process_payment для anti_*).
     idem — ключ идемпотентности (id платежа): повторная обработка не спишет деньги у FURK дважды."""
     add_days = int(days) if days is not None else DAYS_PER_MONTH * max(1, int(months or 1))
@@ -304,7 +304,11 @@ def grant_whitelist(user: dict[str, Any], months: int = 1, idem: Optional[str] =
         out["error"] = "furk_not_configured"
         return out
     try:
-        if days is not None:
+        if until is not None:
+            # единая подписка: ключ обхода заканчивается вместе с ВПН
+            res = furk.issue_or_renew(cur["key_id"], idem=f"blin-{idem}" if idem else None,
+                                      until_ts=int(until.timestamp()))
+        elif days is not None:
             res = furk.issue_or_renew(cur["key_id"], idem=f"blin-{idem}" if idem else None, days=int(days))
         else:
             res = furk.issue_or_renew(cur["key_id"], max(1, int(months or 1)),
@@ -314,20 +318,22 @@ def grant_whitelist(user: dict[str, Any], months: int = 1, idem: Optional[str] =
         out["error_code"] = getattr(exc, "code", None)
         return out
     # срок — как у провайдера; если не пришёл, считаем сами: от текущего (или сейчас) + срок
-    until = None
+    until_s: Optional[str] = None
     try:
         if res.get("expires_at"):
-            until = iso(datetime.fromtimestamp(int(res["expires_at"]), tz=timezone.utc))
+            until_s = iso(datetime.fromtimestamp(int(res["expires_at"]), tz=timezone.utc))
     except (TypeError, ValueError, OSError):
-        until = None
-    if not until:
+        until_s = None
+    if not until_s and until is not None:
+        until_s = iso(until)
+    if not until_s:
         prev = parse_iso(cur["until"])
         base = prev if (prev and prev > utcnow()) else utcnow()
-        until = iso(base + timedelta(days=max(1, add_days)))
+        until_s = iso(base + timedelta(days=max(1, add_days)))
     key_url = res.get("subscription_url") or cur["key"]
     db.execute("UPDATE users SET anti_key = ?, anti_key_id = ?, anti_expires_at = ?, anti_last_idem = ? WHERE id = ?",
-               (key_url, res["id"], until, str(idem) if idem else None, int(user["id"])))
-    out.update(ok=True, key=key_url, key_id=res["id"], until=until)
+               (key_url, res["id"], until_s, str(idem) if idem else None, int(user["id"])))
+    out.update(ok=True, key=key_url, key_id=res["id"], until=until_s)
     return out
 
 
@@ -872,7 +878,7 @@ def grant_subscription(
             (iso(new_exp), new_devices, paid_traffic_gb(), 1 if upgrading_trial else 0,
              db.dumps(squads), target["id"]),
         )
-        wl = _grant_whitelist_safe(user, months, idem_key) if whitelist else None
+        wl = _grant_whitelist_safe(user, months, idem_key, until=new_exp) if whitelist else None
         _apply_provision_to_sub(target, prov)
         _sync_user_status(int(user["id"]))
         if db.fetchone("SELECT id FROM subscriptions WHERE user_id = ? AND grace_until IS NOT NULL LIMIT 1", (int(user["id"]),)):
@@ -916,7 +922,7 @@ def grant_subscription(
         user=user, devices=max(1, total_devices), expire_at=new_exp, provision=prov,
         traffic_gb=paid_traffic_gb(), sub_type="vpn", squads=squads,
     )
-    wl = _grant_whitelist_safe(user, months, idem_key) if whitelist else None
+    wl = _grant_whitelist_safe(user, months, idem_key, until=new_exp) if whitelist else None
     return {
         "subscription_id": sub["id"],
         "expires_at": sub.get("expires_at"),
@@ -928,9 +934,18 @@ def grant_subscription(
     }
 
 
-def _grant_whitelist_safe(user: dict[str, Any], months: int, idem: Optional[str] = None) -> dict[str, Any]:
-    """анти-ключ после продления ВПН; ошибка FURK не отменяет подписку — алерт админу (как в старом боте)."""
-    res = grant_whitelist(user, months, idem=idem)
+def _grant_whitelist_safe(user: dict[str, Any], months: int, idem: Optional[str] = None,
+                          until: Optional[datetime] = None) -> dict[str, Any]:
+    """анти-ключ после продления ВПН; ошибка FURK не отменяет подписку — алерт админу (как в старом боте).
+    until — конец подписки ВПН: единая подписка, ключ обхода заканчивается в тот же день."""
+    res = grant_whitelist(user, months, idem=idem, until=until)
+    # итог выдачи белых списков — в лог контейнера (docker logs blinvpn-api / blinvpn-webhook)
+    if res.get("ok"):
+        print(f"[whitelist] user {user.get('id')}: +{months} мес, ключ {res.get('key_id')}, "
+              f"до {res.get('until')} (было {res.get('prev_until') or '—'})"
+              f"{' [уже выдано по этому платежу]' if res.get('already') else ''}", flush=True)
+    else:
+        print(f"[whitelist] user {user.get('id')}: НЕ выдано — {res.get('error')}", flush=True)
     if not res.get("ok"):
         title = ("FURK: недостаточно средств на балансе партнёра — белые списки НЕ выданы"
                  if res.get("error_code") == "INSUFFICIENT_FUNDS"

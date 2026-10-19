@@ -158,7 +158,7 @@ def _env_int(key: str, default: int) -> int:
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
 TELEGRAM_WEBHOOK_SECRET = _env("TELEGRAM_WEBHOOK_SECRET")
 # обязательная подписка на канал (только telegram-вход)
-REQUIRED_CHANNEL_ID = _env("REQUIRED_CHANNEL_ID", "-1003036752851")
+REQUIRED_CHANNEL_ID = _env("REQUIRED_CHANNEL_ID", "-1004443404755")
 REQUIRED_CHANNEL_URL = _env("REQUIRED_CHANNEL_URL", "https://t.me/blinvpn")
 CHANNEL_CHECK_TTL = _env_int("CHANNEL_CHECK_TTL", 600)  # кэш проверки подписки, сек
 TELEGRAM_ADMIN_ID = _env("TELEGRAM_ADMIN_ID")
@@ -605,12 +605,13 @@ EMAIL_CODE_TTL = 600          # 10 минут
 EMAIL_CODE_RESEND = 60        # анти-спам на повторную отправку
 
 
-def create_app_session(user_id: int) -> str:
+def create_app_session(user_id: int, source: str = "web") -> str:
+    """source: miniapp — вход из Telegram Mini App (initData), web — сайт (email / Telegram OAuth)."""
     token = gen_token()
     now = time.time()
     db.execute(
-        "INSERT INTO app_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-        (_token_hash(token), int(user_id), now, now + APP_SESSION_TTL),
+        "INSERT INTO app_sessions (token, user_id, created_at, expires_at, source) VALUES (?, ?, ?, ?, ?)",
+        (_token_hash(token), int(user_id), now, now + APP_SESSION_TTL, "miniapp" if source == "miniapp" else "web"),
     )
     # оставляем 10 свежих сессий, истёкшие удаляем
     db.execute(
@@ -877,7 +878,7 @@ def no_renew_for_user(user_id: int) -> bool:
     ))
 
 
-def serialize_app_user(u: dict[str, Any]) -> dict[str, Any]:
+def serialize_app_user(u: dict[str, Any], source: Optional[str] = None) -> dict[str, Any]:
     status = subscription_status_for_user(u)
     until = paid_until_for_user(int(u["id"]))
     return {
@@ -896,7 +897,7 @@ def serialize_app_user(u: dict[str, Any]) -> dict[str, Any]:
         "discount": active_discount_for_user(int(u["id"])),
         # принял ли оферту и политику
         "terms_accepted": bool(u.get("terms_accepted_at")),
-        "trial_available": _trial_available_for(int(u["id"])),
+        "trial_available": _trial_available_for(int(u["id"]), source),
     }
 
 
@@ -1454,6 +1455,37 @@ def trial_enabled() -> bool:
     return db.get_setting("trial_enabled", "1") in ("1", "true", "True", "yes")
 
 
+TRIAL_SOURCES = ("miniapp", "web")
+
+
+def trial_source_enabled(source: str) -> bool:
+    """пробный отдельно для мини-приложения (miniapp) и сайта (web); общий выключатель — trial_enabled."""
+    src = source if source in TRIAL_SOURCES else "web"
+    return db.get_setting(f"trial_{src}_enabled", "1") in ("1", "true", "True", "yes")
+
+
+def trial_enabled_for(source: Optional[str]) -> bool:
+    if not trial_enabled():
+        return False
+    return True if source is None else trial_source_enabled(source)
+
+
+def app_source(request: Optional[Request]) -> str:
+    """откуда запрос: miniapp — Telegram Mini App, web — сайт.
+    Определяется при авторизации (_app_user_from_init); подделать нельзя: initData подписан Telegram,
+    а у сессии источник записан при входе."""
+    if request is None:
+        return "web"
+    via = getattr(request.state, "app_via", None)
+    if via in TRIAL_SOURCES:
+        return via
+    if (request.headers.get("X-Telegram-Init-Data") or "").strip():
+        return "miniapp"  # только для отображения; проверка — при авторизации
+    token = _extract_app_token(request.headers.get("Authorization"), request.headers.get("X-App-Session"))
+    sess = get_app_session(token) if token else None
+    return "miniapp" if (sess and sess.get("source") == "miniapp") else "web"
+
+
 MAX_PLAN_DEVICES = 20
 
 
@@ -1470,6 +1502,8 @@ def get_plans_meta() -> dict[str, Any]:
         "base_price": _float_setting("base_price", 99),
         "extra_device_price": _float_setting("extra_device_price", 40),
         "trial_enabled": trial_enabled(),
+        "trial_miniapp_enabled": trial_source_enabled("miniapp"),
+        "trial_web_enabled": trial_source_enabled("web"),
         "trial_days": fulfillment.trial_days(),
         "trial_traffic_gb": fulfillment.trial_traffic_gb(),
         "trial_devices": fulfillment.trial_devices(),
@@ -2206,6 +2240,9 @@ class PlansUpdateBody(BaseModel):
     base_price: Optional[float] = None
     extra_device_price: Optional[float] = None
     trial_enabled: Optional[bool] = None
+    # пробный отдельно: в мини-приложении (Telegram) и на сайте
+    trial_miniapp_enabled: Optional[bool] = None
+    trial_web_enabled: Optional[bool] = None
     trial_days: Optional[int] = None
     trial_traffic_gb: Optional[int] = None
     trial_devices: Optional[int] = None
@@ -5897,6 +5934,10 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
         db.set_setting("extra_device_price", f"{_num(body.extra_device_price, 0, 100000):g}")
     if body.trial_enabled is not None:
         db.set_setting("trial_enabled", "1" if body.trial_enabled else "0")
+    if body.trial_miniapp_enabled is not None:
+        db.set_setting("trial_miniapp_enabled", "1" if body.trial_miniapp_enabled else "0")
+    if body.trial_web_enabled is not None:
+        db.set_setting("trial_web_enabled", "1" if body.trial_web_enabled else "0")
     if body.trial_days is not None:
         db.set_setting("trial_days", str(int(_num(body.trial_days, 1, 365))))
     if body.trial_traffic_gb is not None:
@@ -5980,7 +6021,7 @@ def app_config(request: Request) -> dict[str, Any]:
         "minPrice": min_plan_price(),
         "legalAvailable": bool(offer.strip() or privacy.strip()),
         "supportUrl": _env("SUPPORT_URL") or "",
-        "trialEnabled": trial_enabled(),
+        "trialEnabled": trial_enabled_for(app_source(request)),
         "trialDays": fulfillment.trial_days(),
         "providerMin": PROVIDER_MIN_RUB,
         "payMethods": pay_methods(),
@@ -6036,8 +6077,8 @@ def app_auth(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegra
     data = validate_webapp_init_data(x_telegram_init_data or "")
     user = _resolve_app_user_from_tg(data.get("user") or {}, allow_banned=True)
     # сессия-страховка, когда initdata протух
-    token = create_app_session(int(user["id"]))
-    return {"user": serialize_app_user(user), "token": token}
+    token = create_app_session(int(user["id"]), "miniapp")
+    return {"user": serialize_app_user(user, "miniapp"), "token": token}
 
 
 def _apply_web_referral(user_id: int, code: Optional[str]) -> None:
@@ -6087,7 +6128,7 @@ def app_auth_oauth(body: OauthLoginBody, request: Request = None) -> dict[str, A
     else:
         _notify_login(user, "Telegram", request)
     token = create_app_session(int(user["id"]))
-    return {"user": serialize_app_user(user), "token": token}
+    return {"user": serialize_app_user(user, "web"), "token": token}
 
 
 @app.post("/api/app/auth/email/request")
@@ -6147,7 +6188,7 @@ def app_auth_email_verify(body: EmailVerifyBody, request: Request = None) -> dic
     else:
         _notify_login(user, "код на почту", request)
     token = create_app_session(int(user["id"]))
-    return {"user": serialize_app_user(user), "token": token}
+    return {"user": serialize_app_user(user, "web"), "token": token}
 
 
 @app.post("/api/app/auth/logout")
@@ -6189,15 +6230,18 @@ def _app_user_from_init(
                 raise
             if user.get("is_banned") and not allow_banned:
                 raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
+            request.state.app_via = "miniapp"
             return user
         tg = data.get("user") or {}
         if tg.get("id"):
+            request.state.app_via = "miniapp"
             return _resolve_app_user_from_tg(tg, allow_banned)
     # 2) сессионный токен (email / oauth)
     if token:
         sess = get_app_session(token)
         if not sess:
             raise HTTPException(401, detail={"message": "Сессия истекла, войдите заново"})
+        request.state.app_via = "miniapp" if sess.get("source") == "miniapp" else "web"
         user = get_user(int(sess["user_id"]))
         if not user:
             raise HTTPException(401, detail={"message": "Пользователь не найден"})
@@ -6277,10 +6321,10 @@ def app_membership(
 
 
 @app.get("/api/app/me")
-def app_me(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+def app_me(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    return {"user": serialize_app_user(fresh)}
+    return {"user": serialize_app_user(fresh, app_source(request))}
 
 
 @app.post("/api/app/me/email/request")
@@ -6316,13 +6360,13 @@ def app_me_email_request(body: UpdateEmailBody, user: dict = Depends(_app_user_f
 
 
 @app.post("/api/app/me/terms")
-def app_me_accept_terms(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+def app_me_accept_terms(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     """согласие с офертой и политикой."""
     db.execute("UPDATE users SET terms_accepted_at = COALESCE(terms_accepted_at, ?) WHERE id = ?",
                (iso(), user["id"]))
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    return {"user": serialize_app_user(fresh)}
+    return {"user": serialize_app_user(fresh, app_source(request))}
 
 
 @app.put("/api/app/me/email")
@@ -6348,11 +6392,11 @@ def app_me_email(body: EmailVerifyBody, request: Request, user: dict = Depends(_
     _email_changed(old_email, email)
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    return {"user": serialize_app_user(fresh), "merged": merged}
+    return {"user": serialize_app_user(fresh, app_source(request)), "merged": merged}
 
 
 @app.delete("/api/app/me/email")
-def app_me_email_unbind(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+def app_me_email_unbind(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
     if not fresh.get("telegram_id"):
@@ -6361,11 +6405,11 @@ def app_me_email_unbind(user: dict = Depends(_app_user_from_init)) -> dict[str, 
     _email_changed(fresh.get("email"), None)
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    return {"user": serialize_app_user(fresh)}
+    return {"user": serialize_app_user(fresh, app_source(request))}
 
 
 @app.put("/api/app/me/telegram")
-def app_me_telegram(body: OauthBody, merge: bool = Query(False),
+def app_me_telegram(body: OauthBody, request: Request, merge: bool = Query(False),
                     user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     """привязать telegram; при конфликте 409 или merge=1."""
     validated = validate_oauth_login(body.model_dump())
@@ -6396,7 +6440,7 @@ def app_me_telegram(body: OauthBody, merge: bool = Query(False),
                 client.update_user(id=rw_id, telegram_id=new_tg)
         except Exception as exc:  # noqa: BLE001
             forum.report_error("Смена Telegram: не удалось обновить Remnawave", f"user {user['id']}: {type(exc).__name__}: {exc}")
-    return {"user": serialize_app_user(fresh)}
+    return {"user": serialize_app_user(fresh, app_source(request))}
 
 
 def _has_trial_ever(user_id: int) -> bool:
@@ -6440,9 +6484,9 @@ def _trial_blocks(user_id: int) -> Optional[str]:
     return None
 
 
-def _trial_available_for(user_id: int) -> bool:
-    """пробный доступен: вкл, нет живой/платной подписки, tg ещё не брал (или сбросили)."""
-    if not trial_enabled():
+def _trial_available_for(user_id: int, source: Optional[str] = None) -> bool:
+    """пробный доступен: вкл (в т.ч. для мини-приложения/сайта), нет живой/платной подписки, tg ещё не брал."""
+    if not trial_enabled_for(source):
         return False
     return _trial_blocks(user_id) is None
 
@@ -6456,11 +6500,15 @@ def _bypass_info(user_id: int) -> dict[str, Any]:
                            "available": fulfillment.whitelist_available()}
     if on and wl["key_id"] and fulfillment.whitelist_available():
         out.update(fulfillment.furk.traffic(str(wl["key_id"])))
+    if on and not out.get("limit_bytes") and not out.get("unlimited"):
+        # трафик у FURK не узнали — показываем лимит ключа (500 ГБ), а не дату
+        out.setdefault("used_bytes", None)
+        out["limit_bytes"] = int(getattr(fulfillment.furk, "ANTI_TRAFFIC_GB", 500)) * 1024 ** 3
     return out
 
 
 @app.get("/api/app/subscription")
-def app_subscription(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+def app_subscription(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
     keys = db.fetchall(
@@ -6488,8 +6536,8 @@ def app_subscription(user: dict = Depends(_app_user_from_init)) -> dict[str, Any
         "keys": [k for k in serialized if k.get("status") != "Deleted"],
         # белые списки (отдельный сквад) — «Обходы» в мини-приложении
         "bypass": _bypass_info(int(fresh["id"])) if status in ("active", "trial") else None,
-        "trial_enabled": trial_enabled(),
-        "trial_available": _trial_available_for(int(fresh["id"])),
+        "trial_enabled": trial_enabled_for(app_source(request)),
+        "trial_available": _trial_available_for(int(fresh["id"]), app_source(request)),
     }
 
 
@@ -6574,8 +6622,8 @@ def unfreeze_legacy_frozen_subscriptions() -> int:
 
 
 @app.post("/api/app/trial")
-def app_activate_trial(user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
-    """активация бесплатного пробного."""
+def app_activate_trial(request: Request, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """активация бесплатного пробного (отдельно вкл/выкл для мини-приложения и сайта)."""
     allowed, retry = ratelimit.rate_limit(f"trial:{user['id']}", 5, 3600)
     if not allowed:
         raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
@@ -6583,8 +6631,10 @@ def app_activate_trial(user: dict = Depends(require_channel_dep)) -> dict[str, A
     assert fresh is not None
     if not fresh.get("terms_accepted_at"):
         raise HTTPException(403, detail={"message": "Сначала примите условия оферты и политику конфиденциальности"})
-    if not trial_enabled():
-        raise HTTPException(403, detail={"message": "Пробный период сейчас недоступен"})
+    src = app_source(request)
+    if not trial_enabled_for(src):
+        print(f"[trial] отказ user {fresh['id']}: выключен для {src}", flush=True)
+        raise HTTPException(403, detail={"message": "Пробный период сейчас недоступен", "code": "trial_disabled"})
     if not fresh.get("telegram_id"):
         raise HTTPException(400, detail={"message": "Пробный доступен только при входе через Telegram",
                                          "code": "need_telegram"})

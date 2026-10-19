@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import urllib.error
@@ -194,37 +195,89 @@ def _limit_gb(key: dict[str, Any]) -> int:
     return 0
 
 
+def _edit_or_new(key: dict[str, Any], period: dict[str, int], _k) -> dict[str, Any]:
+    """перевести ключ на тариф 500 ГБ; если и это нельзя (KEY_NOT_ELIGIBLE) — выпустить новый."""
+    try:
+        res = edit_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("edit"), **period)
+        if res.get("id"):
+            return res
+    except FurkError as exc:
+        if exc.code != "KEY_NOT_ELIGIBLE":
+            raise
+    return create_key(ANTI_TRAFFIC_GB, idem=_k("create"), **period)
+
+
+def _days_until(until_ts: int, from_ts: float) -> int:
+    """сколько дней нужно, чтобы ключ закончился к until_ts (API: 1…1095 дней)."""
+    return max(1, min(1095, int(math.ceil((int(until_ts) - from_ts) / 86400.0))))
+
+
 def issue_or_renew(key_id: Optional[str], months: Optional[int] = None, idem: Optional[str] = None,
-                   days: Optional[int] = None) -> dict[str, Any]:
+                   days: Optional[int] = None, until_ts: Optional[int] = None) -> dict[str, Any]:
     """логика старого бота: продлить анти-ключ или выпустить новый (500 ГБ).
+    until_ts — единая подписка: ключ должен закончиться тогда же, когда ВПН (unix-время);
+    срок считается сам — от текущего окончания ключа (продление) или от сейчас (новый/смена тарифа).
     Возвращает {"id", "subscription_url", "expires_at"}."""
-    period = dict(days=days) if days is not None else dict(months=max(1, min(36, int(months or 1))))
+    now = time.time()
+    if until_ts is not None:
+        period = dict(days=_days_until(until_ts, now))  # для нового ключа / смены тарифа — от сейчас
+    else:
+        period = dict(days=days) if days is not None else dict(months=max(1, min(36, int(months or 1))))
     tag = (idem or "").strip()
 
     def _k(step: str) -> Optional[str]:
         return f"{tag}:{step}" if tag else None
 
     key = key_info(key_id) if key_id else None
+    changed = False
+    if key is not None and key.get("is_trial"):
+        # старые пробные ключи (is_trial: true) по API нельзя ни продлить, ни изменить —
+        # выдаём новый платный ключ вместо него
+        key = None
     if key is None:
         key = create_key(ANTI_TRAFFIC_GB, idem=_k("create"), **period)
+        changed = True
     else:
         tr = key.get("traffic") or {}
-        if key.get("is_trial") or tr.get("unlimited"):
-            # продление/расширение для пробных и безлимитных недоступно — меняем тариф
-            key = edit_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("edit"), **period) or key
+        if tr.get("unlimited"):
+            # безлимитный нельзя продлить — меняем тариф (срок от текущего момента)
+            key = _edit_or_new(key, period, _k)
+            changed = True
         else:
+            old_id = str(key["id"])
+            renew_period = period
+            skip = False
+            if until_ts is not None:
+                # продление добавляется к текущему окончанию ключа (если истёк — к сейчас)
+                try:
+                    cur_end = float(key.get("expires_at") or 0)
+                except (TypeError, ValueError):
+                    cur_end = 0.0
+                base = max(cur_end, now)
+                skip = int(until_ts) - base < 3600  # ключ и так действует до конца подписки
+                renew_period = dict(days=_days_until(until_ts, base))
             try:
-                key = renew_key(key["id"], idem=_k("renew"), **period) or key
+                if not skip:
+                    key = renew_key(old_id, idem=_k("renew"), **renew_period) or {}
+                    if not key.get("id"):  # ответ без ключа — свежая карточка того же ключа
+                        key = key_info(old_id) or {"id": old_id}
             except FurkError as exc:
                 if exc.code != "KEY_NOT_ELIGIBLE":
                     raise
-                key = edit_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("edit"), **period) or key
-            if _limit_gb(key) and _limit_gb(key) < ANTI_TRAFFIC_GB:
+                key = _edit_or_new(key, period, _k)
+            changed = True
+            if key.get("id") and _limit_gb(key) and _limit_gb(key) < ANTI_TRAFFIC_GB:
                 try:
                     key = expand_key(key["id"], ANTI_TRAFFIC_GB, idem=_k("expand")) or key
                 except FurkError as exc:
                     if exc.code != "KEY_NOT_ELIGIBLE":
                         raise
+    if changed and key.get("id") and not (key.get("expires_at") and key.get("subscription_url")):
+        # в ответе нет срока — берём актуальную карточку ключа, а не старую
+        try:
+            key = key_info(str(key["id"])) or key
+        except FurkError:
+            pass
     if not key.get("id"):
         raise FurkError(0, "BAD_RESPONSE", "в ответе нет id ключа")
     return {"id": str(key["id"]), "subscription_url": key.get("subscription_url"),
@@ -247,5 +300,21 @@ def traffic(key_id: str) -> dict[str, Any]:
         except (TypeError, ValueError):
             return None
 
-    return {"used_bytes": _n(tr.get("used_bytes")),
-            "limit_bytes": 0 if tr.get("unlimited") else (_n(tr.get("limit_bytes")) or 0)}
+    gb = 1024 ** 3
+
+    def _bytes(b_key: str, gb_key: str) -> Optional[int]:
+        v = _n(tr.get(b_key))
+        if v is not None:
+            return v
+        g = tr.get(gb_key)
+        try:
+            return int(float(g) * gb) if g is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    used = _bytes("used_bytes", "used_gb")
+    if tr.get("unlimited"):
+        limit = 0
+    else:
+        limit = _bytes("limit_bytes", "limit_gb") or _bytes("base_limit_bytes", "base_limit_gb") or 0
+    return {"used_bytes": used, "limit_bytes": limit, "unlimited": bool(tr.get("unlimited"))}
