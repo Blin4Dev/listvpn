@@ -22,6 +22,7 @@ export interface UserDetailData {
   aa_warning?: { sub_id: number; at: string; reason: string | null; grace_until: string; valid_until: string } | null;
   balance: number; partner_rate: number;
   partner_balance: number; is_partner: boolean; has_trial: boolean; trial_resettable?: boolean;
+  trial_status?: Record<string, { available: boolean; reason: string | null; text: string }>;
   referrals: { id: number; telegram_id: number | null; username: string | null; email: string | null; full_name: string | null }[];
   subscription: any | null;
   discount?: { percent: number; expires_at: string | null; code: string | null; name: string | null } | null;
@@ -240,9 +241,24 @@ export const UserDetailPage: React.FC<{
             )}
           </InfoRow>
           <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
+          {detail.trial_status && (
+            <InfoRow label="Пробный">
+              <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {(['miniapp', 'web'] as const).map((src) => {
+                  const t = detail.trial_status?.[src];
+                  if (!t) return null;
+                  return (
+                    <span key={src} className={t.available ? '' : 'faint'}>
+                      {src === 'miniapp' ? 'Мини-приложение' : 'Сайт'}: {t.available ? 'можно взять' : `нельзя — ${t.text || t.reason}`}
+                    </span>
+                  );
+                })}
+              </span>
+            </InfoRow>
+          )}
           {canEdit && (
             <div className="flex gap-2 mt-3">
-              <button className="btn sm" disabled={!(detail.trial_resettable ?? detail.has_trial)} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
+              <button className="btn sm" title={(detail.trial_resettable ?? detail.has_trial) ? '' : 'Сбрасывать нечего — пробный и так доступен'} disabled={!(detail.trial_resettable ?? detail.has_trial)} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
             </div>
           )}
         </DCard>
