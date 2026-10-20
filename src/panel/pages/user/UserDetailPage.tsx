@@ -21,7 +21,7 @@ export interface UserDetailData {
   moderation?: { id: number; kind: string; label: string; reason: string | null; sub_id: number | null; actor: string | null; actor_name: string | null; created_at: string | null }[];
   aa_warning?: { sub_id: number; at: string; reason: string | null; grace_until: string; valid_until: string } | null;
   balance: number; partner_rate: number;
-  partner_balance: number; is_partner: boolean; has_trial: boolean;
+  partner_balance: number; is_partner: boolean; has_trial: boolean; trial_resettable?: boolean;
   referrals: { id: number; telegram_id: number | null; username: string | null; email: string | null; full_name: string | null }[];
   subscription: any | null;
   discount?: { percent: number; expires_at: string | null; code: string | null; name: string | null } | null;
@@ -242,7 +242,7 @@ export const UserDetailPage: React.FC<{
           <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
           {canEdit && (
             <div className="flex gap-2 mt-3">
-              <button className="btn sm" disabled={!detail.has_trial} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
+              <button className="btn sm" disabled={!(detail.trial_resettable ?? detail.has_trial)} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
             </div>
           )}
         </DCard>

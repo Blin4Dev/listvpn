@@ -272,6 +272,8 @@ def extend_subscription(sub: dict[str, Any], days: int) -> None:
         (iso(base + timedelta(days=int(days))), int(sub["id"])),
     )
     fulfillment._sync_user_status(int(sub["user_id"]))
+    if int(days) > 0:
+        fulfillment.sync_whitelist_to_vpn_bg([int(sub["user_id"])], "task")  # единая подписка
 
 
 # ═════════════════════════ очередь выдачи (provisioning_jobs) ═════════════════════════

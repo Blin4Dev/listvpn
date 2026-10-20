@@ -3947,6 +3947,8 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "blacklist_reason": blacklist.reason_for(user.get("telegram_id")) if user.get("telegram_id") else None,
         "blacklist_ignored": bool(user.get("blacklist_ignored")),
         "has_trial": has_trial,
+        # кнопка «Сбросить триал»: активна, если пробный сейчас взять нельзя (брал, платил, удаляли аккаунт)
+        "trial_resettable": _trial_blocks(user_id) is not None,
         "referrals": [
             {
                 "id": u["id"],
@@ -4026,6 +4028,7 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
     if action == "EXTEND_SUB":
         extend_user_sub(user_id, int(float(value or 0)), body.subscription_id)
         _rw_sync_expiry(user)
+        fulfillment.sync_whitelist_to_vpn_bg([user_id], "panel")  # единая подписка: обход до той же даты
     elif action == "REDUCE_SUB":
         extend_user_sub(user_id, -int(float(value or 0)), body.subscription_id)
         _rw_sync_expiry(user)
@@ -4226,6 +4229,7 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
             raise HTTPException(400, detail={"message": "Пробная подписка ещё действует — сбросить можно после её окончания"})
         db.execute("DELETE FROM subscriptions WHERE user_id = ? AND type = 'trial'", (user_id,))
         _clear_trial_claim(user_id, user.get("telegram_id"))
+        db.execute("UPDATE users SET trial_reset = 1 WHERE id = ?", (user_id,))
         sync_user_status_from_subs(user_id)
     elif action == "APPLY_PROMO":
         code = str(value or "").strip()
@@ -4249,6 +4253,7 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
                 client.delete_user(_rw_num_id(rw))
             except Exception:  # noqa: BLE001
                 pass
+        _clear_trial_claim(user_id, user.get("telegram_id"))  # удалённый аккаунт — как новый, пробный снова доступен
         _delete_user_keep_history(user_id)
         return {"success": True, "deleted": True}
     else:
@@ -4355,6 +4360,12 @@ def _mass_add_days_worker(sub_ids: list[int], days: int) -> None:
             if user:
                 _rw_sync_expiry(user)
     print(f"[mass] +{days} дн.: продлено подписок {len(sub_ids)}, пользователей {len(done_users)}", flush=True)
+    if days > 0:
+        for uid in done_users:  # единая подписка: обход до той же даты (уже в фоновом потоке)
+            try:
+                fulfillment.sync_whitelist_to_vpn(uid, "mass")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[whitelist] user {uid}: синхронизация не удалась — {exc}", flush=True)
 
 
 def _mass_reset_traffic_worker() -> None:
@@ -6457,6 +6468,15 @@ def _clear_trial_claim(user_id: int, telegram_id: Optional[int] = None) -> None:
 
 def _trial_blocks(user_id: int) -> Optional[str]:
     """почему пробный недоступен; None — можно выдать."""
+    u0 = get_user(int(user_id)) or {}
+    if int(u0.get("trial_reset") or 0):
+        # админ сбросил пробный: мешает только живая подписка (старые/платные в прошлом — нет)
+        if db.fetchone(
+            "SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('Active', 'Banned') "
+            "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1", (int(user_id), iso()),
+        ):
+            return "has_sub"
+        return None
     if db.fetchone(
         "SELECT id FROM subscriptions WHERE user_id = ? AND status != 'Deleted' LIMIT 1",
         (int(user_id),),
@@ -6647,6 +6667,7 @@ def app_activate_trial(request: Request, user: dict = Depends(require_channel_de
         raise HTTPException(400, detail={"message": "Пробный период уже был активирован", "code": "trial_used"})
     try:
         result = fulfillment.grant_trial(fresh)
+        db.execute("UPDATE users SET trial_reset = 0 WHERE id = ?", (int(fresh["id"]),))
     except Exception as exc:  # noqa: BLE001
         db.execute("DELETE FROM trial_claims WHERE telegram_id = ? AND user_id = ?", (int(fresh["telegram_id"]), int(fresh["id"])))
         forum.report_error("Не удалось выдать пробную подписку", f"{type(exc).__name__}: {exc}")

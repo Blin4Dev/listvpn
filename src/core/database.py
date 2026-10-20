@@ -911,6 +911,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "anti_key_id": "ALTER TABLE users ADD COLUMN anti_key_id TEXT",
             # платёж, по которому анти-ключ уже выдан (повторная обработка не спишет у FURK второй раз)
             "anti_last_idem": "ALTER TABLE users ADD COLUMN anti_last_idem TEXT",
+            # админ сбросил пробный: можно взять снова, даже если раньше была платная подписка
+            "trial_reset": "ALTER TABLE users ADD COLUMN trial_reset INTEGER NOT NULL DEFAULT 0",
             # когда принял оферту и политику
             "terms_accepted_at": "ALTER TABLE users ADD COLUMN terms_accepted_at TEXT",
             "first_start_at": "ALTER TABLE users ADD COLUMN first_start_at TEXT",

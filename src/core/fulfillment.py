@@ -961,6 +961,45 @@ def _grant_whitelist_safe(user: dict[str, Any], months: int, idem: Optional[str]
     return res
 
 
+def sync_whitelist_to_vpn(user_id: int, reason: str = "sync") -> Optional[dict[str, Any]]:
+    """единая подписка: ключ обхода (FURK) продлить до конца ВПН — после продления не через оплату
+    (панель «+дни», массовое продление, награды за задания). Только тем, у кого ключ уже есть;
+    если ключ и так действует дольше — FURK не трогаем (не платим)."""
+    if not whitelist_available():
+        return None
+    user = get_user(int(user_id))
+    if not user:
+        return None
+    cur = user_whitelist(user)
+    if not cur.get("key_id"):
+        return None
+    row = db.fetchone(
+        "SELECT expires_at FROM subscriptions WHERE user_id = ? AND status = 'Active' AND type != 'trial' "
+        "AND expires_at IS NOT NULL ORDER BY expires_at DESC LIMIT 1", (int(user_id),))
+    end = parse_iso((row or {}).get("expires_at"))
+    if not end or end <= utcnow():
+        return None
+    have = parse_iso(cur.get("until"))
+    if have and have >= end - timedelta(hours=1):
+        return None  # обход уже действует до конца ВПН
+    idem = f"{reason}-{int(user_id)}-{int(end.timestamp())}"
+    return _grant_whitelist_safe(user, max(1, int((end - utcnow()).days // DAYS_PER_MONTH) or 1), idem, until=end)
+
+
+def sync_whitelist_to_vpn_bg(user_ids: list[int], reason: str = "sync") -> None:
+    """то же в фоне (FURK отвечает медленно — не держим запрос панели)."""
+    import threading
+
+    def run() -> None:
+        for uid in user_ids:
+            try:
+                sync_whitelist_to_vpn(int(uid), reason)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[whitelist] user {uid}: синхронизация не удалась — {exc}", flush=True)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _wl_undo(wl: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not wl:
         return {"whitelist": False}
