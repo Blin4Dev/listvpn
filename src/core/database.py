@@ -1158,6 +1158,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tariff_devices_v2', '1')")
     except sqlite3.Error:
         pass
+    # пометки «брал пробный» от удалённых через панель аккаунтов: вернувшийся человек — как новый (один раз)
+    try:
+        done = conn.execute("SELECT value FROM settings WHERE key = 'trial_claims_orphans_v1'").fetchone()
+        if not done:
+            conn.execute("DELETE FROM trial_claims WHERE user_id IS NOT NULL "
+                         "AND user_id NOT IN (SELECT id FROM users)")
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('trial_claims_orphans_v1', '1')")
+    except sqlite3.Error:
+        pass
     # источник сессии мини-приложения: miniapp (Telegram) / web (сайт) — для пробного отдельно
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(app_sessions)").fetchall()]
