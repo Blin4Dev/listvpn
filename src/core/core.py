@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -904,6 +903,7 @@ def serialize_app_user(u: dict[str, Any], source: Optional[str] = None) -> dict[
         # принял ли оферту и политику
         "terms_accepted": bool(u.get("terms_accepted_at")),
         "trial_available": _trial_available_for(int(u["id"]), source),
+        "trial_reason": trial_reason(int(u["id"]), source),
     }
 
 
@@ -3949,6 +3949,9 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "has_trial": has_trial,
         # кнопка «Сбросить триал»: активна, если пробный сейчас взять нельзя (брал, платил, удаляли аккаунт)
         "trial_resettable": _trial_blocks(user_id) is not None,
+        # почему пробный недоступен — отдельно в мини-приложении и на сайте (None — доступен)
+        "trial_status": {src: (lambda r: {"available": r is None, "reason": r, "text": _TRIAL_REASON_TEXT.get(r or "", "")})(
+            trial_reason(user_id, src)) for src in TRIAL_SOURCES},
         "referrals": [
             {
                 "id": u["id"],
@@ -6493,6 +6496,25 @@ def _trial_blocks(user_id: int) -> Optional[str]:
     ):
         return "claimed"
     return None
+
+
+_TRIAL_REASON_TEXT = {
+    "off": "пробный выключен в панели (общий переключатель)",
+    "off_miniapp": "пробный выключен для мини-приложения",
+    "off_web": "пробный выключен для сайта",
+    "has_sub": "есть подписка (действующая или истёкшая)",
+    "had_paid": "раньше была платная подписка",
+    "claimed": "этот Telegram уже брал пробный",
+}
+
+
+def trial_reason(user_id: int, source: Optional[str] = None) -> Optional[str]:
+    """почему пробный недоступен (код), None — доступен."""
+    if not trial_enabled():
+        return "off"
+    if source is not None and not trial_source_enabled(source):
+        return "off_miniapp" if source == "miniapp" else "off_web"
+    return _trial_blocks(user_id)
 
 
 def _trial_available_for(user_id: int, source: Optional[str] = None) -> bool:
