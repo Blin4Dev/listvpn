@@ -1,3 +1,4 @@
+import { BRAND_NAME } from "../utils/brand";
 import React, { useState } from "react";
 import { acceptTerms, fetchLegal } from "../utils/api";
 import { Btn, MSIcon, T, btnReset } from "../components/ui";
@@ -81,7 +82,7 @@ export default function TermsGate({ onAccepted }: { onAccepted: () => void }) {
             </div>
             <div style={{ fontWeight: 600, fontSize: 20, color: T.text, letterSpacing: "-0.02em" }}>Добро пожаловать!</div>
             <div style={{ fontSize: 14, lineHeight: 1.5, color: T.textMuted, marginTop: 8, marginBottom: 18 }}>
-              Перед началом ознакомьтесь с условиями использования BatmanVPN.
+              Перед началом ознакомьтесь с условиями использования {BRAND_NAME}.
             </div>
 
             <label style={{ display: "flex", gap: 12, alignItems: "flex-start", textAlign: "left", cursor: "pointer", width: "100%", background: T.surfaceRaised, borderRadius: 14, padding: "12px 14px", boxSizing: "border-box" }}>

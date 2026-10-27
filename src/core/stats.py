@@ -5,7 +5,22 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
+import contextvars
+
 import database as db
+import projects
+
+# сводка по проекту или по всей сети ("*"); ставят statistics()/dashboard()
+_SCOPE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("stats_scope", default=None)
+
+
+def _and(col: str = "project_id") -> str:
+    """фильтр по проекту для SQL; id проекта проверен реестром (только [a-z0-9]) — подставляем как литерал."""
+    sc = _SCOPE.get()
+    if sc == "*":
+        return ""
+    pid = projects.normalize(sc) or projects.current_id()
+    return f" AND {col} = '{pid}'"
 
 MSK = timezone(timedelta(hours=3))
 PAID = ("paid", "completed")
@@ -61,7 +76,7 @@ def _paid_payments() -> list[dict[str, Any]]:
     rows = db.fetchall(
         "SELECT id, user_id, provider, method, amount, stars, status, purpose, plan_devices, months, "
         "extra_devices, created_at, paid_at, refunded_at, referral_applied FROM payments "
-        "WHERE status IN ('paid', 'completed', 'refunded') ORDER BY COALESCE(paid_at, created_at)"
+        "WHERE status IN ('paid', 'completed', 'refunded')" + _and() + " ORDER BY COALESCE(paid_at, created_at)"
     )
     out = []
     for r in rows:
@@ -136,7 +151,7 @@ def _bucket_range(start: date, end: date, bucket: str) -> list[date]:
 def _users() -> list[dict[str, Any]]:
     rows = db.fetchall(
         "SELECT id, telegram_id, username, email, is_banned, referred_by, tracking_code, balance, "
-        "partner_balance, created_at FROM users"
+        "partner_balance, created_at FROM users WHERE 1 = 1" + _and()
     )
     for u in rows:
         u["t"] = _dt(u.get("created_at"))
@@ -146,12 +161,14 @@ def _users() -> list[dict[str, Any]]:
 def _trial_grants() -> dict[int, datetime]:
     """Когда пользователь впервые получил пробный период."""
     out: dict[int, datetime] = {}
-    for r in db.fetchall("SELECT user_id, MIN(granted_at) AS t FROM trial_checks GROUP BY user_id"):
+    for r in db.fetchall("SELECT c.user_id, MIN(c.granted_at) AS t FROM trial_checks c JOIN users u ON u.id = c.user_id "
+                         "WHERE 1 = 1" + _and("u.project_id") + " GROUP BY c.user_id"):
         t = _dt(r.get("t"))
         if t:
             out[int(r["user_id"])] = t
     # старые trial без trial_checks
-    for r in db.fetchall("SELECT user_id, MIN(created_at) AS t FROM subscriptions WHERE type = 'trial' GROUP BY user_id"):
+    for r in db.fetchall("SELECT user_id, MIN(created_at) AS t FROM subscriptions WHERE type = 'trial'" + _and()
+                         + " GROUP BY user_id"):
         t = _dt(r.get("t"))
         if t and int(r["user_id"]) not in out:
             out[int(r["user_id"])] = t
@@ -162,7 +179,15 @@ def _in(t: Optional[datetime], a: Optional[datetime], b: datetime) -> bool:
     return t is not None and (a is None or t >= a) and t < b
 
 
-def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: Optional[date] = None) -> dict[str, Any]:
+def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: Optional[date] = None,
+               scope: Optional[str] = None) -> dict[str, Any]:
+    """scope: id проекта, "*" — вся сеть, None — текущий проект (или унаследованный от dashboard)."""
+    if scope is not None:
+        token = _SCOPE.set(scope)
+        try:
+            return statistics(period, date_from, date_to)
+        finally:
+            _SCOPE.reset(token)
     now = _now()
     today = _msk_day(now)
     end_day = today
@@ -201,7 +226,7 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
 
     # доля отказов за период
     attempts = db.fetchall(
-        "SELECT status, method, provider, created_at FROM payments WHERE status IN ('paid','completed','refunded','failed','expired','canceled','cancelled')"
+        "SELECT status, method, provider, created_at FROM payments WHERE status IN ('paid','completed','refunded','failed','expired','canceled','cancelled')" + _and()
     )
     att_cur = [a for a in attempts if _in(_dt(a.get("created_at")), start, end)]
     failed_cur = sum(1 for a in att_cur if a["status"] not in PAID and a["status"] != "refunded")
@@ -266,7 +291,7 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
 
     new_cur = [u for u in users if _in(u["t"], start, end)]
     new_prev = [u for u in users if prev_start and _in(u["t"], prev_start, start)]
-    blacklisted = int((db.fetchone("SELECT COUNT(*) AS c FROM users WHERE ban_reason LIKE 'blacklist%' OR ban_reason LIKE '%черн%'") or {}).get("c") or 0)
+    blacklisted = int((db.fetchone("SELECT COUNT(*) AS c FROM users WHERE (ban_reason LIKE 'blacklist%' OR ban_reason LIKE '%черн%')" + _and()) or {}).get("c") or 0)
     src = Counter()
     for u in new_cur:
         if u.get("referred_by"):
@@ -305,7 +330,7 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
             hours_to_pay.append((t - c).total_seconds() / 3600)
 
     nowiso = now.isoformat()
-    subs = db.fetchall("SELECT id, user_id, type, status, expires_at, devices_limit, traffic_used, no_renew, frozen_at, created_at FROM subscriptions WHERE status != 'Deleted'")
+    subs = db.fetchall("SELECT id, user_id, type, status, expires_at, devices_limit, traffic_used, no_renew, frozen_at, created_at FROM subscriptions WHERE status != 'Deleted'" + _and())
     act_paid = [s for s in subs if s["status"] == "Active" and s["type"] != "trial" and (not s["expires_at"] or s["expires_at"] > nowiso)]
     act_trial = [s for s in subs if s["status"] == "Active" and s["type"] == "trial" and (not s["expires_at"] or s["expires_at"] > nowiso)]
 
@@ -322,11 +347,11 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
     repeat_users = sum(1 for c in pay_counts.values() if c >= 2)
     ltv = sum(p["amount"] for p in ok_all) / len(paying_all) if paying_all else 0
 
-    ref_tx = db.fetchall("SELECT user_id, amount, created_at FROM transactions WHERE payment_method = 'referral' AND status = 'completed'")
+    ref_tx = db.fetchall("SELECT user_id, amount, created_at FROM transactions WHERE payment_method = 'referral' AND status = 'completed'" + _and())
     ref_cur = [r for r in ref_tx if _in(_dt(r.get("created_at")), start, end)]
     invited_cur = [u for u in new_cur if u.get("referred_by")]
     invited_paid = sum(1 for u in invited_cur if int(u["id"]) in first_pay)
-    wd = db.fetchall("SELECT status, amount, created_at, processed_at FROM withdrawals")
+    wd = db.fetchall("SELECT status, amount, created_at, processed_at FROM withdrawals WHERE 1 = 1" + _and())
     wd_done = [w for w in wd if w["status"] in ("approved", "completed") and _in(_dt(w.get("processed_at") or w.get("created_at")), start, end)]
     wd_pending = [w for w in wd if w["status"] == "pending"]
     earned_by: dict[int, float] = defaultdict(float)
@@ -344,12 +369,14 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
     partner_owed = sum(float(u.get("partner_balance") or 0) for u in users)
 
     promo_rows = db.fetchall(
-        "SELECT p.code, p.name, a.created_at FROM promocode_activations a JOIN promocodes p ON p.id = a.promocode_id"
+        "SELECT p.code, p.name, a.created_at FROM promocode_activations a JOIN promocodes p ON p.id = a.promocode_id "
+        "WHERE 1 = 1" + _and("p.project_id")
     )
     promo_cur = [r for r in promo_rows if _in(_dt(r.get("created_at")), start, end)]
     promo_top = Counter(r["code"] for r in promo_cur).most_common(8)
     links = db.fetchall(
-        "SELECT name, code, clicks, new_users, paid_users, total_revenue FROM tracking_links ORDER BY total_revenue DESC, new_users DESC LIMIT 8"
+        "SELECT name, code, clicks, new_users, paid_users, total_revenue FROM tracking_links WHERE 1 = 1" + _and()
+        + " ORDER BY total_revenue DESC, new_users DESC LIMIT 8"
     )
 
     # когорты: 6 мес
@@ -452,7 +479,16 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
     }
 
 
-def dashboard() -> dict[str, Any]:
+def dashboard(scope: Optional[str] = None) -> dict[str, Any]:
+    """главная панели: проект (по умолчанию — текущий) или вся сеть (scope="*")."""
+    token = _SCOPE.set(scope)
+    try:
+        return _dashboard()
+    finally:
+        _SCOPE.reset(token)
+
+
+def _dashboard() -> dict[str, Any]:
     now = _now()
     today = _msk_day(now)
     day0 = datetime.combine(today, datetime.min.time(), MSK).astimezone(timezone.utc)
@@ -487,10 +523,10 @@ def dashboard() -> dict[str, Any]:
 
     nowiso = now.isoformat()
     act_paid = int((db.fetchone(
-        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active' AND type != 'trial' AND (expires_at IS NULL OR expires_at > ?)",
+        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active' AND type != 'trial' AND (expires_at IS NULL OR expires_at > ?)" + _and(),
         (nowiso,)) or {}).get("c") or 0)
     act_trial = int((db.fetchone(
-        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active' AND type = 'trial' AND (expires_at IS NULL OR expires_at > ?)",
+        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active' AND type = 'trial' AND (expires_at IS NULL OR expires_at > ?)" + _and(),
         (nowiso,)) or {}).get("c") or 0)
 
     series = []
@@ -502,11 +538,11 @@ def dashboard() -> dict[str, Any]:
 
     # внимание
     todo: list[dict[str, Any]] = []
-    wd = db.fetchone("SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = 'pending'") or {}
+    wd = db.fetchone("SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = 'pending'" + _and()) or {}
     if int(wd.get("c") or 0):
         todo.append({"level": "critical", "page": "Выводы", "title": f"Заявки на вывод: {int(wd['c'])}",
                      "text": f"на {_money(wd['s']):,.0f} ₽, ждут решения".replace(",", " ")})
-    wd_appr = db.fetchone("SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = 'approved'") or {}
+    wd_appr = db.fetchone("SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = 'approved'" + _and()) or {}
     if int(wd_appr.get("c") or 0):
         todo.append({"level": "warning", "page": "Выводы", "title": f"Одобрено, но не выплачено: {int(wd_appr['c'])}",
                      "text": "отправьте перевод и укажите ссылку на транзакцию"})
@@ -530,12 +566,12 @@ def dashboard() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     stuck = db.fetchone(
-        "SELECT COUNT(*) AS c FROM payments WHERE status IN ('pending','processing') AND created_at <= ? AND created_at >= ?",
+        "SELECT COUNT(*) AS c FROM payments WHERE status IN ('pending','processing') AND created_at <= ? AND created_at >= ?" + _and(),
         ((now - timedelta(minutes=30)).isoformat(), (now - timedelta(days=2)).isoformat())) or {}
     if int(stuck.get("c") or 0):
         todo.append({"level": "warning", "page": "Финансы", "title": f"Зависшие платежи: {int(stuck['c'])}",
                      "text": "висят в ожидании дольше 30 минут, проверьте платёжку"})
-    att = db.fetchall("SELECT status FROM payments WHERE created_at >= ? AND status IN ('paid','completed','failed','expired','canceled','cancelled')",
+    att = db.fetchall("SELECT status FROM payments WHERE created_at >= ? AND status IN ('paid','completed','failed','expired','canceled','cancelled')" + _and(),
                       ((now - timedelta(hours=24)).isoformat(),))
     failed = sum(1 for a in att if a["status"] not in PAID)
     if len(att) >= 5 and failed / len(att) >= 0.5:
@@ -560,7 +596,7 @@ def dashboard() -> dict[str, Any]:
 
     recent = db.fetchall(
         "SELECT p.amount, p.stars, p.method, p.provider, p.purpose, p.paid_at, p.created_at, p.user_id, u.username, u.email, u.telegram_id "
-        "FROM payments p LEFT JOIN users u ON u.id = p.user_id WHERE p.status IN ('paid','completed') "
+        "FROM payments p LEFT JOIN users u ON u.id = p.user_id WHERE p.status IN ('paid','completed')" + _and("p.project_id") + " "
         "AND COALESCE(p.paid_at, p.created_at) <= ? ORDER BY COALESCE(p.paid_at, p.created_at) DESC LIMIT 8", ((now + timedelta(minutes=5)).isoformat(),)
     )
     return {

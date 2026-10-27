@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
+
+try:
+    from . import projects  # type: ignore
+except ImportError:
+    import projects  # type: ignore
 
 DB_PATH = os.getenv("DB_PATH", "data/data.db")
 
@@ -40,6 +46,8 @@ def connect() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         # busy_timeout: ждать до 5с вместо database is locked
         conn.execute("PRAGMA busy_timeout = 5000")
+        # проект текущего запроса/задачи — для триггеров, проставляющих project_id новым записям
+        conn.create_function("current_project", 0, projects.current_id)
         _local.conn = conn
     if not _initialized:
         with _init_lock:
@@ -132,7 +140,9 @@ def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    telegram_id INTEGER UNIQUE,
+    -- уникален внутри проекта: один человек в BatmanVPN и FGN — два разных аккаунта
+    telegram_id INTEGER,
+    project_id TEXT,
     username TEXT,
     first_name TEXT,
     last_name TEXT,
@@ -453,9 +463,11 @@ CREATE INDEX IF NOT EXISTS idx_push_subs_actor ON push_subs(actor);
 -- кто уже брал пробный период (по Telegram ID, навсегда): смена Telegram у
 -- аккаунта и объединение аккаунтов не дают взять пробный ещё раз
 CREATE TABLE IF NOT EXISTS trial_claims (
-    telegram_id INTEGER PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    telegram_id INTEGER NOT NULL,
     user_id INTEGER,
-    claimed_at TEXT NOT NULL
+    claimed_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, telegram_id)
 );
 -- журнал действий в панели (кто, что, когда)
 CREATE TABLE IF NOT EXISTS panel_audit (
@@ -785,7 +797,8 @@ CREATE INDEX IF NOT EXISTS idx_prov_jobs_user ON provisioning_jobs(user_id, stat
 
 -- тарифы по периодам; цена синхронизируется с настройками панели (period_price_N)
 CREATE TABLE IF NOT EXISTS tariffs (
-    code TEXT PRIMARY KEY,                    -- m1 | m3 | m6 | m12
+    project_id TEXT NOT NULL,
+    code TEXT NOT NULL,                       -- m1 | m3 | m6 | m12
     title TEXT NOT NULL,
     price REAL NOT NULL,
     currency TEXT NOT NULL DEFAULT 'RUB',
@@ -793,7 +806,8 @@ CREATE TABLE IF NOT EXISTS tariffs (
     months INTEGER,
     is_active INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT
+    updated_at TEXT,
+    PRIMARY KEY (project_id, code)
 );
 
 -- факт покупки (одна строка на оплаченный платёж); без FK — история не теряется при удалении юзера
@@ -868,6 +882,59 @@ CREATE TABLE IF NOT EXISTS vpn_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_vpn_sessions_seen ON vpn_sessions(user_id, last_seen_at);
 
+-- подарочные дни «нажмите Забрать» (промокод на дни, подарок вернувшимся) — features проекта
+CREATE TABLE IF NOT EXISTS day_gifts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    project_id TEXT,
+    days INTEGER NOT NULL,
+    source TEXT NOT NULL,                     -- promo | winback
+    promocode_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | claimed
+    created_at TEXT NOT NULL,
+    expires_at TEXT,                          -- до когда можно забрать
+    claimed_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_day_gifts_user ON day_gifts(user_id, status);
+-- семейная подписка: участники семьи (см. src/core/family.py)
+--   member_id NULL — приглашение по логину/почте, аккаунт ещё не найден;
+--   status pending — приглашён, active — пользуется подпиской владельца
+CREATE TABLE IF NOT EXISTS family_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT,
+    owner_id INTEGER NOT NULL,
+    member_id INTEGER,
+    invite_query TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    accepted_at TEXT,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_family_owner ON family_members(owner_id, status);
+CREATE INDEX IF NOT EXISTS idx_family_member ON family_members(member_id, status);
+CREATE INDEX IF NOT EXISTS idx_family_query ON family_members(invite_query, status);
+-- один аккаунт — одна семья (только среди принятых приглашений)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_family_member_active
+    ON family_members(member_id) WHERE member_id IS NOT NULL AND status = 'active';
+-- код семьи владельца (общий для проекта владельца)
+CREATE TABLE IF NOT EXISTS family_codes (
+    owner_id INTEGER PRIMARY KEY,
+    project_id TEXT,
+    code TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+);
+-- разовые уведомления пользователю (не подключил подписку и т.п.)
+CREATE TABLE IF NOT EXISTS user_notices (
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL DEFAULT '',
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, kind, ref),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_tg ON users(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_subs_expiry ON subscriptions(status, expires_at);
@@ -894,7 +961,155 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
     return {r["name"] for r in rows}
 
 
+# ── сеть проектов (listvpn) ──
+# таблицы, чьи строки принадлежат пользователю: project_id = проект пользователя
+PROJECT_USER_TABLES = ("subscriptions", "payments", "transactions", "purchases", "support_chats", "withdrawals",
+                       "day_gifts")
+# сущности проекта, которые создаёт панель: project_id = проект запроса (current_project())
+PROJECT_OWN_TABLES = ("promocodes", "promotions", "tracking_links", "mailings", "tasks")
+
+
+def _rebuild_table(conn: sqlite3.Connection, table: str, create_sql: str, post: tuple[str, ...] = (),
+                   select_map: Optional[dict[str, str]] = None) -> None:
+    """пересоздать таблицу (sqlite не умеет менять ограничения): create_sql создаёт <table>__new.
+    Данные переносятся по общим колонкам; select_map — выражение для колонки, которой в старой нет."""
+    old_cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(f"DROP TABLE IF EXISTS {table}__new")
+        conn.execute(create_sql)
+        new_cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table}__new)").fetchall()]
+        cols = [c for c in new_cols if c in old_cols or (select_map and c in select_map)]
+        exprs = [c if c in old_cols else select_map[c] for c in cols]  # type: ignore[index]
+        conn.execute(f"INSERT INTO {table}__new ({', '.join(cols)}) SELECT {', '.join(exprs)} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {table}__new RENAME TO {table}")
+        for s in post:
+            conn.execute(s)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA legacy_alter_table = OFF")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _users_tg_unique_alone(conn: sqlite3.Connection) -> bool:
+    """старая схема: telegram_id UNIQUE на всю базу (до сети проектов)."""
+    for idx in conn.execute("PRAGMA index_list(users)").fetchall():
+        if not idx["unique"]:
+            continue
+        cols = [r["name"] for r in conn.execute(f"PRAGMA index_info({idx['name']})").fetchall()]
+        if cols == ["telegram_id"]:
+            return True
+    return False
+
+
+def _migrate_projects(conn: sqlite3.Connection) -> None:
+    default = projects.DEFAULT
+    q = "'" + default.replace("'", "''") + "'"
+
+    # 1) колонка project_id
+    for table in ("users",) + PROJECT_USER_TABLES + PROJECT_OWN_TABLES:
+        try:
+            if "project_id" not in _column_names(conn, table):
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN project_id TEXT")
+        except sqlite3.Error:
+            pass
+    conn.execute(f"UPDATE users SET project_id = {q} WHERE project_id IS NULL")
+    for table in PROJECT_USER_TABLES:
+        conn.execute(f"UPDATE {table} SET project_id = COALESCE("
+                     f"(SELECT u.project_id FROM users u WHERE u.id = {table}.user_id), {q}) WHERE project_id IS NULL")
+    for table in PROJECT_OWN_TABLES:
+        conn.execute(f"UPDATE {table} SET project_id = {q} WHERE project_id IS NULL")
+    conn.commit()
+
+    # 2) users: telegram_id уникален внутри проекта, а не во всей базе
+    if _users_tg_unique_alone(conn):
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").fetchone()
+        sql = str(row["sql"])
+        sql = re.sub(r"(?i)^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[\"`\[]?users[\"`\]]?", "CREATE TABLE users__new", sql)
+        sql = re.sub(r"(?i)(\btelegram_id\s+INTEGER)\s+UNIQUE", r"\1", sql)
+        _rebuild_table(conn, "users", sql, post=(
+            "CREATE INDEX IF NOT EXISTS idx_users_tg ON users(telegram_id)",
+            "CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users(referred_by)",
+        ))
+        print("[db] users: telegram_id теперь уникален внутри проекта", flush=True)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_project_tg ON users(project_id, telegram_id) "
+                 "WHERE telegram_id IS NOT NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_project ON users(project_id, id)")
+
+    # 3) trial_claims: «брал пробный» — в рамках проекта
+    if "project_id" not in _column_names(conn, "trial_claims"):
+        _rebuild_table(conn, "trial_claims", (
+            "CREATE TABLE trial_claims__new (project_id TEXT NOT NULL, telegram_id INTEGER NOT NULL, "
+            "user_id INTEGER, claimed_at TEXT NOT NULL, PRIMARY KEY (project_id, telegram_id))"
+        ), select_map={"project_id": q})
+
+    # 4) tariffs: у каждого проекта свои
+    if "project_id" not in _column_names(conn, "tariffs"):
+        _rebuild_table(conn, "tariffs", (
+            "CREATE TABLE tariffs__new (project_id TEXT NOT NULL, code TEXT NOT NULL, title TEXT NOT NULL, "
+            "price REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'RUB', period_days INTEGER NOT NULL, months INTEGER, "
+            "is_active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT, "
+            "PRIMARY KEY (project_id, code))"
+        ), select_map={"project_id": q})
+
+    # 5) новые строки получают project_id автоматически
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_users_project AFTER INSERT ON users WHEN NEW.project_id IS NULL "
+        "BEGIN UPDATE users SET project_id = current_project() WHERE id = NEW.id; END"
+    )
+    for table in PROJECT_USER_TABLES:
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table}_project AFTER INSERT ON {table} WHEN NEW.project_id IS NULL "
+            f"BEGIN UPDATE {table} SET project_id = COALESCE((SELECT project_id FROM users WHERE id = NEW.user_id), "
+            f"current_project()) WHERE rowid = NEW.rowid; END"
+        )
+        # перенос записи другому пользователю (объединение / перенос подписки) — проект следует за ним
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table}_project_upd AFTER UPDATE OF user_id ON {table} "
+            f"WHEN NEW.user_id IS NOT NULL BEGIN UPDATE {table} SET project_id = "
+            f"(SELECT project_id FROM users WHERE id = NEW.user_id) WHERE rowid = NEW.rowid "
+            f"AND EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id); END"
+        )
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_project ON {table}(project_id)")
+    for table in PROJECT_OWN_TABLES:
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table}_project AFTER INSERT ON {table} WHEN NEW.project_id IS NULL "
+            f"BEGIN UPDATE {table} SET project_id = current_project() WHERE rowid = NEW.rowid; END"
+        )
+    conn.commit()
+
+
+def _seed_projects(conn: sqlite3.Connection) -> None:
+    """новый проект стартует копией настроек проекта по умолчанию (цены, тарифы, пробный, документы)."""
+    default = projects.get(projects.DEFAULT)
+    rows = conn.execute("SELECT key, value FROM settings WHERE key NOT LIKE '@%'").fetchall()
+    base = {r["key"]: r["value"] for r in rows if projects.is_project_setting(r["key"])}
+    for p in projects.all_projects():
+        if p.id == projects.DEFAULT:
+            continue
+        flag = f"@{p.id}/__seeded"
+        if conn.execute("SELECT 1 FROM settings WHERE key = ?", (flag,)).fetchone():
+            continue
+        for k, v in base.items():
+            if k == "apiv1_tasks_seeded":
+                continue
+            if k in ("offer_text", "privacy_text"):
+                v = (v or "").replace(default.name, p.name)
+            conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (f"@{p.id}/{k}", v))
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (flag, utcnow_iso()))
+        print(f"[db] проект {p.id}: настройки скопированы из {default.id}", flush=True)
+    conn.commit()
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
+    _migrate_projects(conn)
     add_columns = {
         "promocodes": {
             "name": "ALTER TABLE promocodes ADD COLUMN name TEXT",
@@ -1134,9 +1349,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     except sqlite3.Error:
         pass
     try:
-        conn.execute("INSERT OR IGNORE INTO trial_claims (telegram_id, user_id, claimed_at) "
-                     "SELECT u.telegram_id, u.id, COALESCE(MIN(s.created_at), CURRENT_TIMESTAMP) FROM subscriptions s "
-                     "JOIN users u ON u.id = s.user_id WHERE s.type = 'trial' AND u.telegram_id IS NOT NULL GROUP BY u.telegram_id")
+        conn.execute("INSERT OR IGNORE INTO trial_claims (project_id, telegram_id, user_id, claimed_at) "
+                     "SELECT u.project_id, u.telegram_id, MIN(u.id), COALESCE(MIN(s.created_at), CURRENT_TIMESTAMP) "
+                     "FROM subscriptions s JOIN users u ON u.id = s.user_id "
+                     "WHERE s.type = 'trial' AND u.telegram_id IS NOT NULL GROUP BY u.project_id, u.telegram_id")
     except sqlite3.Error:
         pass
     try:
@@ -1156,6 +1372,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if not done:
             conn.execute("UPDATE settings SET value = '2' WHERE key = 'tariff_devices' AND value = '3'")
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tariff_devices_v2', '1')")
+    except sqlite3.Error:
+        pass
+    # пометки «брал пробный» от удалённых через панель аккаунтов: вернувшийся человек — как новый (один раз)
+    try:
+        done = conn.execute("SELECT value FROM settings WHERE key = 'trial_claims_orphans_v1'").fetchone()
+        if not done:
+            conn.execute("DELETE FROM trial_claims WHERE user_id IS NOT NULL "
+                         "AND user_id NOT IN (SELECT id FROM users)")
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('trial_claims_orphans_v1', '1')")
     except sqlite3.Error:
         pass
     # источник сессии мини-приложения: miniapp (Telegram) / web (сайт) — для пробного отдельно
@@ -1266,27 +1491,35 @@ def _seed_defaults(conn: sqlite3.Connection) -> None:
             plans,
         )
     conn.commit()
+    _seed_projects(conn)
 
 
-def get_setting(key: str, default: str = "") -> str:
-    row = fetchone("SELECT value FROM settings WHERE key = ?", (key,))
+def get_setting(key: str, default: str = "", *, project: Optional[str] = None) -> str:
+    """цены, тарифы, пробный и т.п. — свои у каждого проекта (projects.PROJECT_SETTING_KEYS), остальное общее."""
+    row = fetchone("SELECT value FROM settings WHERE key = ?", (projects.setting_key(key, project),))
     return row["value"] if row else default
 
 
-def set_setting(key: str, value: str) -> None:
+def set_setting(key: str, value: str, *, project: Optional[str] = None) -> None:
     execute(
         "INSERT INTO settings (key, value) VALUES (?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (key, value),
+        (projects.setting_key(key, project), value),
     )
 
 
-def get_settings(keys: list[str]) -> dict[str, str]:
+def get_settings(keys: list[str], *, project: Optional[str] = None) -> dict[str, str]:
     if not keys:
         return {}
-    placeholders = ",".join("?" * len(keys))
-    rows = fetchall(f"SELECT key, value FROM settings WHERE key IN ({placeholders})", keys)
-    return {r["key"]: r["value"] for r in rows}
+    real = {projects.setting_key(k, project): k for k in keys}
+    placeholders = ",".join("?" * len(real))
+    rows = fetchall(f"SELECT key, value FROM settings WHERE key IN ({placeholders})", list(real))
+    return {real[r["key"]]: r["value"] for r in rows}
+
+
+def pid() -> str:
+    """проект текущего запроса / задачи."""
+    return projects.current_id()
 
 
 def dumps(obj: Any) -> str:

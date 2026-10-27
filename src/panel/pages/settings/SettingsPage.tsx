@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  DollarSign, Zap, Send, Cloud, FileText, Shield, ShieldAlert, Database, Mail, Fingerprint,
+  DollarSign, Zap, Send, Cloud, FileText, Shield, ShieldAlert, Database, Mail, Fingerprint, Bot,
 } from 'lucide-react';
 import type { ToastType } from '../../lib/types';
 import { AntiAbuseSettingsTab } from './AntiAbuseTab';
@@ -10,13 +10,15 @@ import { ForumSettingsTab } from './ForumTab';
 import { LegalSettingsTab } from './LegalTab';
 import { MailSettingsTab } from './MailTab';
 import { PricesSettingsTab } from './PricesTab';
+import { ProjectSettingsTab } from './ProjectTab';
 import { SquadsPage } from './SquadsTab';
 import { StorageSettingsTab } from './StorageTab';
 
-export type Tab = 'price' | 'antiabuse' | 'offer' | 'privacy' | 'squads' | 'mail' | 'captcha' | 'backups' | 'forum' | 'storage';
+export type Tab = 'project' | 'price' | 'antiabuse' | 'offer' | 'privacy' | 'squads' | 'mail' | 'captcha' | 'backups' | 'forum' | 'storage';
 
 // разделы настроек (подменю в сайдбаре)
 export const SETTINGS_SECTIONS: { id: Tab; icon: React.ElementType; label: string }[] = [
+  { id: 'project', icon: Bot, label: 'Проект: бот и оплата' },
   { id: 'price', icon: DollarSign, label: 'Цены' },
   { id: 'antiabuse', icon: ShieldAlert, label: 'Анти-абуз' },
   { id: 'offer', icon: FileText, label: 'Оферта' },
@@ -31,6 +33,7 @@ export const SETTINGS_SECTIONS: { id: Tab; icon: React.ElementType; label: strin
 
 export const SettingsPage: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void; tab: Tab; onTab?: (t: Tab) => void }> = ({ onToast, tab }) => (
   <div style={{ maxWidth: 980 }}>
+    {tab === 'project' && <ProjectSettingsTab onToast={onToast} />}
     {tab === 'price' && <PricesSettingsTab onToast={onToast} />}
     {tab === 'antiabuse' && <AntiAbuseSettingsTab onToast={onToast} />}
     {tab === 'offer' && <LegalSettingsTab kind="offer" title="Договор оферты" onToast={onToast} />}

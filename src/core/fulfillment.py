@@ -12,6 +12,7 @@ try:
     from . import database as db  # type: ignore
 except ImportError:
     import database as db  # type: ignore
+projects = db.projects
 
 try:
     from . import provisioning
@@ -81,6 +82,20 @@ def _env(*keys: str, default: str = "") -> str:
         if val:
             return val
     return default
+
+
+def _payment_project(payment_id: Any = None, *a: Any, **kw: Any) -> Optional[str]:
+    pid_ = kw.get("payment_id", payment_id)
+    row = db.fetchone("SELECT project_id FROM payments WHERE payment_id = ?", (str(pid_),)) if pid_ else None
+    return projects.normalize((row or {}).get("project_id"))
+
+
+def _user_project(user: Any = None, *a: Any, **kw: Any) -> Optional[str]:
+    return projects.of_user(kw.get("user", user) if "user" in kw else user)
+
+
+def _user_id_project(user_id: Any = None, *a: Any, **kw: Any) -> Optional[str]:
+    return projects.of_user(kw.get("user_id", user_id))
 
 
 def utcnow() -> datetime:
@@ -286,6 +301,7 @@ def user_whitelist(user: Optional[dict[str, Any]]) -> dict[str, Any]:
             "active": bool(row.get("anti_key") and until and until > utcnow())}
 
 
+@projects.scoped(_user_project)
 def grant_whitelist(user: dict[str, Any], months: int = 1, idem: Optional[str] = None,
                     *, days: Optional[int] = None, until: Optional[datetime] = None) -> dict[str, Any]:
     """выпустить/продлить анти-ключ FURK на months или days (логика старого process_payment для anti_*).
@@ -479,6 +495,7 @@ def _release_referral_hold(payment: dict[str, Any]) -> None:
         pass
 
 
+@projects.scoped(_payment_project)
 def mark_failed(payment_id: str, reason: str = "") -> None:
     payment = get_payment(payment_id)
     cur = db.execute(
@@ -558,6 +575,7 @@ def _create_subscription_row(
     return sub
 
 
+@projects.scoped(_user_project)
 def grant_trial(user: dict[str, Any]) -> dict[str, Any]:
     telegram_id = int(user["telegram_id"]) if user.get("telegram_id") else None
     t_days, t_gb, t_dev = trial_days(), trial_traffic_gb(), trial_devices()
@@ -799,6 +817,7 @@ def retained_devices(user_id: int, purpose: str, subscription_id: Optional[int],
     return max(0, current - int(total_devices))
 
 
+@projects.scoped(_user_project)
 def grant_subscription(
     *,
     user: dict[str, Any],
@@ -961,6 +980,7 @@ def _grant_whitelist_safe(user: dict[str, Any], months: int, idem: Optional[str]
     return res
 
 
+@projects.scoped(_user_id_project)
 def sync_whitelist_to_vpn(user_id: int, reason: str = "sync") -> Optional[dict[str, Any]]:
     """единая подписка: ключ обхода (FURK) продлить до конца ВПН — после продления не через оплату
     (панель «+дни», массовое продление, награды за задания). Только тем, у кого ключ уже есть;
@@ -1008,6 +1028,7 @@ def _wl_undo(wl: Optional[dict[str, Any]]) -> dict[str, Any]:
             "prev_anti_until": wl.get("prev_until"), "anti_until": wl.get("until")}
 
 
+@projects.scoped(_payment_project)
 def fulfill_payment(
     payment_id: str,
     *,
@@ -1205,6 +1226,7 @@ def stars_precheckout_ok(payment: Optional[dict[str, Any]], query: dict[str, Any
         return False
 
 
+@projects.scoped(_payment_project)
 def confirm_via_provider(payment_id: str) -> dict[str, Any]:
     payment = get_payment(payment_id)
     if not payment:

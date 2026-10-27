@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useState } from "react";
+import { PROJECT_ID } from "../utils/brand";
 import { MSIcon, btnReset } from "../components/ui";
 import { N, NoirBack, NoirButton, NoirCard, NoirField, NoirLoading, NoirScreen, NoirSection, NoirTextButton } from "../components/noir";
 
@@ -130,7 +131,7 @@ export default function Security() {
     if (inTelegram) return;
     void (async () => {
       try {
-        const res = await fetch("/api/app/config");
+        const res = await fetch("/api/app/config", { headers: { "X-Project": PROJECT_ID } });
         const body = (await res.json().catch(() => null)) as { botUsername?: string } | null;
         if (!res.ok || !body) return;
         if (typeof body.botUsername === "string" && body.botUsername.trim()) {

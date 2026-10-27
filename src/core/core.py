@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import hashlib
@@ -18,8 +17,10 @@ from urllib.parse import parse_qsl
 
 try:
     from . import database as db
+    from . import projects  # type: ignore
 except ImportError:
     import database as db  # type: ignore
+    import projects  # type: ignore
 
 # src/api (yookassa, telegram_stars, remnawave) в sys.path
 import sys as _sys
@@ -101,6 +102,11 @@ except ImportError:  # pragma: no cover
     import antiabuse  # type: ignore
 
 try:
+    from . import family  # type: ignore
+except ImportError:  # pragma: no cover
+    import family  # type: ignore
+
+try:
     from . import support  # type: ignore
     from . import s3store  # type: ignore
     from . import captcha as captcha_mod  # type: ignore
@@ -155,20 +161,20 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
-TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
-TELEGRAM_WEBHOOK_SECRET = _env("TELEGRAM_WEBHOOK_SECRET")
-# обязательная подписка на канал (только telegram-вход)
-# канал зашит в код: .env (REQUIRED_CHANNEL_ID / REQUIRED_CHANNEL_URL) больше не влияет
-REQUIRED_CHANNEL_ID = "@BATMANNETWORK"
-REQUIRED_CHANNEL_URL = "https://t.me/BATMANNETWORK"
-CHANNEL_CHECK_TTL = _env_int("CHANNEL_CHECK_TTL", 600)
+def P() -> "projects.Project":
+    """проект текущего запроса: бот, канал, мини-приложение, платёжка (см. projects.py)."""
+    return projects.current()
+
+
+# бот, канал, адреса — у каждого проекта свои: P().bot_token, P().channel_id, P().miniapp_url …
+# канал задаётся в projects/<id>/project.json
+CHANNEL_CHECK_TTL = _env_int("CHANNEL_CHECK_TTL", 600)  # кэш проверки подписки, сек
 
 
 def channel_required() -> bool:
     """обязательна ли подписка на канал (панель → Цены → «Канал»); по умолчанию — нет, можно пропустить."""
-    return bool(REQUIRED_CHANNEL_ID) and db.get_setting("channel_required", "0") in ("1", "true", "True", "yes")  # кэш проверки подписки, сек
+    return bool(P().channel_id) and db.get_setting("channel_required", "0") in ("1", "true", "True", "yes")
 TELEGRAM_ADMIN_ID = _env("TELEGRAM_ADMIN_ID")
-BOT_USERNAME = _env("BOT_USERNAME") or _env("VITE_BOT_USERNAME") or "blinvpn_bot"
 PANEL_SETUP_TOKEN = _env("PANEL_SETUP_TOKEN")
 INTERNAL_API_SECRET = _env("INTERNAL_API_SECRET")
 TELEGRAM_INITDATA_MAX_AGE = _env_int("TELEGRAM_INITDATA_MAX_AGE", 3600)
@@ -178,8 +184,6 @@ CORS_ORIGINS = [o.strip() for o in _env("CORS_ORIGINS", "*").split(",") if o.str
 ENV = _env("ENV", "production")
 IS_PROD = ENV == "production"
 
-MINIAPP_URL = _env("MINIAPP_URL").rstrip("/")
-YOOKASSA_RETURN_URL = _env("YOOKASSA_RETURN_URL") or (f"{MINIAPP_URL}/payment/success" if MINIAPP_URL else "")
 
 
 # в проде без swagger/openapi
@@ -200,7 +204,7 @@ app.add_middleware(
     allow_credentials=not _cors_wildcard,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Telegram-Init-Data",
-                   "X-App-Session", "X-Panel-Setup-Token"],
+                   "X-App-Session", "X-Panel-Setup-Token", "X-Project"],
 )
 
 
@@ -240,6 +244,61 @@ class PanelAuditMiddleware:
 
 
 app.add_middleware(PanelAuditMiddleware)
+
+
+# ── проект запроса (сеть listvpn) ──
+# действие над конкретной записью в панели — от имени её проекта (бот, канал, цены этого проекта)
+_PROJECT_ENTITY_RX: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"^/api/panel/users/(\d+)(?:/|$)"), "SELECT project_id FROM users WHERE id = ?"),
+    (re.compile(r"^/api/panel/support/chats/(\d+)(?:/|$)"), "SELECT project_id FROM support_chats WHERE id = ?"),
+    (re.compile(r"^/api/panel/payments/([A-Za-z0-9_-]{1,80})/"), "SELECT project_id FROM payments WHERE payment_id = ?"),
+    (re.compile(r"^/api/panel/withdrawals/(\d+)/"), "SELECT project_id FROM withdrawals WHERE id = ?"),
+    (re.compile(r"^/api/panel/keys/(\d+)/"), "SELECT project_id FROM subscriptions WHERE id = ?"),
+    (re.compile(r"^/api/panel/promocodes/(\d+)$"), "SELECT project_id FROM promocodes WHERE id = ?"),
+    (re.compile(r"^/api/panel/promotions/(\d+)$"), "SELECT project_id FROM promotions WHERE id = ?"),
+    (re.compile(r"^/api/panel/tracking-links/(\d+)$"), "SELECT project_id FROM tracking_links WHERE id = ?"),
+    (re.compile(r"^/api/panel/mailing/(\d+)$"), "SELECT project_id FROM mailings WHERE id = ?"),
+    (re.compile(r"^/api/telegram/webhook/([a-z][a-z0-9]{0,23})$"), ""),
+]
+
+
+def _entity_project(path: str) -> Optional[str]:
+    for rx, sql in _PROJECT_ENTITY_RX:
+        m = rx.match(path)
+        if not m:
+            continue
+        if not sql:
+            return projects.normalize(m.group(1))
+        try:
+            row = db.fetchone(sql, (m.group(1),))
+        except Exception:  # noqa: BLE001
+            return None
+        return projects.normalize((row or {}).get("project_id")) if row else None
+    return None
+
+
+class ProjectContextMiddleware:
+    """projects.current() на время запроса: запись панели → X-Project → домен → проект по умолчанию."""
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        path = str(scope.get("path") or "")
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+        pid = await run_in_threadpool(_entity_project, path) if path.startswith(("/api/panel/", "/api/telegram/")) else None
+        pid = pid or projects.normalize(headers.get("x-project")) or projects.by_host(headers.get("host")) \
+            or projects.DEFAULT
+        token = projects.set_current(pid)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            projects.reset(token)
+
+
+app.add_middleware(ProjectContextMiddleware)
 
 
 def _backup_scheduler_loop() -> None:
@@ -469,7 +528,7 @@ class InitDataExpired(HTTPException):
 def validate_webapp_init_data(init_data: str) -> dict[str, Any]:
     if not init_data:
         raise HTTPException(401, detail={"message": "Пустой initData"})
-    if not TELEGRAM_BOT_TOKEN:
+    if not P().bot_token:
         if MINIAPP_ALLOW_UNAUTH or ENV != "production":
             parsed = dict(parse_qsl(init_data, keep_blank_values=True))
             user_raw = parsed.get("user", "{}")
@@ -486,11 +545,11 @@ def validate_webapp_init_data(init_data: str) -> dict[str, Any]:
         raise HTTPException(401, detail={"message": "Нет hash в initData"})
 
     check = _telegram_data_check_string(parsed)
-    secret = hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
+    secret = hmac.new(b"WebAppData", P().bot_token.encode(), hashlib.sha256).digest()
     calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(calc, received):
-        # чаще всего мини-приложение открыто из другого бота, не того, чей TELEGRAM_BOT_TOKEN в .env
-        print(f"[auth] подпись initData не сошлась: TELEGRAM_BOT_TOKEN в .env — бот {TELEGRAM_BOT_TOKEN.split(':')[0]}",
+        # чаще всего мини-приложение открыто из другого бота, не того, чей токен в .env у этого проекта
+        print(f"[auth] подпись initData не сошлась: проект {P().id}, бот в .env — {P().bot_id}",
               flush=True)
         raise HTTPException(401, detail={"message": "Неверная подпись Telegram"})
 
@@ -506,7 +565,7 @@ def validate_webapp_init_data(init_data: str) -> dict[str, Any]:
 
 
 def validate_oauth_login(payload: dict[str, Any]) -> dict[str, Any]:
-    if not TELEGRAM_BOT_TOKEN:
+    if not P().bot_token:
         if MINIAPP_ALLOW_UNAUTH or ENV != "production":
             return payload
         raise HTTPException(503, detail={"message": "TELEGRAM_BOT_TOKEN не задан"})
@@ -514,7 +573,7 @@ def validate_oauth_login(payload: dict[str, Any]) -> dict[str, Any]:
     data = {k: str(v) for k, v in payload.items() if k != "hash" and v is not None and str(v) != ""}
     received = str(payload.get("hash") or "")
     check = _telegram_data_check_string(data)
-    secret = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).digest()
+    secret = hashlib.sha256(P().bot_token.encode()).digest()
     calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(calc, received):
         raise HTTPException(401, detail={"message": "Неверная подпись OAuth"})
@@ -651,9 +710,15 @@ def _valid_email(email: str) -> bool:
     return bool(email) and len(email) <= 254 and bool(_EMAIL_RE.match(email))
 
 
+def _email_key(email: str) -> str:
+    """код входа по почте — в рамках проекта (один адрес может быть в BatmanVPN и в FGN)."""
+    email = email.strip().lower()
+    return email if db.pid() == projects.DEFAULT else f"{db.pid()}|{email}"
+
+
 def create_email_code(email: str) -> tuple[str, bool]:
     """создаёт код входа. возвращает (code, throttled)."""
-    email = email.strip().lower()
+    email = _email_key(email)
     now = time.time()
     existing = db.fetchone("SELECT last_sent_at FROM email_codes WHERE email = ?", (email,))
     if existing and (now - float(existing.get("last_sent_at") or 0)) < EMAIL_CODE_RESEND:
@@ -671,7 +736,7 @@ def create_email_code(email: str) -> tuple[str, bool]:
 
 
 def verify_email_code(email: str, code: str) -> bool:
-    email = email.strip().lower()
+    email = _email_key(email)
     code = str(code or "").strip()
     # атомарно тратим попытку; верный код удаляется тут же
     with db.transaction() as tx:
@@ -735,7 +800,13 @@ def get_user(user_id: int) -> Optional[dict[str, Any]]:
 
 
 def find_user_by_tg(telegram_id: int) -> Optional[dict[str, Any]]:
-    return db.fetchone("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+    """аккаунт в ТЕКУЩЕМ проекте (в BatmanVPN и FGN у одного человека разные аккаунты)."""
+    return db.fetchone("SELECT * FROM users WHERE telegram_id = ? AND project_id = ?", (telegram_id, db.pid()))
+
+
+def same_project(u: Optional[dict[str, Any]]) -> bool:
+    """запись из текущего проекта (рефералы, объединение, смена Telegram — только внутри проекта)."""
+    return bool(u) and projects.of(u) == db.pid()
 
 
 def upsert_telegram_user(
@@ -761,10 +832,11 @@ def upsert_telegram_user(
 
     code = gen_ref_code()
     db.execute(
-        "INSERT INTO users (telegram_id, username, first_name, last_name, balance, status, is_banned, "
+        "INSERT INTO users (project_id, telegram_id, username, first_name, last_name, balance, status, is_banned, "
         "referral_code, is_partner, partner_balance, partner_rate, "
-        "autopay_enabled, created_at) VALUES (?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
+        "autopay_enabled, created_at) VALUES (?, ?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
         (
+            db.pid(),
             telegram_id,
             names.tg_username(username),
             first_name,
@@ -853,6 +925,8 @@ def serialize_user(u: dict[str, Any], *, revenue: Optional[float] = None) -> dic
         revenue = float(row["s"]) if row else 0.0
     return {
         "id": u["id"],
+        "project": projects.of(u),
+        "project_name": projects.get(projects.of(u)).name,
         "telegram_id": u.get("telegram_id"),
         "username": u.get("username"),
         "first_name": u.get("first_name"),
@@ -904,7 +978,54 @@ def serialize_app_user(u: dict[str, Any], source: Optional[str] = None) -> dict[
         # принял ли оферту и политику
         "terms_accepted": bool(u.get("terms_accepted_at")),
         "trial_available": _trial_available_for(int(u["id"]), source),
+        "trial_reason": trial_reason(int(u["id"]), source),
     }
+
+
+def family_owner_for(u: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """владелец семьи, чья подписка действует для этого аккаунта (иначе None).
+
+    Своя оплаченная подписка всегда важнее семейной, поэтому проверяем сначала её.
+    """
+    try:
+        if subscription_status_for_user(u) in ("active", "trial"):
+            return None
+        owner_id = family.active_owner_id(int(u["id"]))
+        if not owner_id:
+            return None
+        owner = get_user(owner_id)
+        if not owner or owner.get("is_banned"):
+            return None
+        if projects.of(owner) != projects.of(u):
+            return None
+        # делим только платную подписку: пробную на несколько аккаунтов не раздаём
+        if not family.has_paid_sub(int(owner["id"])):
+            return None
+        return owner
+    except Exception:  # noqa: BLE001  — семья не должна ломать приложение
+        return None
+
+
+def app_user_payload(u: dict[str, Any], source: Optional[str] = None) -> dict[str, Any]:
+    """юзер для мини-приложения: своё состояние + семейная подписка и приглашение в семью."""
+    data = serialize_app_user(u, source)
+    try:
+        invite = family.pending_invite(u)
+    except Exception:  # noqa: BLE001
+        invite = None
+    if invite:
+        data["family_invite"] = {"code": invite["code"], "from_name": invite["from_name"]}
+    else:
+        data["family_invite"] = None
+    owner = family_owner_for(u)
+    if owner is not None:
+        data["subscription_status"] = "active" if subscription_status_for_user(owner) == "active" else "trial"
+        data["subscription_until"] = paid_until_for_user(int(owner["id"]))
+        data["family"] = {"role": "member", "owner_name": _user_label(owner), "owner_id": int(owner["id"])}
+        # подписка уже действует через семью — пробный не предлагаем
+        data["trial_available"] = False
+        data["trial_reason"] = "in_family"
+    return data
 
 
 def days_left_for_expiry(expires_at: Optional[str]) -> Optional[int]:
@@ -980,9 +1101,20 @@ def sync_user_status_from_subs(user_id: int) -> None:
     fulfillment._sync_user_status(user_id)
 
 
-def user_states_map() -> dict[int, str]:
-    """состояние всех юзеров одним запросом."""
+_ALL = "*"  # все проекты сети (только сводная статистика)
+
+
+def _pf(col: str = "project_id", scope: Optional[str] = None) -> tuple[str, tuple]:
+    """фильтр по проекту: (" AND <col> = ?", (pid,)); scope='*' — без фильтра (вся сеть)."""
+    if scope == _ALL:
+        return "", ()
+    return f" AND {col} = ?", (scope or db.pid(),)
+
+
+def user_states_map(scope: Optional[str] = None) -> dict[int, str]:
+    """состояние всех юзеров проекта одним запросом (scope='*' — вся сеть, None — без фильтра)."""
     now_iso = iso()
+    pw, pp = _pf("u.project_id", scope) if scope else ("", ())
     rows = db.fetchall(
         """
         SELECT u.id AS id, u.is_banned AS banned, s.total AS total, s.paid_now AS paid_now, s.trial_now AS trial_now
@@ -994,8 +1126,8 @@ def user_states_map() -> dict[int, str]:
                              AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS trial_now
             FROM subscriptions GROUP BY user_id
         ) s ON s.user_id = u.id
-        """,
-        (now_iso, now_iso),
+        WHERE 1 = 1""" + pw,
+        (now_iso, now_iso, *pp),
     )
     out: dict[int, str] = {}
     for r in rows:
@@ -1282,7 +1414,7 @@ def _notify_user(user: dict[str, Any], text: str, *, email: bool = False,
         except Exception:  # noqa: BLE001
             pass
     if send_mail and user.get("email") and mailer.is_configured():
-        ok, _ = mailer.send_broadcast(user["email"], "BatmanVPN", _esc_html(text).replace("\n", "<br>"), body_text=text)
+        ok, _ = mailer.send_broadcast(user["email"], P().name, _esc_html(text).replace("\n", "<br>"), body_text=text)
         result["email"] = ok
     return result
 
@@ -1300,7 +1432,7 @@ def _mail_async(fn, *args, **kwargs) -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"[email] {getattr(fn, '__name__', 'mail')}: {exc}", flush=True)
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=projects.bind(_run), daemon=True).start()
 
 
 def _email_changed(old: Optional[str], new: Optional[str]) -> None:
@@ -1509,7 +1641,7 @@ def get_plans_meta() -> dict[str, Any]:
         "extra_device_price": _float_setting("extra_device_price", 40),
         "trial_enabled": trial_enabled(),
         "channel_required": channel_required(),
-        "channel_url": REQUIRED_CHANNEL_URL,
+        "channel_url": P().channel_url,
         "trial_miniapp_enabled": trial_source_enabled("miniapp"),
         "trial_web_enabled": trial_source_enabled("web"),
         "trial_days": fulfillment.trial_days(),
@@ -1741,8 +1873,9 @@ def serialize_promocode(p: dict[str, Any]) -> dict[str, Any]:
         "id": p["id"],
         "code": p["code"],
         "name": p.get("name"),
-        "type": "discount",  # единственный тип: скидка
-        "value": p["value"],  # процент скидки
+        # discount — скидка % на оплату; days — дни к подписке с кнопкой «Забрать» (features.promo_days)
+        "type": "days" if str(p.get("type") or "") == "days" else "discount",
+        "value": p["value"],  # процент скидки или число дней
         "uses_limit": p.get("uses_limit"),
         "uses_count": p.get("uses_count", 0),
         "expires_at": p.get("expires_at"),  # срок, до которого промокод можно активировать
@@ -1752,6 +1885,20 @@ def serialize_promocode(p: dict[str, Any]) -> dict[str, Any]:
 
 
 PROMO_DISCOUNT_DAYS = 90
+
+
+def _promo_type_value(body: "PromocodeBody") -> tuple[str, float]:
+    """тип и значение промокода с проверкой по фичам проекта."""
+    t = "days" if str(body.type or "").lower() == "days" else "discount"
+    v = float(body.value or 0)
+    if t == "days":
+        if not P().feature("promo_days"):
+            raise HTTPException(400, detail={"message": "Промокоды на дни выключены для этого проекта"})
+        if not (1 <= v <= 365) or int(v) != v:
+            raise HTTPException(400, detail={"message": "Дней: целое число от 1 до 365"})
+    elif not (0 < v <= 100):
+        raise HTTPException(400, detail={"message": "Скидка: от 1 до 100%"})
+    return t, v
 
 
 def active_global_discount() -> Optional[dict[str, Any]]:
@@ -1845,7 +1992,8 @@ def apply_promo_to_user(user_id: int, code: str, *, by_admin: bool = False) -> d
 def remove_user_promo(user_id: int, code: Optional[str] = None) -> int:
     """снимает скидку у юзера (админ); code=только этот промо."""
     if code:
-        promo = db.fetchone("SELECT id FROM promocodes WHERE code = ?", (code.upper().strip(),))
+        promo = db.fetchone("SELECT id FROM promocodes WHERE code = ? AND project_id = "
+                            "(SELECT project_id FROM users WHERE id = ?)", (code.upper().strip(), user_id))
         if not promo:
             return 0
         cur = db.execute(
@@ -2089,8 +2237,8 @@ class MailingBody(BaseModel):
 class PromocodeBody(BaseModel):
     code: str
     name: Optional[str] = None
-    type: str = "discount"  # единственный поддерживаемый тип
-    value: float = 0        # процент скидки
+    type: str = "discount"  # discount — скидка %, days — дни к подписке (если у проекта features.promo_days)
+    value: float = 0        # процент скидки или число дней
     uses_limit: Optional[int] = None
     expires_at: Optional[str] = None  # срок активации промокода
     is_active: Any = 1
@@ -2143,6 +2291,7 @@ class BackupSettingsBody(BaseModel):
 class ForumConfigBody(BaseModel):
     forum_chat_id: Optional[str] = None
     panel_url: Optional[str] = None
+    admin_ids: Optional[str] = Field(None, max_length=500)  # Telegram ID админов через запятую
     topics: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -2388,14 +2537,14 @@ def _trusted_ip(login: str, ip: str) -> bool:
 
 def _send_staff_code(st: dict[str, Any], code: str, ip: str, ua: str) -> bool:
     """код 2fa сотруднику в лс от бота."""
-    if not TELEGRAM_BOT_TOKEN:
+    if not projects.get(projects.DEFAULT).bot_token:
         return False
     text = (f"🔒 <b>Код входа в панель</b>: <code>{code}</code>\n"
             f"<b>Логин</b>: {_esc_html(st['username'])}\n<b>IP</b>: {_esc_html(ip or '—')}"
             f"{(' (' + _esc_html(ua[:150]) + ')') if ua else ''}\n\n"
             "Никому не сообщайте код. Если входили не вы — сообщите администратору.")
     try:
-        r = notifier.call("sendMessage", {"chat_id": int(st["telegram_id"]), "text": text, "parse_mode": "HTML"}, timeout=10.0)
+        r = notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "text": text, "parse_mode": "HTML"}, timeout=10.0)
     except Exception:  # noqa: BLE001
         return False
     return bool(r)  # none: telegram не принял
@@ -2442,7 +2591,7 @@ def panel_login(body: LoginBody, request: Request = None) -> Any:  # type: ignor
         if not verify_password(password, admin["password_hash"], admin["password_salt"]):
             return fail("owner", OWNER_NAME)
         # 2fa если есть куда слать код (форум или лс)
-        can_deliver = bool(TELEGRAM_BOT_TOKEN and (forum.chat_id() or forum.admin_chat_id()))
+        can_deliver = bool(projects.get(projects.DEFAULT).bot_token and (forum.chat_id() or forum.admin_chat_ids()))
         if can_deliver:
             temp, code = set_temp_2fa(admin["username"])
             forum.send_code(code, ip=ip, user_agent=ua)
@@ -2452,11 +2601,11 @@ def panel_login(body: LoginBody, request: Request = None) -> Any:  # type: ignor
         token = create_panel_session(admin["username"])
         clear_admin_plaintext()
         audit("owner", OWNER_NAME, "login_ok", 200, ip)
-        print("[panel] вход без 2FA: не настроены ни форум, ни TELEGRAM_ADMIN_ID", flush=True)
+        print("[panel] вход без 2FA: не настроены ни бот, ни форум / ID админов", flush=True)
         return {
             "session_token": token,
             "warning": "Двухфакторная защита выключена: коды входа некуда отправлять. "
-                       "Настройте форум (Настройки → Форум) или TELEGRAM_ADMIN_ID в .env.",
+                       "Подключите бота (Настройки → Проект) и укажите ID админов или форум (Настройки → Уведомления).",
         }
 
     st = staffmod.by_username(login)
@@ -2623,7 +2772,7 @@ def panel_staff_list(p: dict = Depends(require_panel)) -> dict[str, Any]:
     if not owner:
         # куратору только активные операторы
         rows = [r for r in rows if r.get("is_active") and staffmod.role_of(r) == "operator"]
-    return {"staff": [_staff_card(r, owner) for r in rows], "roles": staffmod.ROLES, "bot_ready": bool(TELEGRAM_BOT_TOKEN),
+    return {"staff": [_staff_card(r, owner) for r in rows], "roles": staffmod.ROLES, "bot_ready": bool(projects.get(projects.DEFAULT).bot_token),
             "today": staffpay.today_msk().isoformat()}
 
 
@@ -2776,7 +2925,7 @@ def panel_staff_bonus(staff_id: int, body: BonusBody, p: dict = Depends(require_
     r = _staff_call(staffpay.add_bonus, staff_id, body.amount, body.reason, p["actor"], p["name"] or "Администратор")
     if st.get("telegram_id"):
         try:
-            notifier.call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML",
+            notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML",
                                           "text": f"🎉 <b>Премия {r['amount']:g} ₽</b>\nЗа что: {_esc_html(r['reason'])}"}, timeout=10.0)
         except Exception:  # noqa: BLE001
             pass
@@ -2803,7 +2952,7 @@ def panel_staff_fine(staff_id: int, body: FineBody, p: dict = Depends(require_pa
     r = _staff_call(staffpay.add_fine, staff_id, body.amount, body.reason, p["actor"], p["name"])
     if st.get("telegram_id"):
         try:
-            notifier.call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML",
+            notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML",
                                           "text": f"⚠️ <b>Штраф {r['amount']:g} ₽</b>\nПричина: {_esc_html(r['reason'])}"}, timeout=10.0)
         except Exception:  # noqa: BLE001
             pass
@@ -2906,16 +3055,168 @@ def panel_push_test(p: dict = Depends(require_panel)) -> dict[str, Any]:
     return {"sent": ok, "subscriptions": len(subs)}
 
 
+@app.get("/api/panel/projects")
+def panel_projects(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    """проекты сети для переключателя в панели (без секретов)."""
+    return {"items": [p.public() for p in projects.all_projects()], "default": projects.DEFAULT,
+            "current": db.pid()}
+
+
+class ProjectConfigBody(BaseModel):
+    """настройки проекта в панели; поле не передано — не менять, "" — очистить."""
+    bot_token: Optional[str] = Field(None, max_length=200)
+    channel_id: Optional[str] = Field(None, max_length=100)
+    channel_url: Optional[str] = Field(None, max_length=300)
+    yookassa_shop_id: Optional[str] = Field(None, max_length=50)
+    yookassa_secret_key: Optional[str] = Field(None, max_length=200)
+    support_url: Optional[str] = Field(None, max_length=300)
+    miniapp_link: Optional[str] = Field(None, max_length=300)
+    vpn_sub_domain: Optional[str] = Field(None, max_length=200)
+    whitelist_sub_domain: Optional[str] = Field(None, max_length=200)
+    # фишки проекта (features в project.json)
+    notconn_hours: Optional[int] = Field(None, ge=1, le=168)
+    winback_after_days: Optional[int] = Field(None, ge=1, le=365)
+    winback_gift_days: Optional[int] = Field(None, ge=1, le=30)
+    # семейная подписка: сколько человек вместе с владельцем
+    family_max_members: Optional[int] = Field(None, ge=2, le=20)
+
+
+# значения по умолчанию для фишек проекта
+GROWTH_DEFAULTS = {"notconn_hours": 3, "winback_after_days": 14, "winback_gift_days": 3}
+
+
+def growth_setting(key: str) -> int:
+    try:
+        return int(float(db.get_setting(key, str(GROWTH_DEFAULTS[key])) or GROWTH_DEFAULTS[key]))
+    except (TypeError, ValueError):
+        return GROWTH_DEFAULTS[key]
+
+
+def _mask(v: str) -> str:
+    return (v[:6] + "…" + v[-4:]) if len(v) > 12 else ("•" * len(v))
+
+
+def _project_config_view(pid: str) -> dict[str, Any]:
+    p = projects.get(pid)
+    src = lambda n: projects.config_source(pid, n)  # noqa: E731
+    tok = p.bot_token
+    shop = p.env("YOOKASSA_SHOP_ID")
+    return {
+        "project": p.public(),
+        "bot": {"token_set": bool(tok), "token_hint": _mask(tok.split(":", 1)[1]) if ":" in tok else "",
+                "id": p.bot_id, "username": p.bot_username, "source": src("TELEGRAM_BOT_TOKEN")},
+        "channel": {"id": p.channel_id, "url": p.channel_url,
+                    "source": "panel" if src("CHANNEL_ID") == "panel" else ("project.json" if p.channel_id else "")},
+        "yookassa": {"shop_id": shop, "secret_set": bool(p.env("YOOKASSA_SECRET_KEY")),
+                     "source": src("YOOKASSA_SHOP_ID"),
+                     "webhook_url": f"{p.miniapp_url}/yookassa" if p.miniapp_url else ""},
+        "support_url": p.env("SUPPORT_URL"),
+        "miniapp_link": p.env("TELEGRAM_MINIAPP_LINK"),
+        "vpn_sub_domain": p.env("VPN_SUB_DOMAIN"),
+        "whitelist_sub_domain": p.env("WHITELIST_SUB_DOMAIN"),
+        # домен мини-приложения — инфраструктура (Caddy + сертификат): install.sh
+        "miniapp_url": p.miniapp_url,
+        "features": {k: bool(v) for k, v in (p.cfg.get("features") or {}).items()},
+        "growth": {k: int(float(db.get_setting(k, str(d), project=pid) or d)) for k, d in GROWTH_DEFAULTS.items()},
+        "family_max_members": int(float(db.get_setting("family_max_members", "5", project=pid) or 5)),
+    }
+
+
+def _tg_get_me(token: str) -> Optional[dict[str, Any]]:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getMe", timeout=10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return body.get("result") if body.get("ok") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.get("/api/panel/project/config")
+def panel_project_config(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """бот, канал, ЮKassa открытого в панели проекта (секреты — замаскированы)."""
+    return _project_config_view(db.pid())
+
+
+@app.put("/api/panel/project/config")
+def panel_project_config_put(body: ProjectConfigBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    pid = db.pid()
+    upd: dict[str, Optional[str]] = {}
+    if body.bot_token is not None:
+        tok = body.bot_token.strip()
+        if tok:
+            if not re.fullmatch(r"[0-9]{5,}:[A-Za-z0-9_-]{30,}", tok):
+                raise HTTPException(400, detail={"message": "Токен выглядит так: 1234567890:AAH… (его выдаёт @BotFather)"})
+            for other in projects.all_projects():
+                if other.id != pid and other.bot_token == tok:
+                    raise HTTPException(409, detail={"message": f"Этот бот уже подключён к проекту {other.name}"})
+            me = _tg_get_me(tok)
+            if not me:
+                raise HTTPException(400, detail={"message": "Telegram не принял токен — проверьте его в @BotFather"})
+            upd.update(TELEGRAM_BOT_TOKEN=tok, BOT_USERNAME=str(me.get("username") or ""), BOT_ID=str(me.get("id") or ""))
+        else:
+            upd.update(TELEGRAM_BOT_TOKEN="", BOT_USERNAME="", BOT_ID="")
+    if body.channel_id is not None:
+        cid = body.channel_id.strip()
+        if cid and not re.fullmatch(r"@[A-Za-z0-9_]{4,32}|-100[0-9]{5,15}", cid):
+            raise HTTPException(400, detail={"message": "Канал: @username или числовой ID вида -100…"})
+        upd["CHANNEL_ID"] = cid
+        if body.channel_url is None:
+            upd["CHANNEL_URL"] = f"https://t.me/{cid[1:]}" if cid.startswith("@") else ""
+    if body.channel_url is not None:
+        url = body.channel_url.strip()
+        if url and not re.fullmatch(r"https://t\.me/[A-Za-z0-9_+/-]{3,80}", url):
+            raise HTTPException(400, detail={"message": "Ссылка на канал: https://t.me/…"})
+        upd["CHANNEL_URL"] = url
+    if body.yookassa_shop_id is not None:
+        shop = body.yookassa_shop_id.strip()
+        if shop and not shop.isdigit():
+            raise HTTPException(400, detail={"message": "shopId ЮKassa — число"})
+        upd["YOOKASSA_SHOP_ID"] = shop
+    if body.yookassa_secret_key is not None:
+        upd["YOOKASSA_SECRET_KEY"] = body.yookassa_secret_key.strip()
+    for field, name in (("support_url", "SUPPORT_URL"), ("miniapp_link", "TELEGRAM_MINIAPP_LINK")):
+        v = getattr(body, field)
+        if v is not None:
+            v = v.strip()
+            if v and not v.startswith("https://"):
+                raise HTTPException(400, detail={"message": "Ссылка должна начинаться с https://"})
+            upd[name] = v
+    for field, name in (("vpn_sub_domain", "VPN_SUB_DOMAIN"), ("whitelist_sub_domain", "WHITELIST_SUB_DOMAIN")):
+        v = getattr(body, field)
+        if v is not None:
+            v = re.sub(r"^[a-z]+://", "", v.strip(), flags=re.I).split("/", 1)[0]
+            if v and not re.fullmatch(r"[A-Za-z0-9.-]+(:[0-9]{1,5})?", v):
+                raise HTTPException(400, detail={"message": "Домен подписки — только домен, без https:// и пути"})
+            upd[name] = v
+    if upd:
+        projects.set_panel_config(pid, upd)
+    for k in GROWTH_DEFAULTS:
+        v = getattr(body, k)
+        if v is not None:
+            db.set_setting(k, str(int(v)), project=pid)
+    if body.family_max_members is not None:
+        db.set_setting("family_max_members", str(int(body.family_max_members)), project=pid)
+    return _project_config_view(pid)
+
+
+def _scope(scope: Optional[str]) -> Optional[str]:
+    """scope=all — вся сеть, иначе текущий проект."""
+    return _ALL if str(scope or "") in ("all", "*") else None
+
+
 @app.get("/api/panel/dashboard")
-def panel_dashboard(_: dict = Depends(require_panel)) -> dict[str, Any]:
-    """главная: деньги, новые юзеры, список дел."""
-    return stats_mod.dashboard()
+def panel_dashboard(scope: Optional[str] = Query(None, max_length=24),
+                    _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """главная: деньги, новые юзеры, список дел (scope=all — по всей сети)."""
+    return stats_mod.dashboard(_scope(scope))
 
 
 @app.get("/api/panel/statistics")
 def panel_statistics(period: str = Query("30d", max_length=10),
                      date_from: Optional[str] = Query(None, alias="from", max_length=10),
                      date_to: Optional[str] = Query(None, alias="to", max_length=10),
+                     scope: Optional[str] = Query(None, max_length=24),
                      _: dict = Depends(require_panel)) -> dict[str, Any]:
     """статистика: пресет или from/to (гггг-мм-дд)."""
     d1 = d2 = None
@@ -2928,20 +3229,23 @@ def panel_statistics(period: str = Query("30d", max_length=10),
             d1, d2 = d2, d1
         if d1.year < 2000:
             raise HTTPException(400, detail={"message": "Неверная дата"})
-    data = stats_mod.statistics(period, d1, d2)
-    data["subs"]["state_dist"] = _user_distribution()
+    sc = _scope(scope)
+    data = stats_mod.statistics(period, d1, d2, scope=sc or db.pid())
+    data["subs"]["state_dist"] = _user_distribution(sc)
     return data
 
 
 @app.get("/api/panel/stats/summary")
-def panel_stats_summary(_: dict = Depends(require_panel)) -> dict[str, Any]:
-    total_users = db.fetchone("SELECT COUNT(*) AS c FROM users")
-    active_keys = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active'")
+def panel_stats_summary(scope: Optional[str] = Query(None, max_length=24),
+                        _: dict = Depends(require_panel)) -> dict[str, Any]:
+    pw, pp = _pf("project_id", _scope(scope))
+    total_users = db.fetchone("SELECT COUNT(*) AS c FROM users WHERE 1 = 1" + pw, pp)
+    active_keys = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active'" + pw, pp)
     month_start = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
     revenue_row = db.fetchone(
         "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions "
-        "WHERE status = 'completed' AND amount > 0 AND created_at >= ?",
-        (month_start,),
+        "WHERE status = 'completed' AND amount > 0 AND created_at >= ?" + pw,
+        (month_start, *pp),
     )
     return {
         "total_users": int(total_users["c"]) if total_users else 0,
@@ -2967,19 +3271,20 @@ _METHOD_LABELS = {
 }
 
 
-def _payment_methods_chart() -> list[dict[str, Any]]:
+def _payment_methods_chart(scope: Optional[str] = None) -> list[dict[str, Any]]:
     """сколько оплат каждым способом (только успешные)."""
+    pw, pp = _pf("project_id", scope)
     rows = db.fetchall(
         "SELECT CASE WHEN provider = 'balance' THEN 'balance' ELSE COALESCE(method, provider, 'other') END AS m, "
-        "COUNT(*) AS c FROM payments WHERE status = 'paid' GROUP BY m ORDER BY c DESC"
+        "COUNT(*) AS c FROM payments WHERE status = 'paid'" + pw + " GROUP BY m ORDER BY c DESC", pp
     )
     return [{"name": _METHOD_LABELS.get(str(r["m"]).lower(), str(r["m"])), "value": int(r["c"])} for r in rows]
 
 
-def _user_distribution() -> list[dict[str, Any]]:
+def _user_distribution(scope: Optional[str] = None) -> list[dict[str, Any]]:
     """разбивка статусов по фактическим подпискам."""
     counts = {"Active": 0, "Trial": 0, "Expired": 0, "None": 0, "Banned": 0}
-    for st in user_states_map().values():
+    for st in user_states_map(scope or db.pid()).values():
         counts[st] = counts.get(st, 0) + 1
     return [
         {"name": "Активные", "value": counts["Active"]},
@@ -2993,11 +3298,14 @@ def _user_distribution() -> list[dict[str, Any]]:
 @app.get("/api/panel/statistics/full")
 def panel_statistics_full(
     period: str = Query("week"),
+    scope: Optional[str] = Query(None, max_length=24),
     _: dict = Depends(require_panel),
 ) -> dict[str, Any]:
     days = {"week": 7, "month": 30, "year": 365}.get(period, 7)
     now = utcnow()
-    txs = db.fetchall("SELECT * FROM transactions WHERE status = 'completed'")
+    scope = _scope(scope)
+    pw, pp = _pf("project_id", scope)
+    txs = db.fetchall("SELECT * FROM transactions WHERE status = 'completed'" + pw, pp)
     # транзакции по дням один раз, не на каждый день
     by_day: dict[Any, float] = {}
     for tx in txs:
@@ -3019,20 +3327,21 @@ def panel_statistics_full(
     values = [d["value"] for d in revenue_by_day]
     best_idx = max(range(len(values)), key=lambda i: values[i]) if values else 0
 
-    users = db.fetchall("SELECT * FROM users")
-    active_subs = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active'")
+    users = db.fetchall("SELECT * FROM users WHERE 1 = 1" + pw, pp)
+    active_subs = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active'" + pw, pp)
     paid_subs = db.fetchone(
-        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active' AND type = 'vpn'"
+        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active' AND type = 'vpn'" + pw, pp
     )
-    total_subs = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions")
+    total_subs = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE 1 = 1" + pw, pp)
     # приглашающие: кто привёл хотя бы одного
     partners = int((db.fetchone(
-        "SELECT COUNT(DISTINCT referred_by) AS c FROM users WHERE referred_by IS NOT NULL") or {}).get("c") or 0)
+        "SELECT COUNT(DISTINCT referred_by) AS c FROM users WHERE referred_by IS NOT NULL" + pw, pp) or {}).get("c") or 0)
     # число приглашённых одним запросом
     ref_counts = {
         int(r["rid"]): int(r["c"])
         for r in db.fetchall(
-            "SELECT referred_by AS rid, COUNT(*) AS c FROM users WHERE referred_by IS NOT NULL GROUP BY referred_by"
+            "SELECT referred_by AS rid, COUNT(*) AS c FROM users WHERE referred_by IS NOT NULL" + pw
+            + " GROUP BY referred_by", pp
         )
     }
     total_invited = sum(ref_counts.values())
@@ -3074,8 +3383,8 @@ def panel_statistics_full(
         "bestDayValue": values[best_idx] if values else 0,
         "bestDayDate": revenue_by_day[best_idx]["label"] if revenue_by_day else None,
         "boughtThisWeek": sum(1 for tx in txs if float(tx.get("amount") or 0) > 0),
-        "userDistData": _user_distribution(),
-        "paymentMethodsData": _payment_methods_chart(),
+        "userDistData": _user_distribution(scope),
+        "paymentMethodsData": _payment_methods_chart(scope),
         "totalSubscriptions": int(total_subs["c"]) if total_subs else 0,
         "paidSubscriptions": paid_count,
         "conversionRate": round((paid_count / total_users * 100) if total_users else 0, 1),
@@ -3087,18 +3396,20 @@ def panel_statistics_full(
 
 
 @app.get("/api/panel/finance/stats")
-def panel_finance_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
+def panel_finance_stats(scope: Optional[str] = Query(None, max_length=24),
+                        _: dict = Depends(require_panel)) -> dict[str, Any]:
     # считаем по payments, как в «финансах»
+    pw, pp = _pf("project_id", _scope(scope))
     deposits = db.fetchone(
         "SELECT COALESCE(SUM(amount), 0) AS s FROM payments "
-        "WHERE status IN ('paid', 'completed') AND COALESCE(amount, 0) > 0"
+        "WHERE status IN ('paid', 'completed') AND COALESCE(amount, 0) > 0" + pw, pp
     )
     withdrawals = db.fetchone(
         "SELECT COALESCE(SUM(amount), 0) AS s FROM payments "
-        "WHERE status = 'refunded' AND COALESCE(amount, 0) > 0"
+        "WHERE status = 'refunded' AND COALESCE(amount, 0) > 0" + pw, pp
     )
     successful = db.fetchone(
-        "SELECT COUNT(*) AS c FROM payments WHERE status IN ('paid', 'completed')"
+        "SELECT COUNT(*) AS c FROM payments WHERE status IN ('paid', 'completed')" + pw, pp
     )
     return {
         "deposits": round(float(deposits["s"]) if deposits else 0, 2),
@@ -3116,8 +3427,8 @@ def panel_transactions(
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
     rows = db.fetchall(
-        "SELECT * FROM transactions ORDER BY id DESC LIMIT ? OFFSET ?",
-        (limit, offset),
+        "SELECT * FROM transactions WHERE project_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+        (db.pid(), limit, offset),
     )
     return [serialize_transaction(tx) for tx in rows]
 
@@ -3142,8 +3453,8 @@ def panel_payments(
     """оплаченные/возвраты/чарджбеки; поиск по id и юзеру."""
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    where = "p.status IN ('paid', 'completed', 'refunding', 'refunded', 'chargeback')"
-    params: list[Any] = []
+    where = "p.status IN ('paid', 'completed', 'refunding', 'refunded', 'chargeback') AND p.project_id = ?"
+    params: list[Any] = [db.pid()]
     q = q.strip().lstrip("@#")
     if q:
         esc = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -3183,8 +3494,8 @@ def panel_payments(
 
 
 def _filter_users(search: Optional[str], status: Optional[str]) -> list[dict[str, Any]]:
-    items = db.fetchall("SELECT * FROM users ORDER BY id DESC")
-    states = user_states_map()
+    items = db.fetchall("SELECT * FROM users WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    states = user_states_map(db.pid())
     for u in items:
         u["_state"] = states.get(int(u["id"]), "None")
     if status and status != "all":
@@ -3927,6 +4238,7 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
 
     return {
         "id": user["id"],
+        "project": projects.of(user),
         "telegram_id": user.get("telegram_id"),
         "username": user.get("username"),
         "first_name": user.get("first_name"),
@@ -3949,6 +4261,9 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "has_trial": has_trial,
         # кнопка «Сбросить триал»: активна, если пробный сейчас взять нельзя (брал, платил, удаляли аккаунт)
         "trial_resettable": _trial_blocks(user_id) is not None,
+        # почему пробный недоступен — отдельно в мини-приложении и на сайте (None — доступен)
+        "trial_status": {src: (lambda r: {"available": r is None, "reason": r, "text": _TRIAL_REASON_TEXT.get(r or "", "")})(
+            trial_reason(user_id, src)) for src in TRIAL_SOURCES},
         "referrals": [
             {
                 "id": u["id"],
@@ -4025,7 +4340,16 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
     if action in ("ADD_BALANCE", "SUB_BALANCE"):
         # внутреннего баланса нет, старые действия отключены
         raise HTTPException(400, detail={"message": "Внутреннего баланса нет — используйте реферальный баланс"})
-    if action == "EXTEND_SUB":
+    if action == "EXTEND_ALL":
+        # одной кнопкой: VPN + ключ обхода до той же даты (features.single_renew)
+        try:
+            all_days = int(float(value or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail={"message": "Укажите число дней"})
+        if not 1 <= all_days <= 1095:
+            raise HTTPException(400, detail={"message": "Дней: от 1 до 1095"})
+        grant_days_all(user_id, all_days, "panel")
+    elif action == "EXTEND_SUB":
         extend_user_sub(user_id, int(float(value or 0)), body.subscription_id)
         _rw_sync_expiry(user)
         fulfillment.sync_whitelist_to_vpn_bg([user_id], "panel")  # единая подписка: обход до той же даты
@@ -4189,7 +4513,8 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
         db.execute("UPDATE users SET partner_balance = MAX(0, partner_balance - ?) WHERE id = ?", (float(value or 0), user_id))
     elif action == "SET_TELEGRAM_ID":
         new_tg = int(float(value))
-        clash = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND id != ?", (new_tg, user_id))
+        clash = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND id != ? AND project_id = ?",
+                            (new_tg, user_id, projects.of(user)))
         if clash:
             other = get_user(int(clash["id"]))
             assert other is not None
@@ -4206,7 +4531,8 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
         new_email = str(value or "").strip().lower()
         if not _valid_email(new_email):
             raise HTTPException(400, detail="Некорректный email")
-        clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ?", (new_email, user_id))
+        clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ? AND project_id = ?",
+                            (new_email, user_id, projects.of(user)))
         if clash:
             other = get_user(int(clash["id"]))
             assert other is not None
@@ -4330,7 +4656,7 @@ def _action_notify_text(action: str, value: Any) -> str:
         return "ℹ️ Лимит трафика по вашей подписке обновлён."
     if a == "RESET_SUB":
         return ("🔑 Ваша ссылка на подписку обновлена — старая больше не работает.\n\n"
-                "Откройте приложение BatmanVPN → «Подписка» → «Добавить подписку», чтобы подключиться заново.")
+                f"Откройте приложение {P().name} → «Подписка» → «Добавить подписку», чтобы подключиться заново.")
     if a == "BAN":
         return "🚫 Ваш аккаунт заблокирован."
     if a == "UNBAN":
@@ -4374,7 +4700,7 @@ def _mass_reset_traffic_worker() -> None:
     if not client:
         return
     try:
-        own = provisioning.own_panel_users(client)
+        own = provisioning.own_panel_users(client, project=db.pid())
     except Exception as exc:  # noqa: BLE001
         forum.report_error("Массовый сброс трафика не удался", f"{type(exc).__name__}: {exc}")
         return
@@ -4387,7 +4713,7 @@ def _mass_reset_traffic_worker() -> None:
             print(f"[mass] сброс трафика {u.get('username')}: {type(exc).__name__}: {exc}", flush=True)
     if failed:
         forum.report_error("Массовый сброс трафика", f"не удалось у {failed} из {len(own)} пользователей")
-    db.execute("UPDATE subscriptions SET traffic_used = 0 WHERE status != 'Deleted'")
+    db.execute("UPDATE subscriptions SET traffic_used = 0 WHERE status != 'Deleted' AND project_id = ?", (db.pid(),))
     # трафик снова есть: снимаем grace по трафику
     grace.end_traffic_all()
     print(f"[mass] сброс трафика: сброшено {len(own) - failed}, ошибок {failed}", flush=True)
@@ -4547,6 +4873,8 @@ def _transfer_plan(src: dict[str, Any], dst: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/panel/users/{user_id}/transfer")
 def panel_transfer_preview(user_id: int, target_id: int = Query(...), _: dict = Depends(require_panel)) -> dict[str, Any]:
     src, dst = get_user(user_id), get_user(target_id)
+    if src and dst and projects.of(src) != projects.of(dst):
+        raise HTTPException(400, detail={"message": "Переносить подписку можно только внутри одного проекта"})
     if not src or not dst:
         raise HTTPException(404, detail={"message": "Пользователь не найден"})
     return _transfer_plan(src, dst)
@@ -4555,6 +4883,8 @@ def panel_transfer_preview(user_id: int, target_id: int = Query(...), _: dict = 
 @app.post("/api/panel/users/{user_id}/transfer")
 def panel_transfer(user_id: int, body: TransferBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
     src, dst = get_user(user_id), get_user(body.target_id)
+    if src and dst and projects.of(src) != projects.of(dst):
+        raise HTTPException(400, detail={"message": "Переносить подписку можно только внутри одного проекта"})
     if not src or not dst:
         raise HTTPException(404, detail={"message": "Пользователь не найден"})
     plan = _transfer_plan(src, dst)
@@ -4697,6 +5027,8 @@ def merge_accounts(keep_id: int, drop_id: int) -> dict[str, Any]:
     keep, drop = get_user(keep_id), get_user(drop_id)
     if not keep or not drop:
         raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    if projects.of(keep) != projects.of(drop):
+        raise HTTPException(400, detail={"message": "Объединять можно только аккаунты одного проекта"})
     preview = merge_preview(keep, drop)
     now = utcnow()
     ks, ds = _live_any_sub(keep_id), _live_any_sub(drop_id)
@@ -4827,11 +5159,12 @@ def panel_mass_action(body: MassActionBody, _: dict = Depends(require_panel)) ->
             raise HTTPException(400, detail={"message": "Дней: от 1 до 365"})
         # только действующие подписки; истёкшие не оживляем
         rows = db.fetchall(
-            "SELECT id FROM subscriptions WHERE status = 'Active' AND (expires_at IS NULL OR expires_at > ?)",
-            (iso(),),
+            "SELECT id FROM subscriptions WHERE status = 'Active' AND (expires_at IS NULL OR expires_at > ?) "
+            "AND project_id = ?",
+            (iso(), db.pid()),
         )
         ids = [int(r["id"]) for r in rows]
-        threading.Thread(target=_mass_add_days_worker, args=(ids, days), daemon=True).start()
+        threading.Thread(target=projects.bind(_mass_add_days_worker), args=(ids, days), daemon=True).start()
         return {"success": True, "affected": len(ids), "background": True,
                 "message": f"Продлеваем {len(ids)} подписок на {days} дн. — выполняется в фоне"}
 
@@ -4840,23 +5173,24 @@ def panel_mass_action(body: MassActionBody, _: dict = Depends(require_panel)) ->
         if not client:
             raise HTTPException(400, detail={"message": "Remnawave не настроена"})
         # не bulk_all_reset_traffic: он сбросил бы трафик всей панели (user_… и чужим тоже)
-        affected = int((db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status != 'Deleted'") or {}).get("c") or 0)
-        threading.Thread(target=_mass_reset_traffic_worker, name="mass-reset-traffic", daemon=True).start()
+        affected = int((db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status != 'Deleted' AND project_id = ?",
+                                    (db.pid(),)) or {}).get("c") or 0)
+        threading.Thread(target=projects.bind(_mass_reset_traffic_worker), name="mass-reset-traffic", daemon=True).start()
         return {"success": True, "affected": affected, "background": True,
-                "message": "Сбрасываем трафик у batman_-пользователей — выполняется в фоне"}
+                "message": f"Сбрасываем трафик у пользователей {P().name} — выполняется в фоне"}
 
     # mass_reset_trial: разрешить пробный снова после окончания
     # действующие пробные не трогаем
     now_iso = iso()
     rows = db.fetchall(
         "SELECT DISTINCT user_id FROM subscriptions WHERE type = 'trial' "
-        "AND NOT (status = 'Active' AND (expires_at IS NULL OR expires_at > ?))",
-        (now_iso,),
+        "AND NOT (status = 'Active' AND (expires_at IS NULL OR expires_at > ?)) AND project_id = ?",
+        (now_iso, db.pid()),
     )
     db.execute(
         "DELETE FROM subscriptions WHERE type = 'trial' "
-        "AND NOT (status = 'Active' AND (expires_at IS NULL OR expires_at > ?))",
-        (now_iso,),
+        "AND NOT (status = 'Active' AND (expires_at IS NULL OR expires_at > ?)) AND project_id = ?",
+        (now_iso, db.pid()),
     )
     for r in rows:
         _clear_trial_claim(int(r["user_id"]))
@@ -4874,7 +5208,7 @@ def panel_keys(
     status: Optional[str] = Query(None),
     _: dict = Depends(require_panel),
 ) -> dict[str, Any]:
-    items = db.fetchall("SELECT * FROM subscriptions ORDER BY id DESC")
+    items = db.fetchall("SELECT * FROM subscriptions WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
     if status and status != "all":
         items = [k for k in items if str(k.get("status", "")).lower() == status.lower()]
     needle = (search or q or "").lower().lstrip("@")
@@ -4938,18 +5272,18 @@ def panel_block_key(key_id: int, body: BlockKeyBody, p: dict = Depends(require_p
 
 @app.get("/api/panel/mailing/stats")
 def panel_mailing_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
-    row = db.fetchone("SELECT COALESCE(SUM(sent_count), 0) AS s FROM mailings")
+    row = db.fetchone("SELECT COALESCE(SUM(sent_count), 0) AS s FROM mailings WHERE project_id = ?", (db.pid(),))
     return {"totalSent": int(row["s"]) if row else 0}
 
 
 @app.get("/api/panel/mailing/history")
 def panel_mailing_history(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
-    items = db.fetchall("SELECT * FROM mailings ORDER BY id DESC")
+    items = db.fetchall("SELECT * FROM mailings WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
     return [serialize_mailing(m) for m in items]
 
 
 def _mailing_recipients(target: str) -> list[dict[str, Any]]:
-    recipients = db.fetchall("SELECT * FROM users WHERE COALESCE(is_banned, 0) = 0")
+    recipients = db.fetchall("SELECT * FROM users WHERE COALESCE(is_banned, 0) = 0 AND project_id = ?", (db.pid(),))
     if target == "active":
         recipients = [u for u in recipients if subscription_status_for_user(u) in ("active", "trial")]
     elif target == "expired":
@@ -5016,13 +5350,23 @@ class _RateLimiter:
         return round(1.0 / self._interval, 1)
 
 
+def _mailing_project(mailing_id: int) -> str:
+    return projects.of(db.fetchone("SELECT project_id FROM mailings WHERE id = ?", (int(mailing_id),)))
+
+
 def _deliver_mailing(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str]) -> None:
+    """фоновая доставка рассылки — ботом проекта рассылки."""
+    with projects.use(_mailing_project(mailing_id)):
+        _deliver_mailing_impl(mailing_id, body, recipients, channels)
+
+
+def _deliver_mailing_impl(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str]) -> None:
     """фоновая доставка рассылки пулом воркеров."""
     import concurrent.futures as _fut
 
     do_tg = "telegram" in channels
     do_email = "email" in channels
-    subject = (body.subject or body.title or "BatmanVPN").strip() or "BatmanVPN"
+    subject = (body.subject or body.title or P().name).strip() or P().name
     email_html = _email_html_from_message(body.message) if do_email else ""
 
     limiter = _RateLimiter(BROADCAST_RATE)
@@ -5040,7 +5384,7 @@ def _deliver_mailing(mailing_id: int, body: MailingBody, recipients: list[dict[s
             msg_id = notifier.send_broadcast_message(
                 chat_id, body.message,
                 image_url=body.image_url, button_type=body.button_type,
-                button_value=body.button_value, miniapp_url=MINIAPP_URL, bot_username=BOT_USERNAME,
+                button_value=body.button_value, miniapp_url=P().miniapp_url, bot_username=P().bot_username,
                 on_throttle=limiter.throttle,  # 429 -> авто-снижение скорости
             )
             if msg_id is not None:
@@ -5074,7 +5418,7 @@ def _deliver_mailing(mailing_id: int, body: MailingBody, recipients: list[dict[s
                 pass
 
     with _fut.ThreadPoolExecutor(max_workers=BROADCAST_WORKERS) as pool:
-        list(pool.map(_send_one, recipients))
+        list(pool.map(projects.bind(_send_one), recipients))
 
     if mailing_id in _MAILING_CANCELLED:
         return  # удалением займётся _purge_mailing
@@ -5088,7 +5432,12 @@ _MAILING_THREADS: dict[int, "threading.Thread"] = {}
 
 
 def _purge_mailing(mailing_id: int) -> None:
-    """удаляет сообщения рассылки в telegram, потом запись."""
+    """удаляет сообщения рассылки в telegram (ботом её проекта), потом запись."""
+    with projects.use(_mailing_project(mailing_id)):
+        _purge_mailing_impl(mailing_id)
+
+
+def _purge_mailing_impl(mailing_id: int) -> None:
     import concurrent.futures as _fut
 
     # ждём остановку отправки, чтобы не пропустить хвост
@@ -5111,7 +5460,7 @@ def _purge_mailing(mailing_id: int) -> None:
 
     if rows:
         with _fut.ThreadPoolExecutor(max_workers=BROADCAST_WORKERS) as pool:
-            list(pool.map(_del_one, rows))
+            list(pool.map(projects.bind(_del_one), rows))
 
     db.execute("DELETE FROM mailing_messages WHERE mailing_id = ?", (mailing_id,))
     db.execute("DELETE FROM mailings WHERE id = ?", (mailing_id,))
@@ -5191,7 +5540,7 @@ def panel_mailing_delete(mailing_id: int, _: dict = Depends(require_panel)) -> d
 
 @app.get("/api/panel/promocodes/stats")
 def panel_promo_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
-    items = db.fetchall("SELECT * FROM promocodes")
+    items = db.fetchall("SELECT * FROM promocodes WHERE project_id = ?", (db.pid(),))
     return {
         "total": len(items),
         "totalUses": sum(int(p.get("uses_count") or 0) for p in items),
@@ -5201,7 +5550,7 @@ def panel_promo_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
 
 @app.get("/api/panel/promocodes")
 def panel_promocodes(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
-    items = db.fetchall("SELECT * FROM promocodes ORDER BY id DESC")
+    items = db.fetchall("SELECT * FROM promocodes WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
     # системные (персональные от бота) в панели не показываем
     return [serialize_promocode(p) for p in items if str(p.get("code") or "").upper() not in services.SYSTEM_PROMO_CODES]
 
@@ -5209,13 +5558,20 @@ def panel_promocodes(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
 @app.post("/api/panel/promocodes")
 def panel_promo_create(body: PromocodeBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
     now = db.utcnow_iso()
+    clash = db.fetchone("SELECT project_id FROM promocodes WHERE code = ?", (body.code.upper().strip(),))
+    if clash:
+        # код уникален во всей сети: промокод проекта живёт в своём проекте, но совпадать коды не могут
+        where = "" if projects.of(clash) == db.pid() else f" в проекте {projects.get(projects.of(clash)).name}"
+        raise HTTPException(409, detail={"message": f"Промокод с таким кодом уже есть{where}"})
+    ptype, pval = _promo_type_value(body)
     db.execute(
         "INSERT INTO promocodes (code, name, type, value, uses_limit, uses_count, expires_at, is_active, created_at) "
-        "VALUES (?, ?, 'discount', ?, ?, 0, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
         (
             body.code.upper().strip(),
             (body.name or "").strip() or None,
-            float(body.value),
+            ptype,
+            pval,
             body.uses_limit,
             body.expires_at,
             1 if _as_bool(body.is_active, True) else 0,
@@ -5232,13 +5588,15 @@ def panel_promo_update(promo_id: int, body: PromocodeBody, _: dict = Depends(req
     item = db.fetchone("SELECT * FROM promocodes WHERE id = ?", (promo_id,))
     if not item:
         raise HTTPException(404, detail="Promocode not found")
+    ptype, pval = _promo_type_value(body)
     db.execute(
-        "UPDATE promocodes SET code = ?, name = ?, type = 'discount', value = ?, uses_limit = ?, "
+        "UPDATE promocodes SET code = ?, name = ?, type = ?, value = ?, uses_limit = ?, "
         "expires_at = ?, is_active = ? WHERE id = ?",
         (
             body.code.upper().strip(),
             (body.name or "").strip() or None,
-            float(body.value),
+            ptype,
+            pval,
             body.uses_limit,
             body.expires_at,
             1 if _as_bool(body.is_active, bool(item.get("is_active"))) else 0,
@@ -5261,7 +5619,7 @@ def panel_promo_delete(promo_id: int, _: dict = Depends(require_panel)) -> dict[
 
 @app.get("/api/panel/promotions")
 def panel_promotions(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
-    items = db.fetchall("SELECT * FROM promotions ORDER BY id DESC")
+    items = db.fetchall("SELECT * FROM promotions WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
     return [serialize_promotion(p) for p in items]
 
 
@@ -5327,12 +5685,12 @@ def panel_promo_campaign_delete(promo_id: int, _: dict = Depends(require_panel))
 
 
 def _tracking_url(code: str) -> str:
-    return f"https://t.me/{BOT_USERNAME}?start=trk_{code}"
+    return f"https://t.me/{P().bot_username}?start=trk_{code}"
 
 
 @app.get("/api/panel/tracking-links/stats")
 def panel_tracking_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
-    links = db.fetchall("SELECT * FROM tracking_links")
+    links = db.fetchall("SELECT * FROM tracking_links WHERE project_id = ?", (db.pid(),))
     return {
         "total_links": sum(1 for l in links if l.get("is_active")),
         "total_clicks": sum(int(l.get("clicks") or 0) for l in links),
@@ -5344,7 +5702,7 @@ def panel_tracking_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
 
 @app.get("/api/panel/tracking-links")
 def panel_tracking_list(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
-    items = db.fetchall("SELECT * FROM tracking_links ORDER BY id DESC")
+    items = db.fetchall("SELECT * FROM tracking_links WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
     return [serialize_tracking(l) for l in items]
 
 
@@ -5432,7 +5790,7 @@ class AdminGiftRevokeBody(BaseModel):
 
 
 def _gift_link(code: str) -> str:
-    return f"https://t.me/{BOT_USERNAME}?start=gift_{code[len(reflevels.GIFT_PREFIX):]}"
+    return f"https://t.me/{P().bot_username}?start=gift_{code[len(reflevels.GIFT_PREFIX):]}"
 
 
 @app.get("/api/panel/gifts")
@@ -5693,7 +6051,8 @@ def panel_forum_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
 
 @app.put("/api/panel/forum")
 def panel_forum_put(body: ForumConfigBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
-    return forum.save_config(body.forum_chat_id or "", body.topics or {}, panel_url_value=body.panel_url)
+    return forum.save_config(body.forum_chat_id or "", body.topics or {}, panel_url_value=body.panel_url,
+                             admin_ids_value=body.admin_ids)
 
 
 class MonNodeCreateBody(BaseModel):
@@ -5815,12 +6174,14 @@ def _serialize_withdrawal_admin(w: dict[str, Any]) -> dict[str, Any]:
 @app.get("/api/panel/withdrawals")
 def panel_withdrawals(status: Optional[str] = Query(None), _: dict = Depends(require_panel)) -> dict[str, Any]:
     if status and status != "all":
-        rows = db.fetchall("SELECT * FROM withdrawals WHERE status = ? ORDER BY id DESC", (status,))
+        rows = db.fetchall("SELECT * FROM withdrawals WHERE status = ? AND project_id = ? ORDER BY id DESC",
+                           (status, db.pid()))
     else:
-        rows = db.fetchall("SELECT * FROM withdrawals ORDER BY id DESC")
-    pending = db.fetchone("SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = 'pending'")
-    approved = db.fetchone("SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = 'approved'")
-    done = db.fetchone("SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = 'completed'")
+        rows = db.fetchall("SELECT * FROM withdrawals WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    _w = "SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = ? AND project_id = ?"
+    pending = db.fetchone(_w, ("pending", db.pid()))
+    approved = db.fetchone(_w, ("approved", db.pid()))
+    done = db.fetchone(_w, ("completed", db.pid()))
     return {
         "items": [_serialize_withdrawal_admin(w) for w in rows],
         "pending_count": int(pending["c"]) if pending else 0,
@@ -6004,8 +6365,8 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
 @app.get("/api/app/config")
 def app_config(request: Request) -> dict[str, Any]:
     bot_id = ""
-    if TELEGRAM_BOT_TOKEN and ":" in TELEGRAM_BOT_TOKEN:
-        bot_id = TELEGRAM_BOT_TOKEN.split(":", 1)[0]
+    if P().bot_token and ":" in P().bot_token:
+        bot_id = P().bot_token.split(":", 1)[0]
     meta = get_plans_meta()
     prices = {p["devices"]: p["price_rub"] for p in get_active_plans()}
     offer = db.get_setting("offer_text", "")
@@ -6014,13 +6375,13 @@ def app_config(request: Request) -> dict[str, Any]:
     return {
         "telegramOauthBotId": bot_id,
         "telegramOauthUrl": "",
-        "botUsername": BOT_USERNAME,
+        "botUsername": P().bot_username,
         "prices": prices,
         "extraDevicePrice": meta["extra_device_price"],
         "basePrice": meta["base_price"],
         "minPrice": min_plan_price(),
         "legalAvailable": bool(offer.strip() or privacy.strip()),
-        "supportUrl": _env("SUPPORT_URL") or "",
+        "supportUrl": P().support_url,
         "trialEnabled": trial_enabled_for(app_source(request)),
         "trialDays": fulfillment.trial_days(),
         "providerMin": PROVIDER_MIN_RUB,
@@ -6056,16 +6417,16 @@ def _resolve_app_user_from_tg(tg: dict[str, Any], allow_banned: bool = False) ->
 def _resolve_app_user_from_email(email: str) -> dict[str, Any]:
     """найти юзера по email или создать (вход = регистрация)."""
     email = email.strip().lower()
-    user = db.fetchone("SELECT * FROM users WHERE lower(email) = ?", (email,))
+    user = db.fetchone("SELECT * FROM users WHERE lower(email) = ? AND project_id = ?", (email, db.pid()))
     if user:
         if user.get("is_banned"):
             raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
         return user
     db.execute(
-        "INSERT INTO users (telegram_id, username, email, balance, status, is_banned, referral_code, "
+        "INSERT INTO users (project_id, telegram_id, username, email, balance, status, is_banned, referral_code, "
         "is_partner, partner_balance, partner_rate, autopay_enabled, created_at) "
-        "VALUES (NULL, NULL, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
-        (email, gen_ref_code(), db.utcnow_iso()),
+        "VALUES (?, NULL, NULL, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
+        (db.pid(), email, gen_ref_code(), db.utcnow_iso()),
     )
     fresh = get_user(db.last_id())
     assert fresh is not None
@@ -6078,7 +6439,7 @@ def app_auth(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegra
     user = _resolve_app_user_from_tg(data.get("user") or {}, allow_banned=True)
     # сессия-страховка, когда initdata протух
     token = create_app_session(int(user["id"]), "miniapp")
-    return {"user": serialize_app_user(user, "miniapp"), "token": token}
+    return {"user": app_user_payload(user, "miniapp"), "token": token}
 
 
 def _apply_web_referral(user_id: int, code: Optional[str]) -> None:
@@ -6092,7 +6453,7 @@ def _apply_web_referral(user_id: int, code: Optional[str]) -> None:
     ref = get_user(int(code)) if code.isdigit() else None
     if not ref:
         ref = db.fetchone("SELECT * FROM users WHERE referral_code = ?", (code.upper(),))
-    if not ref or int(ref["id"]) == int(user_id):
+    if not ref or int(ref["id"]) == int(user_id) or projects.of(ref) != projects.of(user):
         return
     if ref.get("referred_by") and int(ref["referred_by"]) == int(user_id):
         return
@@ -6128,7 +6489,7 @@ def app_auth_oauth(body: OauthLoginBody, request: Request = None) -> dict[str, A
     else:
         _notify_login(user, "Telegram", request)
     token = create_app_session(int(user["id"]))
-    return {"user": serialize_app_user(user, "web"), "token": token}
+    return {"user": app_user_payload(user, "web"), "token": token}
 
 
 @app.post("/api/app/auth/email/request")
@@ -6181,14 +6542,14 @@ def app_auth_email_verify(body: EmailVerifyBody, request: Request = None) -> dic
     _require_captcha(body.captcha_token, request)
     if not verify_email_code(email, body.code or ""):
         raise HTTPException(401, detail={"message": "Неверный или истёкший код"})
-    was_new = db.fetchone("SELECT id FROM users WHERE lower(email) = ?", (email,)) is None
+    was_new = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND project_id = ?", (email, db.pid())) is None
     user = _resolve_app_user_from_email(email)
     if was_new:
         _apply_web_referral(int(user["id"]), body.ref)
     else:
         _notify_login(user, "код на почту", request)
     token = create_app_session(int(user["id"]))
-    return {"user": serialize_app_user(user, "web"), "token": token}
+    return {"user": app_user_payload(user, "web"), "token": token}
 
 
 @app.post("/api/app/auth/logout")
@@ -6226,7 +6587,8 @@ def _app_user_from_init(
             # initdata протух: пускаем по сессии того же tg
             sess = get_app_session(token) if token else None
             user = get_user(int(sess["user_id"])) if sess else None
-            if not user or not exc.telegram_id or int(user.get("telegram_id") or 0) != exc.telegram_id:
+            if not user or not exc.telegram_id or int(user.get("telegram_id") or 0) != exc.telegram_id \
+                    or not same_project(user):
                 raise
             if user.get("is_banned") and not allow_banned:
                 raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
@@ -6245,6 +6607,9 @@ def _app_user_from_init(
         user = get_user(int(sess["user_id"]))
         if not user:
             raise HTTPException(401, detail={"message": "Пользователь не найден"})
+        if not same_project(user):
+            # сессия другого проекта сети (другой бренд) — здесь она недействительна
+            raise HTTPException(401, detail={"message": "Сессия истекла, войдите заново"})
         if user.get("is_banned") and not allow_banned:
             raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
         return user
@@ -6259,18 +6624,18 @@ _CHANNEL_MEMBER_STATUSES = {"creator", "administrator", "member", "restricted"}
 def _check_channel_membership(user: dict[str, Any], *, force: bool = False) -> bool:
     """подписан ли на обязательный канал (с кэшем ttl)."""
     tgid = user.get("telegram_id")
-    if not tgid or not REQUIRED_CHANNEL_ID:
+    if not tgid or not P().channel_id:
         return True
     # кэш: channel_ok не чаще ttl
     if not force and int(user.get("channel_ok") or 0) == 1:
         ts = parse_iso(user.get("channel_checked_at"))
         if ts and (utcnow() - ts).total_seconds() < CHANNEL_CHECK_TTL:
             return True
-    status = notifier.get_chat_member_status(REQUIRED_CHANNEL_ID, int(tgid))
+    status = notifier.get_chat_member_status(P().channel_id, int(tgid))
     if status is None:
         # не смогли проверить (бот не админ канала?)
         print(f"[channel] не удалось проверить подписку user {user.get('id')} "
-              f"(бот админ канала {REQUIRED_CHANNEL_ID}?)", flush=True)
+              f"(бот админ канала {P().channel_id}?)", flush=True)
         return True  # fail-open
     subscribed = status in _CHANNEL_MEMBER_STATUSES and status not in ("left", "kicked")
     try:
@@ -6291,9 +6656,9 @@ def require_channel_dep(
     if user.get("telegram_id") and channel_required():
         if not _check_channel_membership(user, force=False):
             raise HTTPException(403, detail={
-                "message": "Подпишитесь на канал BatmanVPN, чтобы продолжить",
+                "message": f"Подпишитесь на канал {P().name}, чтобы продолжить",
                 "code": "channel_required",
-                "channel_url": REQUIRED_CHANNEL_URL,
+                "channel_url": P().channel_url,
             })
     return user
 
@@ -6307,8 +6672,8 @@ def app_membership(
     """статус подписки на канал. required — обязательна (без неё дальше нельзя);
     если не обязательна, мини-приложение предлагает подписаться с кнопкой «Пропустить». Для email — не спрашиваем."""
     fresh = get_user(int(user["id"])) or user
-    if not fresh.get("telegram_id") or not REQUIRED_CHANNEL_ID:
-        return {"required": False, "subscribed": True, "channel_url": REQUIRED_CHANNEL_URL}
+    if not fresh.get("telegram_id") or not P().channel_id:
+        return {"required": False, "subscribed": True, "channel_url": P().channel_url}
     required = channel_required()
     # принудительная перепроверка: rate limit
     if force:
@@ -6318,7 +6683,7 @@ def app_membership(
     return {
         "required": required,
         "subscribed": bool(subscribed),
-        "channel_url": REQUIRED_CHANNEL_URL,
+        "channel_url": P().channel_url,
     }
 
 
@@ -6326,7 +6691,157 @@ def app_membership(
 def app_me(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    return {"user": serialize_app_user(fresh, app_source(request))}
+    return {"user": app_user_payload(fresh, app_source(request))}
+
+
+# ── семейная подписка ──
+class FamilyInviteBody(BaseModel):
+    query: str = Field("", max_length=120)
+
+
+class FamilyJoinBody(BaseModel):
+    code: str = Field("", max_length=64)
+
+
+def _family_tg_notify(u: Optional[dict[str, Any]], text: str) -> None:
+    """сообщение ботом проекта (best-effort: семья не должна падать из-за телеграма)."""
+    try:
+        tgid = int((u or {}).get("telegram_id") or 0)
+        if not tgid:
+            return
+        payload: dict[str, Any] = {"chat_id": tgid, "text": text, "parse_mode": "HTML",
+                                   "disable_web_page_preview": True}
+        url = P().miniapp_url
+        if url:
+            payload["reply_markup"] = {"inline_keyboard": [[
+                {"text": f"Открыть {P().name}", "web_app": {"url": url}},
+            ]]}
+        notifier.call("sendMessage", payload, timeout=10.0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[family] не удалось отправить сообщение: {exc}", flush=True)
+
+
+def _family_state(fresh: dict[str, Any]) -> dict[str, Any]:
+    """состояние семьи для экрана «Добавить в семью».
+
+    Владелец получает код и участников, участник — только имя владельца (код семьи ему не нужен
+    и не показывается), остальные — пустое состояние.
+    """
+    owner = family_owner_for(fresh)
+    if owner is not None:
+        return {"role": "member", "code": None, "members": [], "can_invite": False,
+                "max_members": family.max_members(projects.of(owner)),
+                "owner_name": _user_label(owner), "owner_id": int(owner["id"])}
+    uid = int(fresh["id"])
+    pid = projects.of(fresh)
+    live = family.has_paid_sub(uid)
+    if not live and not family.has_members(uid):
+        return {"role": "none", "code": None, "members": [], "can_invite": False,
+                "max_members": family.max_members(pid), "owner_name": None}
+    return {
+        # код создаём только владельцу с живой подпиской (без подписки он всё равно бесполезен)
+        "code": family.code_for(uid, pid) if live else None,
+        "members": family.members(uid),
+        "max_members": family.max_members(pid),
+        "role": "owner",
+        "can_invite": live,
+        "owner_name": None,
+    }
+
+
+@app.get("/api/app/family")
+def app_family(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """семья: владелец — код приглашения и участники; участник — чья подписка действует."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    return _family_state(fresh)
+
+
+@app.post("/api/app/family/members")
+def app_family_add(body: FamilyInviteBody, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """пригласить в семью: @username, почта, ID или ссылка на профиль."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Вы участник семьи — приглашать может только владелец"})
+    allowed, retry = ratelimit.rate_limit(f"family:add:{int(fresh['id'])}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много приглашений. Повторите через {retry} сек."})
+    try:
+        target = family.add_member(int(fresh["id"]), projects.of(fresh), body.query)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    if target:
+        _family_tg_notify(target, f"Вас пригласили в семейную подписку {_esc_html(P().name)}. "
+                                  "Откройте приложение, чтобы принять приглашение.")
+    return _family_state(get_user(int(fresh["id"])) or fresh)
+
+
+@app.delete("/api/app/family/members/{key}")
+def app_family_remove(key: str, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """убрать участника или отменить приглашение (только владелец)."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Вы участник семьи — участников удаляет владелец"})
+    try:
+        removed = family.remove_member(int(fresh["id"]), key)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    if removed:
+        _family_tg_notify(removed, f"Вас убрали из семейной подписки {_esc_html(P().name)}.")
+    return _family_state(get_user(int(fresh["id"])) or fresh)
+
+
+@app.post("/api/app/family/code")
+def app_family_code(user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """заменить код семьи: старый код перестаёт работать."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Вы участник семьи — код меняет владелец"})
+    if not family.has_paid_sub(int(fresh["id"])):
+        raise HTTPException(400, detail={"message": "Сначала оформите подписку"})
+    allowed, retry = ratelimit.rate_limit(f"family:code:{int(fresh['id'])}", 5, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Код меняли слишком часто. Повторите через {retry} сек."})
+    family.rotate_code(int(fresh["id"]), projects.of(fresh))
+    return _family_state(fresh)
+
+
+@app.post("/api/app/family/join")
+def app_family_join(body: FamilyJoinBody, request: Request,
+                    user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """войти в семью по коду владельца или по персональному токену приглашения."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    uid = int(fresh["id"])
+    allowed, retry = ratelimit.rate_limit(f"family:join:{uid}", 10, 900)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много попыток. Повторите через {retry} сек."})
+    ip = _client_ip(request)
+    if ip:
+        ok_ip, _ = ratelimit.rate_limit(f"family:join:ip:{ip}", 40, 900)
+        if not ok_ip:
+            raise HTTPException(429, detail={"message": "Слишком много попыток. Повторите позже."})
+    try:
+        info = family.join(fresh, body.code)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    owner = get_user(int(info["owner_id"]))
+    if owner:
+        _family_tg_notify(owner, f"{_esc_html(_user_label(fresh))} вошёл в вашу семейную подписку.")
+    return {"success": True, "owner_id": int(info["owner_id"]), "owner_name": info["owner_name"]}
+
+
+@app.post("/api/app/family/leave")
+def app_family_leave(user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """выйти из семьи: подписка владельца больше не действует."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if not family.leave(int(fresh["id"])):
+        raise HTTPException(400, detail={"message": "Вы не в семье"})
+    return {"success": True}
 
 
 @app.post("/api/app/me/email/request")
@@ -6335,7 +6850,8 @@ def app_me_email_request(body: UpdateEmailBody, user: dict = Depends(_app_user_f
     email = (body.email or "").strip().lower()
     if not _valid_email(email):
         raise HTTPException(400, detail={"message": "Введите корректный email"})
-    clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ?", (email, user["id"]))
+    clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ? AND project_id = ?",
+                        (email, user["id"], projects.of(user)))
     merge = None
     if clash:
         other = get_user(int(clash["id"]))
@@ -6368,7 +6884,7 @@ def app_me_accept_terms(request: Request, user: dict = Depends(_app_user_from_in
                (iso(), user["id"]))
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    return {"user": serialize_app_user(fresh, app_source(request))}
+    return {"user": app_user_payload(fresh, app_source(request))}
 
 
 @app.put("/api/app/me/email")
@@ -6378,7 +6894,8 @@ def app_me_email(body: EmailVerifyBody, request: Request, user: dict = Depends(_
     if not _valid_email(email):
         raise HTTPException(400, detail={"message": "Некорректный email"})
     _email_verify_limits(email, request)
-    clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ?", (email, user["id"]))
+    clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ? AND project_id = ?",
+                        (email, user["id"], projects.of(user)))
     other = get_user(int(clash["id"])) if clash else None
     if other and not body.merge:
         # код не тратим, пока нет согласия на объединение
@@ -6407,7 +6924,7 @@ def app_me_email_unbind(request: Request, user: dict = Depends(_app_user_from_in
     _email_changed(fresh.get("email"), None)
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    return {"user": serialize_app_user(fresh, app_source(request))}
+    return {"user": app_user_payload(fresh, app_source(request))}
 
 
 @app.put("/api/app/me/telegram")
@@ -6418,7 +6935,8 @@ def app_me_telegram(body: OauthBody, request: Request, merge: bool = Query(False
     new_tg = int(validated.get("id") or 0)
     if not new_tg:
         raise HTTPException(400, detail={"message": "Нет Telegram id"})
-    clash = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND id != ?", (new_tg, user["id"]))
+    clash = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND id != ? AND project_id = ?",
+                        (new_tg, user["id"], projects.of(user)))
     if clash:
         other = get_user(int(clash["id"]))
         assert other is not None
@@ -6442,7 +6960,7 @@ def app_me_telegram(body: OauthBody, request: Request, merge: bool = Query(False
                 client.update_user(id=rw_id, telegram_id=new_tg)
         except Exception as exc:  # noqa: BLE001
             forum.report_error("Смена Telegram: не удалось обновить Remnawave", f"user {user['id']}: {type(exc).__name__}: {exc}")
-    return {"user": serialize_app_user(fresh, app_source(request))}
+    return {"user": app_user_payload(fresh, app_source(request))}
 
 
 def _has_trial_ever(user_id: int) -> bool:
@@ -6463,7 +6981,8 @@ def _clear_trial_claim(user_id: int, telegram_id: Optional[int] = None) -> None:
         u = get_user(int(user_id)) or {}
         tg = u.get("telegram_id")
     if tg:
-        db.execute("DELETE FROM trial_claims WHERE telegram_id = ?", (int(tg),))
+        db.execute("DELETE FROM trial_claims WHERE telegram_id = ? AND project_id = "
+                   "(SELECT project_id FROM users WHERE id = ?)", (int(tg), int(user_id)))
 
 
 def _trial_blocks(user_id: int) -> Optional[str]:
@@ -6489,10 +7008,29 @@ def _trial_blocks(user_id: int) -> Optional[str]:
         return "had_paid"
     u = get_user(int(user_id)) or {}
     if u.get("telegram_id") and db.fetchone(
-        "SELECT 1 FROM trial_claims WHERE telegram_id = ?", (int(u["telegram_id"]),)
+        "SELECT 1 FROM trial_claims WHERE telegram_id = ? AND project_id = ?", (int(u["telegram_id"]), projects.of(u))
     ):
         return "claimed"
     return None
+
+
+_TRIAL_REASON_TEXT = {
+    "off": "пробный выключен в панели (общий переключатель)",
+    "off_miniapp": "пробный выключен для мини-приложения",
+    "off_web": "пробный выключен для сайта",
+    "has_sub": "есть подписка (действующая или истёкшая)",
+    "had_paid": "раньше была платная подписка",
+    "claimed": "этот Telegram уже брал пробный",
+}
+
+
+def trial_reason(user_id: int, source: Optional[str] = None) -> Optional[str]:
+    """почему пробный недоступен (код), None — доступен."""
+    if not trial_enabled():
+        return "off"
+    if source is not None and not trial_source_enabled(source):
+        return "off_miniapp" if source == "miniapp" else "off_web"
+    return _trial_blocks(user_id)
 
 
 def _trial_available_for(user_id: int, source: Optional[str] = None) -> bool:
@@ -6522,15 +7060,18 @@ def _bypass_info(user_id: int) -> dict[str, Any]:
 def app_subscription(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
+    # участник семьи пользуется подпиской владельца: ключ, трафик, обходы — его
+    owner = family_owner_for(fresh)
+    view = owner or fresh
     keys = db.fetchall(
-        "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC", (fresh["id"],)
+        "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC", (view["id"],)
     )
-    serialized = [serialize_key(k, fresh) for k in keys]
+    serialized = [serialize_key(k, view) for k in keys]
     active = next((k for k in serialized if k.get("status") == "Active"), None)
-    status = subscription_status_for_user(fresh)
+    status = subscription_status_for_user(view)
     expired_key = None
     delete_at = None
-    if status == "expired":
+    if status == "expired" and owner is None:
         last = last_expired_subscription(int(fresh["id"]))
         if last:
             expired_key = serialize_key(last, fresh)
@@ -6539,16 +7080,20 @@ def app_subscription(request: Request, user: dict = Depends(_app_user_from_init)
                 delete_at = iso(exp + timedelta(days=fulfillment.DELETE_AFTER_DAYS))
     return {
         "status": status,
-        "until": paid_until_for_user(int(fresh["id"])) if status in ("active", "trial") else None,
+        "until": paid_until_for_user(int(view["id"])) if status in ("active", "trial") else None,
         "key": active if status in ("active", "trial") else None,
         # закончившаяся подписка и дата автоудаления
         "expired_key": expired_key,
         "delete_at": delete_at,
         "keys": [k for k in serialized if k.get("status") != "Deleted"],
         # белые списки (отдельный сквад) — «Обходы» в мини-приложении
-        "bypass": _bypass_info(int(fresh["id"])) if status in ("active", "trial") else None,
+        "bypass": _bypass_info(int(view["id"])) if status in ("active", "trial") else None,
         "trial_enabled": trial_enabled_for(app_source(request)),
-        "trial_available": _trial_available_for(int(fresh["id"]), app_source(request)),
+        # в семье пробный не нужен: подписка уже действует
+        "trial_available": False if owner is not None else _trial_available_for(int(fresh["id"]), app_source(request)),
+        # семья: участник видит, чья подписка действует (экран «Настроить подписку»)
+        "family": ({"role": "member", "owner_name": _user_label(owner), "owner_id": int(owner["id"])}
+                   if owner is not None else None),
     }
 
 
@@ -6577,28 +7122,31 @@ def _rw_traffic(rw: dict[str, Any]) -> dict[str, Any]:
 def app_subscription_traffic(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     """сколько трафика потрачено; available=false если не узнали."""
     fresh = get_user(int(user["id"])) or user
+    view = family_owner_for(fresh) or fresh  # в семье трафик общий — считаем по владельцу
     try:
-        _client, rw = _rw_find_user(fresh)
+        _client, rw = _rw_find_user(view)
     except Exception:  # noqa: BLE001
         rw = None
     if not isinstance(rw, dict):
         return {"available": False}
-    return {"available": True, **_rw_traffic(grace.mask_rw(int(fresh["id"]), rw))}
+    return {"available": True, **_rw_traffic(grace.mask_rw(int(view["id"]), rw))}
 
 
 @app.get("/api/app/setup-status")
 def app_setup_status(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     """нужен ли онбординг «не завершили настройку»."""
     fresh = get_user(int(user["id"])) or user
+    # в семье «своё» состояние подключения — у владельца подписки
+    view = family_owner_for(fresh) or fresh
     has_sub = bool(db.fetchone(
         "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' LIMIT 1",
-        (fresh["id"],),
+        (view["id"],),
     ))
     ever: Optional[bool] = None
     if has_sub:
         try:
             ever = provisioning.user_ever_connected(
-                int(fresh.get("telegram_id") or 0), fresh.get("email"))
+                int(view.get("telegram_id") or 0), view.get("email"))
         except Exception:  # noqa: BLE001
             ever = None
     return {
@@ -6642,6 +7190,9 @@ def app_activate_trial(request: Request, user: dict = Depends(require_channel_de
     assert fresh is not None
     if not fresh.get("terms_accepted_at"):
         raise HTTPException(403, detail={"message": "Сначала примите условия оферты и политику конфиденциальности"})
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(400, detail={"message": "У вас есть семейная подписка — пробный период не нужен",
+                                         "code": "in_family"})
     src = app_source(request)
     if not trial_enabled_for(src):
         print(f"[trial] отказ user {fresh['id']}: выключен для {src}", flush=True)
@@ -6660,8 +7211,8 @@ def app_activate_trial(request: Request, user: dict = Depends(require_channel_de
     if why:
         print(f"[trial] отказ user {fresh['id']}: {why}", flush=True)
         raise HTTPException(400, detail={"message": "Пробный период уже был активирован", "code": "trial_used"})
-    cur = db.execute("INSERT OR IGNORE INTO trial_claims (telegram_id, user_id, claimed_at) VALUES (?, ?, ?)",
-                     (int(fresh["telegram_id"]), int(fresh["id"]), iso()))
+    cur = db.execute("INSERT OR IGNORE INTO trial_claims (project_id, telegram_id, user_id, claimed_at) VALUES (?, ?, ?, ?)",
+                     (projects.of(fresh), int(fresh["telegram_id"]), int(fresh["id"]), iso()))
     if not cur.rowcount:
         print(f"[trial] отказ user {fresh['id']}: claim", flush=True)
         raise HTTPException(400, detail={"message": "Пробный период уже был активирован", "code": "trial_used"})
@@ -6669,7 +7220,8 @@ def app_activate_trial(request: Request, user: dict = Depends(require_channel_de
         result = fulfillment.grant_trial(fresh)
         db.execute("UPDATE users SET trial_reset = 0 WHERE id = ?", (int(fresh["id"]),))
     except Exception as exc:  # noqa: BLE001
-        db.execute("DELETE FROM trial_claims WHERE telegram_id = ? AND user_id = ?", (int(fresh["telegram_id"]), int(fresh["id"])))
+        db.execute("DELETE FROM trial_claims WHERE telegram_id = ? AND user_id = ? AND project_id = ?",
+                   (int(fresh["telegram_id"]), int(fresh["id"]), projects.of(fresh)))
         forum.report_error("Не удалось выдать пробную подписку", f"{type(exc).__name__}: {exc}")
         raise HTTPException(502, detail={"message": "Не удалось активировать пробный период"})
     return {"success": True, **result}
@@ -6710,16 +7262,25 @@ def app_subscription_applink(
     assert fresh is not None
     if subscription_status_for_user(fresh) == "blocked":
         raise HTTPException(403, detail={"message": "Подписка заблокирована"})
-    sub_url = _app_sub_url(fresh)
+    # в семье ссылка подписки — владельца
+    view = family_owner_for(fresh) or fresh
+    if subscription_status_for_user(view) == "blocked":
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    sub_url = _app_sub_url(view)
     if not sub_url:
         raise HTTPException(404, detail={"message": "Нет активной подписки"})
 
     which = (app or "incy").lower()
     if which in ("incy", "happ"):
-        # без шифрования: incy://add/<ссылка>, happ://add/<ссылка>
-        link = f"{which}://add/{sub_url}"
+        # только зашифрованные ссылки: incy://crypt1/…, happ://crypt5/… (см. src/api/applinks.py)
+        import applinks  # type: ignore
+        try:
+            link = applinks.build_link(which, sub_url, name=P().app_link_name)
+        except applinks.AppLinkError as exc:
+            raise HTTPException(502, detail={"message": f"{exc}. Попробуйте ещё раз через минуту.",
+                                             "code": "applink_encrypt_failed"})
         # telegram не открывает incy/happ:// сам — отдаём https-страницу перехода
-        return {"app": which, "link": link, "encrypted": False,
+        return {"app": which, "link": link, "encrypted": True,
                 "open_url": _deeplink_redirect_url(link, app=which)}
     # other: просто https
     return {"app": "other", "link": sub_url, "encrypted": False, "open_url": sub_url}
@@ -6727,10 +7288,10 @@ def app_subscription_applink(
 
 def _deeplink_redirect_url(deep_link: str, alt: Optional[str] = None, app: Optional[str] = None) -> str:
     """https://мини-приложение/redirect.html?url=<схема>[&alt=…&app=…] для telegram.
-    redirect.html лежит в контейнере мини-приложения, поэтому база — MINIAPP_URL
+    redirect.html лежит в контейнере мини-приложения, поэтому база — P().miniapp_url
     (SITE_URL — только если redirect.html выложен и там)."""
     from urllib.parse import quote
-    base = (MINIAPP_URL or _env("SITE_URL")).rstrip("/")
+    base = (P().miniapp_url or P().site_url).rstrip("/")
     if not base:
         return deep_link
     url = f"{base}/redirect.html?url={quote(deep_link, safe='')}"
@@ -6757,24 +7318,27 @@ def _rw_device_limit(rw: Optional[dict[str, Any]]) -> Optional[int]:
 def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
+    # участник семьи видит устройства общей подписки; покупать/удалять их может только владелец
+    owner = family_owner_for(fresh)
+    view = owner or fresh
     meta = get_plans_meta()
     keys = db.fetchall(
         "SELECT devices_limit, type FROM subscriptions WHERE user_id = ? AND status = 'Active'",
-        (fresh["id"],),
+        (view["id"],),
     )
     limit = max((int(k.get("devices_limit") or 0) for k in keys), default=1)
-    # докупка устройств только к платной
-    can_buy = any(str(k.get("type") or "") != "trial" for k in keys)
+    # докупка устройств только к платной и только владельцу подписки
+    can_buy = owner is None and any(str(k.get("type") or "") != "trial" for k in keys)
 
     # реальные hwid из remnawave
     devices: list[dict[str, Any]] = []
-    client, rw = _rw_find_user(fresh)
+    client, rw = _rw_find_user(view)
     # лимит в Remnawave — источник правды: его могли поменять прямо в панели Remnawave.
     # Подтягиваем в БД, иначе мини-апп покажет старый лимит, а продление вернёт его в панель.
     rw_limit = _rw_device_limit(rw)
     if rw_limit and rw_limit != limit and keys:
         db.execute("UPDATE subscriptions SET devices_limit = ? WHERE user_id = ? AND status = 'Active'",
-                   (rw_limit, fresh["id"]))
+                   (rw_limit, view["id"]))
         limit = rw_limit
     if client and rw:
         try:
@@ -6791,7 +7355,7 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             pass
     active_sub = db.fetchone(
-        "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' ORDER BY id DESC LIMIT 1", (fresh["id"],))
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' ORDER BY id DESC LIMIT 1", (view["id"],))
     addons = fulfillment.device_addons_for((active_sub or {}).get("id"))
     return {"devices": devices, "used": len(devices), "limit": limit, "can_buy": can_buy,
             "extra_device_price": float(meta["extra_device_price"]),
@@ -6804,6 +7368,8 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
 def app_revoke_device(device_id: str, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Устройства общие для семьи — их отвязывает владелец подписки"})
     client, rw = _rw_find_user(fresh)
     if not client or not rw:
         raise HTTPException(400, detail={"message": "Устройства недоступны"})
@@ -6823,6 +7389,8 @@ def app_reissue_key(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]
     """перевыпуск ключа: новая ссылка, старая перестаёт работать, все устройства отвязываются."""
     fresh = get_user(int(user["id"]))
     assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Ключ общий для семьи — перевыпустить его может владелец подписки"})
     status = subscription_status_for_user(fresh)
     if status == "blocked":
         raise HTTPException(403, detail={"message": "Подписка заблокирована"})
@@ -7009,36 +7577,37 @@ def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_fr
     }
 
 
-_MAIN_APP_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_MAIN_APP_CACHE: dict[str, dict[str, Any]] = {}  # по проектам: у каждого свой бот
 
 
 def _bot_has_main_app() -> bool:
-    """есть ли у бота главное мини-приложение."""
+    """есть ли у бота проекта главное мини-приложение."""
     now = time.time()
-    if _MAIN_APP_CACHE["value"] is not None and now - _MAIN_APP_CACHE["at"] < 600:
-        return bool(_MAIN_APP_CACHE["value"])
+    c = _MAIN_APP_CACHE.setdefault(db.pid(), {"at": 0.0, "value": None})
+    if c["value"] is not None and now - c["at"] < 600:
+        return bool(c["value"])
     me = notifier.call("getMe", {}, timeout=5.0) or {}
     val = bool(me.get("has_main_web_app")) if me else None
     if val is not None:
-        _MAIN_APP_CACHE.update(at=now, value=val)
+        c.update(at=now, value=val)
     return bool(val)
 
 
 def _payment_return_url(payment_id: str, in_telegram: bool, failed: bool = False) -> Optional[str]:
     """куда ЮKassa вернёт после оплаты (сайт или мини-приложение)."""
-    if in_telegram and BOT_USERNAME:
+    if in_telegram and P().bot_username:
         tag = f"{'payfail' if failed else 'pay'}_{payment_id}"
-        link = (_env("TELEGRAM_MINIAPP_LINK") or "").strip().rstrip("/")
+        link = (P().miniapp_link or "").strip().rstrip("/")
         if re.fullmatch(r"https://t\.me/[A-Za-z0-9_]{4,32}/[A-Za-z0-9_]{3,64}", link):
             return f"{link}?startapp={tag}"
         if _bot_has_main_app():
-            return f"https://t.me/{BOT_USERNAME}?startapp={tag}"
+            return f"https://t.me/{P().bot_username}?startapp={tag}"
         # нет главного мини-приложения: кнопка «открыть» через бота
-        return f"https://t.me/{BOT_USERNAME}?start={tag}"
+        return f"https://t.me/{P().bot_username}?start={tag}"
     suffix = "&result=fail" if failed else ""
-    if MINIAPP_URL:
-        return f"{MINIAPP_URL}/payment/return?payment_id={payment_id}{suffix}"
-    base = YOOKASSA_RETURN_URL
+    if P().miniapp_url:
+        return f"{P().miniapp_url}/payment/return?payment_id={payment_id}{suffix}"
+    base = P().yookassa_return_url
     return f"{base}?payment_id={payment_id}" if base else None
 
 
@@ -7135,7 +7704,7 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
         raise HTTPException(502, detail={"message": "Не удалось активировать. Средства возвращены на баланс."})
 
     # описание для провайдера: «назначение (id юзера)»
-    title = "BatmanVPN"
+    title = P().name
     description = _payment_description(q["purpose"], int(user["id"]))
 
     if is_stars:
@@ -7293,6 +7862,13 @@ def app_payment_status(
         "invoice_link": payment.get("invoice_link"),
         "purpose": payment.get("purpose"),
         "method": payment.get("method"),
+        # для экрана «Оплачено»: срок, белые списки, списано с баланса
+        "months": int(payment.get("months") or 0),
+        "days": fulfillment.period_days(int(payment.get("months") or 1)) if payment.get("purpose") in ("subscription", "gift") else None,
+        "whitelist": bool(payment.get("whitelist")),
+        "stars": payment.get("stars"),
+        "referral_applied": float(payment.get("referral_applied") or 0),
+        "extra_devices": int(payment.get("extra_devices") or 0),
         # купленный подарок: код показываем покупателю
         "gift_code": (reflevels.create_bought_gift(int(user["id"]), int(payment.get("months") or 1), payment_id)
                       if payment.get("purpose") == "gift" and payment["status"] == "paid" else None),
@@ -7317,6 +7893,9 @@ def app_promo_redeem(body: RedeemPromoBody, user: dict = Depends(require_channel
             raise HTTPException(exc.status, detail={"message": exc.message})
         return {"success": True, "type": "gift", "expires_at": g.get("expires_at")}
     info = apply_promo_to_user(int(user["id"]), body.code)
+    if info.get("type") == "days":
+        return {"success": True, "type": "days", "days": info["days"], "gift_id": info["gift_id"],
+                "message": f"Вы получили {_days_ru(info['days'])} к подписке, чтобы получить нажмите кнопку «Забрать»"}
     return {
         "success": True,
         "type": "discount",
@@ -7324,6 +7903,73 @@ def app_promo_redeem(body: RedeemPromoBody, user: dict = Depends(require_channel
         "discount_percent": info["percent"],
         "expires_at": info["expires_at"],
     }
+
+
+def _days_ru(n: int) -> str:
+    n = int(n)
+    w = "день" if n % 10 == 1 and n % 100 != 11 else ("дня" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "дней")
+    return f"{n} {w}"
+
+
+def _bypass_follow_vpn(user_id: int, reason: str) -> None:
+    """единая подписка: ключ обхода до конца ВПН (продлить или выдать). FURK медленный — в фоне."""
+    def run() -> None:
+        try:
+            if not fulfillment.whitelist_available():
+                return
+            user = get_user(int(user_id))
+            if not user:
+                return
+            if fulfillment.user_whitelist(user).get("key_id"):
+                fulfillment.sync_whitelist_to_vpn(int(user_id), reason)
+                return
+            row = db.fetchone("SELECT expires_at FROM subscriptions WHERE user_id = ? AND status = 'Active' "
+                              "AND expires_at IS NOT NULL ORDER BY expires_at DESC LIMIT 1", (int(user_id),))
+            end = parse_iso((row or {}).get("expires_at"))
+            if end and end > utcnow():
+                fulfillment._grant_whitelist_safe(user, 1, f"{reason}-{int(user_id)}-{int(end.timestamp())}", until=end)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[whitelist] user {user_id}: {exc}", flush=True)
+    threading.Thread(target=projects.bind(run), daemon=True).start()
+
+
+def grant_days_all(user_id: int, days: int, reason: str) -> Optional[str]:
+    """+дни ко всей подписке: VPN (база + Remnawave) и ключ обхода до той же даты. Нет подписки — выдаётся новая."""
+    extend_user_sub(int(user_id), int(days))
+    user = get_user(int(user_id))
+    if user:
+        _rw_sync_expiry(user)
+    _bypass_follow_vpn(int(user_id), reason)
+    return paid_until_for_user(int(user_id))
+
+
+@app.get("/api/app/day-gifts")
+def app_day_gifts(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """подарочные дни, ждущие кнопку «Забрать» (промокод на дни, подарок вернувшимся)."""
+    items = services.pending_day_gifts(int(user["id"]))
+    return {"items": [{**g, "text": (f"Вы получили {_days_ru(g['days'])} к подписке, чтобы получить нажмите кнопку «Забрать»"
+                                     if g["source"] == "promo" else
+                                     f"Мы скучали! Дарим {_days_ru(g['days'])} подписки — нажмите «Забрать»")}
+                      for g in items]}
+
+
+@app.post("/api/app/day-gifts/{gift_id}/claim")
+def app_day_gift_claim(gift_id: int, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    fresh = get_user(int(user["id"])) or user
+    if subscription_status_for_user(fresh) in ("blocked", "banned"):
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    try:
+        g = services.take_day_gift(int(user["id"]), gift_id)
+    except services.ServiceError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    try:
+        until = grant_days_all(int(user["id"]), int(g["days"]), f"daygift{int(g['id'])}")
+    except Exception as exc:  # noqa: BLE001
+        services.release_day_gift(int(g["id"]))
+        forum.report_error("Не удалось начислить подарочные дни", f"gift {g['id']}: {type(exc).__name__}: {exc}")
+        raise HTTPException(502, detail={"message": "Не удалось начислить дни, попробуйте позже"})
+    return {"success": True, "days": int(g["days"]), "expires_at": until,
+            "message": f"Готово! +{_days_ru(g['days'])} к подписке"}
 
 
 @app.get("/api/app/discount")
@@ -7347,7 +7993,7 @@ def mask_email(email: str) -> str:
 
 @app.get("/api/app/referral")
 def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
-    """экран «Реферальная программа»: только то, что показывает мини-приложение (список друзей не нужен)."""
+    """экран «Реферальная программа»: только то, что показывает мини-приложение (из друзей — последние 6 для чипов)."""
     reflevels._ensure_schema()
     fresh = get_user(int(user["id"])) or user
     uid = int(fresh["id"])
@@ -7362,11 +8008,12 @@ def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         "next_level": ({"key": nxt["key"], "name": nxt["name"], "need": nxt["min"], "rate": nxt["rate"]} if nxt else None),
         "levels": reflevels.levels_public(),
         "active_count": active,
+        "friends": reflevels.friends_preview(uid) if invited else [],
         "earned_month": earn["month"],
         "rewards": reflevels.rewards_state(fresh, active),
         # реф. ссылка: t.me/<bot>?start=ref_<id>
         "code": str(uid),
-        "link": f"https://t.me/{BOT_USERNAME}?start=ref_{uid}",
+        "link": f"https://t.me/{P().bot_username}?start=ref_{uid}",
         "is_partner": bool(fresh.get("is_partner")),
         "partner_balance": fresh.get("partner_balance", 0),
         "partner_rate": fresh.get("partner_rate", 25),
@@ -7379,7 +8026,7 @@ def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
 @app.get("/api/app/gifts")
 def app_gifts(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     """подарки пользователя: купленные и за реферальный уровень."""
-    return {"items": reflevels.my_gifts(int(user["id"])), "bot_link": f"https://t.me/{BOT_USERNAME}"}
+    return {"items": reflevels.my_gifts(int(user["id"])), "bot_link": f"https://t.me/{P().bot_username}"}
 
 
 @app.post("/api/app/referral/claim")
@@ -7409,7 +8056,7 @@ def app_referral_gift(user: dict = Depends(require_channel_dep)) -> dict[str, An
         res = reflevels.create_gift(fresh)
     except reflevels.RewardError as exc:
         raise HTTPException(exc.status, detail={"message": exc.message})
-    return {"success": True, "code": res["code"], "bot_link": f"https://t.me/{BOT_USERNAME}"}
+    return {"success": True, "code": res["code"], "bot_link": f"https://t.me/{P().bot_username}"}
 
 
 @app.get("/api/app/withdrawals")
@@ -7582,17 +8229,18 @@ def _require_internal(secret: Optional[str]) -> None:
 
 
 @app.post("/api/telegram/webhook")
+@app.post("/api/telegram/webhook/{project}")
 async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: Optional[str] = Header(None, alias="X-Telegram-Bot-Api-Secret-Token"),
 ) -> dict[str, Any]:
     # апдейт проверяем по secret из setwebhook
     # без секрета в проде вебхук запрещён
-    if not TELEGRAM_WEBHOOK_SECRET:
+    if not P().webhook_secret:
         if IS_PROD:
             raise HTTPException(403, detail="Forbidden")
     elif not x_telegram_bot_api_secret_token or not hmac.compare_digest(
-        str(x_telegram_bot_api_secret_token), TELEGRAM_WEBHOOK_SECRET
+        str(x_telegram_bot_api_secret_token), P().webhook_secret
     ):
         raise HTTPException(403, detail="Forbidden")
     try:
@@ -7817,15 +8465,15 @@ def _notify_support_user(user: dict[str, Any], msg: dict[str, Any], chat: Option
         if not last or (utcnow() - last).total_seconds() > 600:
             db.execute("UPDATE support_chats SET last_email_at = ? WHERE id = ?", (iso(), chat["id"]))
             _mail_async(mailer.send_support_reply, email, msg.get("text") or "", len(msg.get("files") or []),
-                        f"{MINIAPP_URL}/support" if MINIAPP_URL else "")
+                        f"{P().miniapp_url}/support" if P().miniapp_url else "")
     tg = user.get("telegram_id")
     if not tg:
         return None
     try:
         payload: dict[str, Any] = {"chat_id": int(tg), "text": _tg_support_text(msg.get("text") or ""), "parse_mode": "HTML",
                                    "link_preview_options": {"is_disabled": True}}
-        if MINIAPP_URL:
-            payload["reply_markup"] = {"inline_keyboard": [[{"text": "Открыть чат", "web_app": {"url": f"{MINIAPP_URL}/support"}}]]}
+        if P().miniapp_url:
+            payload["reply_markup"] = {"inline_keyboard": [[{"text": "Открыть чат", "web_app": {"url": f"{P().miniapp_url}/support"}}]]}
         res = notifier.call("sendMessage", payload)
         return int(res["message_id"]) if isinstance(res, dict) and res.get("message_id") else None
     except Exception:  # noqa: BLE001
@@ -7868,7 +8516,7 @@ def _autofine_notify(st: dict[str, Any], text: str) -> None:
     if not st.get("telegram_id"):
         return
     try:
-        notifier.call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML", "text": text}, timeout=10.0)
+        notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML", "text": text}, timeout=10.0)
     except Exception:  # noqa: BLE001
         pass
 
@@ -8381,6 +9029,7 @@ def _panel_chat_row(c: dict[str, Any], p: dict[str, Any], t: Any = False) -> dic
         tt.pop("assigned_admin", None)
     return {
         "id": c["id"], "user_id": c["user_id"], "user_label": _user_label(u),
+        "project": projects.of(c), "project_name": projects.get(projects.of(c)).name,
         "user_name": " ".join(filter(None, [u.get("first_name"), u.get("last_name")])) or None,
         "is_banned": bool(u.get("is_banned")), "status": subscription_status_for_user(u) if u.get("created_at") else None,
         "last_message_at": c.get("last_message_at"), "last_preview": c.get("last_preview"), "last_sender": c.get("last_sender"),
@@ -8395,16 +9044,19 @@ SUPPORT_TABS_OPERATOR = ("open", "mine")
 
 @app.get("/api/panel/support/chats")
 def panel_support_chats(q: str = Query("", max_length=100), status: str = Query("open", max_length=10),
+                        project: str = Query("", max_length=24),
                         p: dict = Depends(require_panel)) -> dict[str, Any]:
-    """список обращений по вкладкам."""
+    """список обращений по вкладкам. Поддержка общая на всю сеть: чаты всех проектов (project= — фильтр)."""
     tabs = SUPPORT_TABS_FULL if is_full(p) else SUPPORT_TABS_OPERATOR
     if status not in tabs:
         status = "open"
+    pf = projects.normalize(project)
+    pw, pp = (" AND project_id = ?", (pf,)) if pf else ("", ())
     # открытые все; закрытые последние 1000
-    rows = db.fetchall("SELECT * FROM support_chats WHERE open_ticket_id IS NOT NULL")
+    rows = db.fetchall("SELECT * FROM support_chats WHERE open_ticket_id IS NOT NULL" + pw, pp)
     if "archive" in tabs:
-        rows += db.fetchall("SELECT * FROM support_chats WHERE open_ticket_id IS NULL AND last_message_at IS NOT NULL "
-                            "ORDER BY last_message_at DESC LIMIT 1000")
+        rows += db.fetchall("SELECT * FROM support_chats WHERE open_ticket_id IS NULL AND last_message_at IS NOT NULL"
+                            + pw + " ORDER BY last_message_at DESC LIMIT 1000", pp)
     items = []
     counts = {k: 0 for k in tabs}
     for c in rows:
@@ -8662,8 +9314,8 @@ def _notify_admins_escalation(chat: dict[str, Any], who: str, note: str) -> None
     def run() -> None:
         for tg in ids:
             try:
-                notifier.call("sendMessage", {"chat_id": tg, "text": text, "parse_mode": "HTML",
-                                              "link_preview_options": {"is_disabled": True}}, timeout=10.0)
+                notifier.admin_call("sendMessage", {"chat_id": tg, "text": text, "parse_mode": "HTML",
+                                                    "link_preview_options": {"is_disabled": True}}, timeout=10.0)
             except Exception:  # noqa: BLE001
                 pass
     threading.Thread(target=run, daemon=True).start()
@@ -8823,8 +9475,8 @@ def panel_support_edit(chat_id: int, message_id: int, body: SupportEditBody, p: 
             notifier.call("editMessageText", {"chat_id": int(user["telegram_id"]), "message_id": int(row["tg_msg_id"]),
                                               "text": _tg_support_text(msg.get("text") or ""), "parse_mode": "HTML",
                                               "link_preview_options": {"is_disabled": True},
-                                              **({"reply_markup": {"inline_keyboard": [[{"text": "Открыть чат", "web_app": {"url": f"{MINIAPP_URL}/support"}}]]}}
-                                                 if MINIAPP_URL else {})}, timeout=10.0)
+                                              **({"reply_markup": {"inline_keyboard": [[{"text": "Открыть чат", "web_app": {"url": f"{P().miniapp_url}/support"}}]]}}
+                                                 if P().miniapp_url else {})}, timeout=10.0)
         except Exception:  # noqa: BLE001
             pass
     return _staff_view([msg], p)[0]

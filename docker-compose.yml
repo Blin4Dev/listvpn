@@ -1,4 +1,5 @@
-# blinvpn 2.0: оркестрация сервисов
+# listvpn — сеть VPN-проектов (BatmanVPN, FGN …) на одном бэкенде: оркестрация сервисов
+# проекты: projects/<id>/ (см. projects/README.md); бот один на все проекты (опрашивает ботов всех проектов)
 # api/webhook/bot в network_mode host (remnawave :3000, caddy на хосте → 127.0.0.1)
 # miniapp/panel: spa на 127.0.0.1:{9741,9742}
 
@@ -18,8 +19,11 @@ x-python-build: &python-build
   env_file: .env
   environment:
     DB_PATH: /app/data/data.db
+    PROJECTS_DIR: /app/projects
   volumes:
     - ./data:/app/data
+    # реестр проектов (project.json) — без пересборки образа
+    - ./projects:/app/projects:ro
   restart: unless-stopped
   network_mode: host
   logging: *default-logging
@@ -65,14 +69,17 @@ services:
     env_file: .env
     environment:
       DB_PATH: /app/data/data.db
+      PROJECTS_DIR: /app/projects
     volumes:
       - ./data:/app/data
+      - ./projects:/app/projects:ro
     restart: unless-stopped
     network_mode: host
     logging: *default-logging
     depends_on:
       - api
 
+  # мини-приложения ВСЕХ проектов: Caddy на хосте ставит X-Project по домену проекта
   miniapp:
     build:
       context: .
@@ -82,11 +89,14 @@ services:
     container_name: blinvpn-miniapp
     restart: unless-stopped
     logging: *default-logging
+    environment:
+      DEFAULT_PROJECT: ${DEFAULT_PROJECT:-batman}
     ports:
       - "127.0.0.1:${MINIAPP_PORT:-9741}:80"
-    # живой mount assets/ (ro)
+    # живые картинки: projects/<id>/assets поверх общих assets/ (ro)
     volumes:
-      - ./assets:/srv/live/assets:ro
+      - ./assets:/srv/live/shared/assets:ro
+      - ./projects:/srv/live/projects:ro
 
   panel:
     build:

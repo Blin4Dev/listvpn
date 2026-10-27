@@ -22,9 +22,11 @@ import Tariffs from "./pages/Tariffs";
 import ReferralLevels from "./pages/ReferralLevels";
 import GiftBuy from "./pages/GiftBuy";
 import MyGifts from "./pages/MyGifts";
+import Family from "./pages/Family";
 import { checkAuth, fetchMe, fetchMembership, fetchSetupStatus, type Membership } from "./utils/api";
 import { homeIntroPending, subscribeHomeIntroReady } from "./utils/homeIntro";
 import { trackRoute } from "./utils/navigation";
+import DayGiftPrompt from "./components/DayGiftSheet";
 import PaymentResume from "./components/PaymentResume";
 
 // подсказка настройки: раз за сессию
@@ -38,6 +40,10 @@ function useHomeIntroReady() {
   }, [ready]);
   return ready;
 }
+
+// при заблокированном ключе доступны только главная, поддержка и юр. документы
+// (бэкенд для них тоже открыт: _BANNED_ALLOWED_PATHS в core.py)
+const BLOCKED_ALLOWED = /^\/(?:support\/?|legal\/[^/]+\/?)?$/;
 
 function AnimatedLayout() {
   const location = useLocation();
@@ -82,9 +88,9 @@ function AnimatedLayout() {
     navigate("/subscription?setup=1");
   };
 
-  // ключ заблокирован: любой deep link → на главную
+  // ключ заблокирован: любой deep link → на главную (кроме поддержки и документов)
   useEffect(() => {
-    if (blocked && location.pathname !== "/") {
+    if (blocked && !BLOCKED_ALLOWED.test(location.pathname)) {
       navigate("/", { replace: true });
     }
   }, [blocked, location.pathname, navigate]);
@@ -123,6 +129,7 @@ function AnimatedLayout() {
         <SetupPrompt onContinue={continueSetup} onClose={dismissSetup} />
       )}
       {introReady && !blocked && <PaymentResume />}
+      {introReady && !blocked && <DayGiftPrompt />}
     </div>
   );
 }
@@ -240,6 +247,7 @@ function RoutedApp() {
           <Route path="/gift/buy" element={<GiftBuy />} />
           <Route path="/gift/activate" element={<Promocode />} />
           <Route path="/gifts" element={<MyGifts />} />
+          <Route path="/family" element={<Family />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/security" element={<Security />} />
           <Route path="/support" element={<Support />} />

@@ -28,6 +28,7 @@ RUN for i in 1 2 3; do \
     done; exit 1
 
 COPY src /app/src
+COPY projects /app/projects
 COPY node.sh /app/node.sh
 ENV PYTHONPATH=/app/src/core:/app/src/api \
     DB_PATH=/app/data/data.db

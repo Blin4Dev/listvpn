@@ -22,13 +22,15 @@ try:
 except ImportError:
     import fulfillment  # type: ignore
 
+projects = db.projects
+
 try:
     import yookassa  # type: ignore
 except Exception:  # noqa: BLE001
     yookassa = None  # type: ignore
 
 
-app = FastAPI(title="BatmanVPN Webhooks", version="1.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="listvpn Webhooks", version="1.0.0", docs_url=None, redoc_url=None)
 
 
 @app.on_event("startup")
@@ -77,9 +79,6 @@ async def yookassa_callback(request: Request) -> JSONResponse:
     """
     if yookassa is None:
         return JSONResponse(status_code=503, content={"error": "yookassa_unavailable"})
-    client = yookassa.get_client()
-    if not client.is_configured():
-        return JSONResponse(status_code=503, content={"error": "yookassa_not_configured"})
 
     if (os.getenv("YOOKASSA_CHECK_IP") or "").strip().lower() in ("1", "true", "yes", "on"):
         ip = _client_ip(request)
@@ -108,6 +107,15 @@ async def yookassa_callback(request: Request) -> JSONResponse:
             payment = fulfillment.get_payment(str(meta["payment_id"]))
     if payment is None:
         return _ack("unknown_payment")
+    # у каждого проекта сети свой магазин ЮKassa: проверяем платёж ключами его проекта
+    with projects.use(projects.of(payment)):
+        return _process(event, yk_id, payment)
+
+
+def _process(event: str, yk_id: str, payment: dict[str, Any]) -> JSONResponse:
+    client = yookassa.get_client()
+    if not client.is_configured():
+        return JSONResponse(status_code=503, content={"error": "yookassa_not_configured"})
     if payment.get("provider") != "yookassa":
         _log(f"уведомление для платежа {payment['payment_id']} другого провайдера ({payment.get('provider')}) — игнор")
         return _ack("ignored")

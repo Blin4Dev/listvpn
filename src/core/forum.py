@@ -38,9 +38,9 @@ def admin_chat_id() -> str:
 
 
 def admin_chat_ids() -> list[Any]:
-    """TELEGRAM_ADMIN_ID может быть списком через запятую: 8096013973, 6782643627."""
+    """админы сети: панель → Настройки → Уведомления (forum_admin_ids) + TELEGRAM_ADMIN_ID из .env (старые установки)."""
     out: list[Any] = []
-    for part in admin_chat_id().replace(",", " ").split():
+    for part in f"{db.get_setting('forum_admin_ids', '')} {admin_chat_id()}".replace(",", " ").split():
         cid = _as_chat(part)
         if cid not in out:
             out.append(cid)
@@ -99,13 +99,19 @@ def get_config() -> dict[str, Any]:
     """конфиг форума для панели."""
     return {
         "forum_chat_id": db.get_setting("forum_chat_id", "") or "",
+        "admin_ids": db.get_setting("forum_admin_ids", "") or "",
+        "admin_ids_env": admin_chat_id(),
         "panel_url": db.get_setting("panel_url", "") or "",
         "topics": {t: (db.get_setting(f"forum_topic_{t}", "") or "") for t in TOPICS},
     }
 
 
-def save_config(forum_chat_id: str, topics: dict[str, Any], panel_url_value: Optional[str] = None) -> dict[str, Any]:
+def save_config(forum_chat_id: str, topics: dict[str, Any], panel_url_value: Optional[str] = None,
+                admin_ids_value: Optional[str] = None) -> dict[str, Any]:
     db.set_setting("forum_chat_id", str(forum_chat_id or "").strip())
+    if admin_ids_value is not None:
+        ids = [x for x in str(admin_ids_value).replace(",", " ").split() if x.lstrip("-").isdigit()]
+        db.set_setting("forum_admin_ids", ", ".join(dict.fromkeys(ids)))
     if panel_url_value is not None:
         db.set_setting("panel_url", str(panel_url_value or "").strip())
     for t in TOPICS:
@@ -144,6 +150,9 @@ def _push_owner(topic: str, text: str) -> None:
 
 def send(topic: str, text: str, *, reply_markup: Optional[dict] = None) -> Optional[dict[str, Any]]:
     """в топик форума (или лс админу); purchases/withdrawals/incidents ещё push владельцу."""
+    # в сети несколько проектов — помечаем, к какому относится событие
+    if len(notifier.projects.ids()) > 1 and text:
+        text = f"<b>[{notifier.projects.current().name}]</b> {text}"
     if topic in _PUSH_TOPICS:
         _push_owner(topic, text)
     cid = chat_id()
@@ -163,7 +172,7 @@ def send(topic: str, text: str, *, reply_markup: Optional[dict] = None) -> Optio
             payload["message_thread_id"] = thread
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        res = notifier.call("sendMessage", payload)
+        res = notifier.admin_call("sendMessage", payload)
         if first is None and res is not None:
             first = res
     return first
@@ -177,14 +186,14 @@ def send_document(topic: str, file_path: str, *, caption: str = "") -> bool:
         thread = None
     ok = False
     for target in targets:
-        ok = notifier.send_document(target, file_path, caption=caption, message_thread_id=thread) or ok
+        ok = notifier.send_document(target, file_path, caption=caption, message_thread_id=thread, project=notifier.projects.DEFAULT) or ok
     return ok
 
 
 def delete_message(chat: Any, message_id: int) -> bool:
     if not chat or not message_id:
         return False
-    return notifier.call("deleteMessage", {"chat_id": _as_chat(chat), "message_id": int(message_id)}) is not None
+    return notifier.admin_call("deleteMessage", {"chat_id": _as_chat(chat), "message_id": int(message_id)}) is not None
 
 
 def _as_chat(value: Any) -> Any:
@@ -267,6 +276,7 @@ def _send_entities(telegram_id: int, segments: list[tuple[str, Optional[dict]]])
             entities.append({**ent, "offset": offset, "length": length})
         text += chunk
         offset += length
+    # личное сообщение пользователю — ботом ЕГО проекта (вызывающий ставит projects.use)
     return notifier.call("sendMessage", {
         "chat_id": int(telegram_id),
         "text": text,

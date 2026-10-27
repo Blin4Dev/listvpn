@@ -65,6 +65,15 @@ def _ensure_schema() -> None:
         if col not in rcols:
             conn.execute(f"ALTER TABLE referral_rewards ADD COLUMN {col} {ddl}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ref_rewards_batch ON referral_rewards(batch)")
+    # сеть проектов: подарок активируется только в проекте, где выпущен
+    if "project_id" not in rcols:
+        conn.execute("ALTER TABLE referral_rewards ADD COLUMN project_id TEXT")
+        conn.execute("UPDATE referral_rewards SET project_id = COALESCE((SELECT project_id FROM users u "
+                     "WHERE u.id = referral_rewards.user_id), ?) WHERE project_id IS NULL", (db.projects.DEFAULT,))
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_referral_rewards_project AFTER INSERT ON referral_rewards "
+        "WHEN NEW.project_id IS NULL BEGIN UPDATE referral_rewards SET project_id = COALESCE("
+        "(SELECT project_id FROM users WHERE id = NEW.user_id), current_project()) WHERE id = NEW.id; END")
     conn.commit()
     cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "partner_rate_custom" not in cols:
@@ -105,6 +114,26 @@ def active_referrals(user_id: int) -> int:
         (int(user_id), _iso(_now())),
     )
     return int((row or {}).get("c") or 0)
+
+
+def friends_preview(user_id: int, limit: int = 6) -> list[dict[str, Any]]:
+    """последние приглашённые для чипов на экране «Реферальная программа»: имя + активен ли.
+    имена из telegram не храним — показываем username, иначе «Друг N»."""
+    rows = db.fetchall(
+        "SELECT u.id, u.username, EXISTS ("
+        "SELECT 1 FROM subscriptions s WHERE s.user_id = u.id AND +s.status = 'Active' "
+        "AND s.type != 'trial' AND +s.expires_at IS NOT NULL AND +s.expires_at > ?) AS active "
+        "FROM users u WHERE u.referred_by = ? ORDER BY u.id DESC LIMIT ?",
+        (_iso(_now()), int(user_id), int(limit)),
+    )
+    total = invited_referrals(user_id)
+    out: list[dict[str, Any]] = []
+    for i, r in enumerate(rows):
+        name = str(r.get("username") or "").lstrip("@").strip()
+        if len(name) > 14:
+            name = name[:13] + "…"
+        out.append({"name": name or f"Друг {total - i}", "active": bool(r.get("active"))})
+    return out
 
 
 def invited_referrals(user_id: int) -> int:
@@ -334,7 +363,7 @@ def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
     _ensure_schema()
     code = str(code or "").strip().upper()
     row = db.fetchone("SELECT * FROM referral_rewards WHERE code = ? AND kind IN ('gift', 'bought', 'admin')", (code,))
-    if not row:
+    if not row or db.projects.of(row) != db.projects.of(user):
         raise RewardError("Подарок не найден", 404)
     if row["status"] == "revoked":
         raise RewardError("Подарок отменён")
@@ -427,7 +456,7 @@ def _admin_status(r: dict[str, Any]) -> str:
 
 def list_admin_gifts(status: str = "", q: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
     _ensure_schema()
-    where, args = ["r.kind = 'admin'"], []
+    where, args = ["r.kind = 'admin' AND r.project_id = ?"], [db.pid()]
     now = _iso(_now())
     if status == "issued":
         where.append("r.status = 'issued' AND (r.expires_at IS NULL OR r.expires_at >= ?)")
@@ -451,7 +480,8 @@ def list_admin_gifts(status: str = "", q: str = "", limit: int = 100, offset: in
         f"LEFT JOIN users u ON u.id = r.redeemed_by WHERE {w} ORDER BY r.id DESC LIMIT ? OFFSET ?",
         tuple(args) + (max(1, min(500, int(limit))), max(0, int(offset))))
     stats = {k: 0 for k in ("issued", "redeemed", "expired", "revoked")}
-    for r in db.fetchall("SELECT status, expires_at FROM referral_rewards WHERE kind = 'admin'"):
+    for r in db.fetchall("SELECT status, expires_at FROM referral_rewards WHERE kind = 'admin' AND project_id = ?",
+                         (db.pid(),)):
         stats[_admin_status(r)] = stats.get(_admin_status(r), 0) + 1
     return {
         "total": int(total["c"]) if total else 0, "stats": stats,
@@ -472,7 +502,7 @@ def revoke_admin_gifts(ids: list[int]) -> int:
         return 0
     ph = ",".join("?" * len(ids))
     cur = db.execute(f"UPDATE referral_rewards SET status = 'revoked' WHERE kind = 'admin' AND status = 'issued' "
-                     f"AND id IN ({ph})", tuple(ids))
+                     f"AND project_id = ? AND id IN ({ph})", (db.pid(), *ids))
     return int(cur.rowcount or 0)
 
 
@@ -480,7 +510,8 @@ def gift_preview(code: str) -> Optional[dict[str, Any]]:
     """для бота: что за подарок по коду (без активации)."""
     _ensure_schema()
     row = db.fetchone("SELECT kind, status, months, whitelist, expires_at FROM referral_rewards "
-                      "WHERE code = ? AND kind IN ('gift', 'bought', 'admin')", (str(code or "").strip().upper(),))
+                      "WHERE code = ? AND kind IN ('gift', 'bought', 'admin') AND project_id = ?",
+                      (str(code or "").strip().upper(), db.pid()))
     if not row:
         return None
     return {"status": _admin_status(row), "months": int(row.get("months") or 1), "whitelist": bool(row.get("whitelist"))}

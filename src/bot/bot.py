@@ -18,6 +18,7 @@ for _p in (os.path.join(_HERE, "..", "core"), os.path.join(_HERE, "..", "api")):
         sys.path.insert(0, _p)
 
 import database as db  # type: ignore
+import projects  # type: ignore
 import fulfillment  # type: ignore
 import reminders  # type: ignore
 import services  # type: ignore
@@ -36,10 +37,18 @@ def _env(*keys: str, default: str = "") -> str:
     return default
 
 
-TOKEN = _env("TELEGRAM_BOT_TOKEN")
-MINIAPP_URL = _env("MINIAPP_URL").rstrip("/")
-BOT_USERNAME = _env("BOT_USERNAME", "VITE_BOT_USERNAME", default="blinvpn_bot")
-SUPPORT_URL = _env("SUPPORT_URL")  # fallback если нет miniapp
+# сеть проектов: у каждого проекта свой бот. Один процесс опрашивает всех ботов, каждого — в своём потоке
+# и в контексте своего проекта (projects.current()): токен, мини-приложение, тексты — проекта.
+def P() -> "projects.Project":
+    return projects.current()
+
+
+def _miniapp_url() -> str:
+    return P().miniapp_url
+
+
+def _support_url() -> str:
+    return P().support_url  # fallback, если нет мини-приложения
 
 # premium emoji (нужен premium/fragment + bot api 9.4+)
 EMOJI_FOX = _env("EMOJI_FOX", default="5963229754516574142")  # premium-эмодзи в приветствии /start
@@ -49,7 +58,7 @@ EMOJI_CHAT = _env("EMOJI_CHAT", default="5994297722574737553")
 
 def api(method: str, payload: Optional[dict[str, Any]] = None, *, timeout: float = 35.0,
         _retries: int = 1) -> Any:
-    url = f"{API_BASE}/bot{TOKEN}/{method}"
+    url = f"{API_BASE}/bot{P().bot_token}/{method}"
     data = json.dumps(payload or {}).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
@@ -80,18 +89,18 @@ def api(method: str, payload: Optional[dict[str, Any]] = None, *, timeout: float
 
 def _support_button(**extra: Any) -> Optional[dict[str, Any]]:
     """кнопка «поддержка» в мини-приложении."""
-    if MINIAPP_URL:
-        return {"text": "Поддержка", "web_app": {"url": f"{MINIAPP_URL}/support"}, **extra}
-    if SUPPORT_URL:
-        return {"text": "Поддержка", "url": SUPPORT_URL, **extra}
+    if _miniapp_url():
+        return {"text": "Поддержка", "web_app": {"url": f"{_miniapp_url()}/support"}, **extra}
+    if _support_url():
+        return {"text": "Поддержка", "url": _support_url(), **extra}
     return None
 
 
 def _open_app_keyboard() -> dict[str, Any]:
     """клавиатура для сервисных сообщений (оплата)."""
     buttons: list[list[dict[str, Any]]] = []
-    if MINIAPP_URL:
-        buttons.append([{"text": "🚀 Открыть BatmanVPN", "web_app": {"url": MINIAPP_URL}}])
+    if _miniapp_url():
+        buttons.append([{"text": P().bot_text("open_app_text", f"🚀 Открыть {P().name}"), "web_app": {"url": _miniapp_url()}}])
     sup = _support_button()
     if sup:
         buttons.append([{**sup, "text": "💬 Поддержка"}])
@@ -108,8 +117,8 @@ def _welcome_text_entities() -> tuple[str, list[dict[str, Any]]]:
     segments: list[tuple[str, Optional[dict[str, Any]]]] = [
         ("🦊", {"type": "custom_emoji", "custom_emoji_id": EMOJI_FOX}),
         (" ", None),
-        ("Добро пожаловать!", {"type": "bold"}),
-        ("\n\nПришло время для по-настоящему качественного сервиса.", None),
+        (P().bot_text("welcome_title", "Добро пожаловать!"), {"type": "bold"}),
+        ("\n\n" + P().bot_text("welcome_text", "Пришло время для по-настоящему качественного сервиса."), None),
     ]
     text = ""
     entities: list[dict[str, Any]] = []
@@ -124,9 +133,9 @@ def _welcome_text_entities() -> tuple[str, list[dict[str, Any]]]:
 
 
 def _launch_button() -> dict[str, Any]:
-    if MINIAPP_URL:
-        return {"text": "Запустить", "web_app": {"url": MINIAPP_URL}}
-    return {"text": "Запустить", "url": f"https://t.me/{BOT_USERNAME}"}
+    if _miniapp_url():
+        return {"text": "Запустить", "web_app": {"url": _miniapp_url()}}
+    return {"text": "Запустить", "url": f"https://t.me/{P().bot_username}"}
 
 
 def _send_welcome(chat_id: int) -> None:
@@ -171,7 +180,8 @@ def handle_start(message: dict[str, Any]) -> None:
     parts = text.split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else ""
 
-    existed = db.fetchone("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)) is not None
+    existed = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND project_id = ?",
+                          (telegram_id, P().id)) is not None
     user = fulfillment.get_user(_ensure_user(telegram_id, frm))
     is_new = not existed
 
@@ -231,8 +241,8 @@ def _send_gift(chat_id: int, raw: str) -> bool:
     extra = " + белые списки" if info["whitelist"] else ""
     text = f"🎁 Вам подарок — подписка на {period}{extra}.\n\nКод: <code>{code}</code>"
     markup: dict[str, Any] = {}
-    if MINIAPP_URL:
-        url = f"{MINIAPP_URL}/gift/activate?code={urllib.parse.quote(code)}"
+    if _miniapp_url():
+        url = f"{_miniapp_url()}/gift/activate?code={urllib.parse.quote(code)}"
         markup = {"reply_markup": {"inline_keyboard": [[{"text": "Активировать", "style": "primary", "web_app": {"url": url}}]]}}
     else:
         text += "\n\nОткройте приложение → «Активировать подарок» и введите код."
@@ -242,7 +252,7 @@ def _send_gift(chat_id: int, raw: str) -> bool:
 
 def _send_payment_return(chat_id: int, user: dict[str, Any], payment_id: str, failed: bool = False) -> bool:
     """возврат после оплаты (ЮKassa): кнопка на платёж в мини-приложении; false если не найден."""
-    if not MINIAPP_URL or not re.fullmatch(r"[a-f0-9]{16,64}", payment_id or ""):
+    if not _miniapp_url() or not re.fullmatch(r"[a-f0-9]{16,64}", payment_id or ""):
         return False
     pay = db.fetchone("SELECT status FROM payments WHERE payment_id = ? AND user_id = ?", (payment_id, int(user["id"])))
     if not pay:
@@ -260,7 +270,7 @@ def _send_payment_return(chat_id: int, user: dict[str, Any], payment_id: str, fa
         "text": text,
         "reply_markup": {"inline_keyboard": [[{
             "text": "Попробовать снова" if failed else "Открыть", "style": "primary",
-            "web_app": {"url": f"{MINIAPP_URL}/payment/return?payment_id={payment_id}{'&result=fail' if failed else ''}"},
+            "web_app": {"url": f"{_miniapp_url()}/payment/return?payment_id={payment_id}{'&result=fail' if failed else ''}"},
         }]]},
     })
     return True
@@ -297,6 +307,9 @@ def _apply_promo(chat_id: int, user: dict[str, Any], code: str) -> None:
         return
     try:
         info = services.activate_promocode(int(user["id"]), code)
+        if info.get("type") == "days":
+            _send_day_gift(chat_id, int(info["days"]), "promo")
+            return
         safe_code = forum._esc(str(info.get("code") or code).upper())
         api("sendMessage", {
             "chat_id": chat_id,
@@ -309,9 +322,37 @@ def _apply_promo(chat_id: int, user: dict[str, Any], code: str) -> None:
         print(f"[bot] promo error: {type(exc).__name__}: {exc}", flush=True)
 
 
+def days_ru(n: int) -> str:
+    n = int(n)
+    w = "день" if n % 10 == 1 and n % 100 != 11 else ("дня" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "дней")
+    return f"{n} {w}"
+
+
+def day_gift_text(days: int, source: str) -> str:
+    if source == "winback":
+        return (f"🎁 Давно не виделись! Дарим {days_ru(days)} подписки {P().name}.\n\n"
+                "Чтобы получить, нажмите кнопку «Забрать».")
+    return f"🎁 Вы получили {days_ru(days)} к подписке, чтобы получить нажмите кнопку «Забрать»."
+
+
+def day_gift_markup() -> Optional[dict[str, Any]]:
+    """кнопка «Забрать» открывает мини-приложение — там подарок и начисляется."""
+    if not _miniapp_url():
+        return None
+    return {"inline_keyboard": [[{"text": "Забрать", "style": "success", "web_app": {"url": f"{_miniapp_url()}/?gifts=1"}}]]}
+
+
+def _send_day_gift(chat_id: int, days: int, source: str) -> bool:
+    markup = day_gift_markup()
+    text = day_gift_text(days, source)
+    if not markup:
+        text += "\n\nОткройте приложение — подарок ждёт на главной."
+    return api("sendMessage", {"chat_id": chat_id, "text": text, **({"reply_markup": markup} if markup else {})}) is not None
+
+
 def _ensure_user(telegram_id: int, frm: dict[str, Any]) -> int:
     """создаёт пользователя в бд при отсутствии; возвращает internal id."""
-    row = db.fetchone("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
+    row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND project_id = ?", (telegram_id, P().id))
     if row:
         return int(row["id"])
     import secrets
@@ -325,10 +366,11 @@ def _ensure_user(telegram_id: int, frm: dict[str, Any]) -> int:
                 return code
 
     db.execute(
-        "INSERT INTO users (telegram_id, username, first_name, last_name, balance, status, is_banned, "
+        "INSERT INTO users (project_id, telegram_id, username, first_name, last_name, balance, status, is_banned, "
         "referral_code, is_partner, partner_balance, partner_rate, autopay_enabled, created_at) "
-        "VALUES (?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
+        "VALUES (?, ?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
         (
+            P().id,
             telegram_id,
             names.tg_username(frm.get("username")),
             None,  # имя/фамилию не храним
@@ -346,10 +388,11 @@ def _apply_referral(user: dict[str, Any], code: str, is_new: bool = True) -> Non
         return
     # ref_<uid>; старые ref_<CODE> ок
     ref = None
+    # пригласивший — только из этого же проекта
     if code.isdigit():
-        ref = db.fetchone("SELECT id, referred_by FROM users WHERE id = ?", (int(code),))
+        ref = db.fetchone("SELECT id, referred_by FROM users WHERE id = ? AND project_id = ?", (int(code), P().id))
     if not ref:
-        ref = db.fetchone("SELECT id, referred_by FROM users WHERE referral_code = ?", (code,))
+        ref = db.fetchone("SELECT id, referred_by FROM users WHERE referral_code = ? AND project_id = ?", (code, P().id))
     if not ref or int(ref["id"]) == int(user["id"]):
         return
     # без петель a<->b
@@ -443,45 +486,68 @@ def process_update(update: dict[str, Any]) -> None:
         print(f"[bot] ошибка обработки апдейта: {type(exc).__name__}: {exc}", flush=True)
 
 
+def _poll(pid: str, token: str) -> None:
+    """long polling одного бота (в контексте его проекта). Токен сменили / убрали в панели — поток завершается."""
+    with projects.use(pid):
+        me = api("getMe")
+        if me:
+            print(f"[bot:{pid}] запущен как @{me.get('username')}", flush=True)
+        else:
+            print(f"[bot:{pid}] предупреждение: getMe не ответил (проверьте токен/сеть).", flush=True)
+        # polling: снять webhook
+        api("deleteWebhook", {"drop_pending_updates": False})
+        api("setMyCommands", {"commands": [{"command": "start",
+                                            "description": P().bot_text("command_description", f"Запустить {P().name}")}]})
+        offset = 0
+        allowed = ["message", "edited_message", "callback_query", "pre_checkout_query"]
+        while P().bot_token == token:
+            try:
+                updates = api("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": allowed}, timeout=40)
+                if not updates or P().bot_token != token:
+                    continue
+                for upd in updates:
+                    offset = max(offset, int(upd["update_id"]) + 1)
+                    process_update(upd)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[bot:{pid}] ошибка цикла: {type(exc).__name__}: {exc}", flush=True)
+                time.sleep(3)
+        print(f"[bot:{pid}] токен изменён в панели — переподключение", flush=True)
+
+
+SUPERVISE_SEC = 10
+
+
 def run() -> None:
-    if not TOKEN:
-        print("[bot] TELEGRAM_BOT_TOKEN не задан — бот не запущен.", flush=True)
-        # не валимся (контейнер иначе рестартит)
-        while True:
-            time.sleep(3600)
+    """бот всех проектов сети. Токены — в панели (Настройки → Проект), подхватываются без перезапуска."""
+    import threading
 
     db.init_db()
-
-    me = api("getMe")
-    if me:
-        print(f"[bot] запущен как @{me.get('username')}", flush=True)
-    else:
-        print("[bot] предупреждение: getMe не ответил (проверьте токен/сеть).", flush=True)
-
-    # polling: снять webhook
-    api("deleteWebhook", {"drop_pending_updates": False})
-
-    # команда: /start
-    api("setMyCommands", {"commands": [{"command": "start", "description": "Запустить BatmanVPN"}]})
-
-    # фоновые reminders по локальной бд
+    # фоновые напоминания — одни на всю сеть; каждое сообщение уходит ботом проекта пользователя
     reminders.start_background(api, log=lambda m: print(m, flush=True))
 
-    offset = 0
-    allowed = ["message", "edited_message", "callback_query", "pre_checkout_query"]
+    running: dict[str, tuple[str, threading.Thread]] = {}
+    warned: set[str] = set()
     while True:
         try:
-            updates = api("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": allowed}, timeout=40)
-            if not updates:
-                continue
-            for upd in updates:
-                offset = max(offset, int(upd["update_id"]) + 1)
-                process_update(upd)
+            for p in projects.all_projects():
+                tok = p.bot_token
+                cur = running.get(p.id)
+                if not tok:
+                    if p.id not in warned:
+                        print(f"[bot:{p.id}] бот проекта {p.name} не подключён — панель → Настройки → Проект.", flush=True)
+                        warned.add(p.id)
+                    continue
+                warned.discard(p.id)
+                if cur and cur[0] == tok and cur[1].is_alive():
+                    continue
+                t = threading.Thread(target=_poll, args=(p.id, tok), name=f"bot-{p.id}", daemon=True)
+                running[p.id] = (tok, t)
+                t.start()
         except KeyboardInterrupt:
             break
         except Exception as exc:  # noqa: BLE001
-            print(f"[bot] ошибка цикла: {type(exc).__name__}: {exc}", flush=True)
-            time.sleep(3)
+            print(f"[bot] супервизор: {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(SUPERVISE_SEC)
 
 
 if __name__ == "__main__":

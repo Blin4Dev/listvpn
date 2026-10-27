@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch } from "../utils/api";
+import { redeemPromo, type DayGift } from "../utils/api";
+import { DayGiftSheet } from "../components/DayGiftSheet";
 import { formatDateRu } from "../utils/date";
 import { N, NoirBack, NoirButton, NoirScreen } from "../components/noir";
 
@@ -16,6 +17,8 @@ export default function Promocode() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [result, setResult] = useState<Result | null>(null);
+  // промокод на дни: подарок ждёт кнопку «Забрать»
+  const [dayGift, setDayGift] = useState<DayGift | null>(null);
 
   useEffect(() => { setErr(""); }, [code]);
 
@@ -25,14 +28,16 @@ export default function Promocode() {
     setBusy(true);
     setErr("");
     try {
-      const res = await appFetch<{ type?: string; value?: number; discount_percent?: number; expires_at?: string }>(
-        "/promocode/redeem",
-        { method: "POST", body: JSON.stringify({ code: c }) },
-      );
+      const res = await redeemPromo(c);
       try {
         (window as unknown as { Telegram?: { WebApp?: { HapticFeedback?: { notificationOccurred?: (s: string) => void } } } })
           .Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
       } catch { /* ignore */ }
+      if (res.type === "days" && res.gift_id) {
+        setDayGift({ id: res.gift_id, days: Number(res.days || 0), source: "promo", text: res.message || "" });
+        setCode("");
+        return;
+      }
       if (res.type === "gift") setResult({ kind: "gift", until: res.expires_at });
       else setResult({ kind: "discount", percent: Number(res.discount_percent ?? res.value ?? 0) });
       setCode("");
@@ -120,6 +125,7 @@ export default function Promocode() {
           </div>
         </>
       )}
+      {dayGift ? <DayGiftSheet gift={dayGift} onClose={() => setDayGift(null)} /> : null}
     </NoirScreen>
   );
 }

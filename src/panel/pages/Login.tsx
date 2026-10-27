@@ -70,11 +70,11 @@ export function LoginForm({ onLogin }: { onLogin: (token: string) => void }) {
       <div className="card-lg rise" style={{ padding: 32, width: '100%', maxWidth: 400, background: 'var(--surface)', border: '1px solid var(--border-strong)' }}>
         <div style={{ textAlign: 'center', marginBottom: 28 }}>
           <div className="avatar" style={{ width: 56, height: 56, borderRadius: 14, margin: '0 auto 14px' }}>
-            <img src="/assets/logo.png" alt="BatmanVPN" style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 8 }}
+            <img src="/assets/logo.png" alt="listvpn" style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 8 }}
               onError={(e) => { const img = e.currentTarget; img.style.display = 'none'; (img.nextElementSibling as HTMLElement | null)?.style.setProperty('display', 'block'); }} />
             <Lock size={26} style={{ display: 'none' }} />
           </div>
-          <h1 className="h-page" style={{ fontSize: 22 }}>BatmanVPN Panel</h1>
+          <h1 className="h-page" style={{ fontSize: 22 }}>listvpn · панель</h1>
           <p className="sub mt-1">Вход в панель управления</p>
         </div>
 

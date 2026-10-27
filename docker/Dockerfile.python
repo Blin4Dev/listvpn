@@ -14,11 +14,13 @@ RUN for i in 1 2 3; do \
     done; exit 1
 
 COPY src /app/src
+COPY projects /app/projects
 COPY node.sh /app/node.sh
 COPY xbm/response-rules.json /app/xbm/response-rules.json
 
 ENV PYTHONPATH=/app/src/core:/app/src/api \
-    DB_PATH=/app/data/data.db
+    DB_PATH=/app/data/data.db \
+    PROJECTS_DIR=/app/projects
 
 RUN groupadd -g 1000 app 2>/dev/null || true \
     && useradd -u 1000 -g 1000 -m app 2>/dev/null || true \

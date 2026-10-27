@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.15-5"
+INSTALLER_VERSION="2026.10.25-1"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -303,6 +303,23 @@ hook_for() { printf '%s' "${HOOK_DOMAIN:-$1}"; }
 
 # отдельный ли домен вебхуков (нужен свой сайт и сертификат)
 hook_separate() { [[ -n "$HOOK_DOMAIN" && "$HOOK_DOMAIN" != "$1" ]]; }
+
+# ── сеть проектов (listvpn): BatmanVPN, FGN … — projects/<id>/project.json ──
+# основной проект живёт на MINIAPP_DOMAIN и переменных без префикса, остальные — на <ID>__MINIAPP_DOMAIN, <ID>__… в .env
+default_project() { local d; d="$(get_env_var DEFAULT_PROJECT .env 2>/dev/null || true)"; printf '%s' "${d:-batman}"; }
+project_env_prefix() { printf '%s__' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"; }
+project_name() { sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "projects/$1/project.json" 2>/dev/null | head -n1; }
+# все проекты, кроме основного
+extra_projects() {
+    local d id def; def="$(default_project)"
+    for d in projects/*/; do
+        id="$(basename "$d")"
+        [[ -f "${d}project.json" && "$id" != "$def" && "$id" =~ ^[a-z][a-z0-9]{0,23}$ ]] && printf '%s\n' "$id"
+    done
+}
+project_domain() { get_env_var "$(project_env_prefix "$1")MINIAPP_DOMAIN" .env 2>/dev/null || true; }
+# домены дополнительных проектов (для сертификатов)
+extra_project_domains() { local id d; while read -r id; do [[ -n "$id" ]] || continue; d="$(project_domain "$id")"; [[ -n "$d" ]] && printf '%s\n' "$d"; done < <(extra_projects); }
 
 # спросить домен вебхуков; Enter — текущий (по умолчанию как у мини-приложения).
 # ask_hook_domain <mini> <panel> [текущий]
@@ -694,12 +711,62 @@ $(_caddy_api_headers)
 			reverse_proxy 127.0.0.1:9741 {
 				header_up X-Real-IP {client_ip}
 				header_up X-Forwarded-For {client_ip}
+				header_up X-Project $(default_project)
 			}
 		}
 	}
 }
 EOF
     )
+    # остальные проекты сети: свой домен → тот же API и контейнер мини-приложений с X-Project проекта
+    local _pid _pdom
+    while read -r _pid; do
+        [[ -n "$_pid" ]] || continue
+        _pdom="$(project_domain "$_pid")"
+        [[ -n "$_pdom" ]] || continue
+        cat >> "$tmp" <<EOF
+
+# проект сети: $(project_name "$_pid") (${_pid})
+$(site_addr "$_pdom") {
+	import blin_sec
+${tls_block}
+	request_body {
+		max_size 55MB
+	}
+	route {
+		handle /api/internal* {
+			respond 404
+		}
+		handle /api/panel* {
+			respond 404
+		}
+		handle /api* {
+			reverse_proxy 127.0.0.1:8000 {
+$(_caddy_api_headers)
+				header_up X-Project ${_pid}
+			}
+		}
+		handle /yookassa* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		handle /webhooks/payments/* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		handle {
+			reverse_proxy 127.0.0.1:9741 {
+				header_up X-Real-IP {client_ip}
+				header_up X-Forwarded-For {client_ip}
+				header_up X-Project ${_pid}
+			}
+		}
+	}
+}
+EOF
+    done < <(extra_projects)
     if [[ $remote -eq 0 ]]; then
         cat >> "$tmp" <<EOF
 
@@ -850,6 +917,8 @@ caddy_proxy_up() {
     local -a domains=("$mini")
     panel_is_remote || domains+=("$panel")
     if hook_separate "$mini" && [[ "$HOOK_DOMAIN" != "$panel" ]]; then domains+=("$HOOK_DOMAIN"); fi
+    local _xd
+    while read -r _xd; do [[ -n "$_xd" ]] && domains+=("$_xd"); done < <(extra_project_domains)
     install_caddy || return 1
     caddy_prepare_main "$email" || return 1
     free_ports_for_caddy || return 1
@@ -896,17 +965,8 @@ create_env_file() {
 
     section "Настройка переменных окружения"
 
-    section "Основной Telegram-бот"
-    prompt_valid "  ${BOLD}Токен бота${NC}  (основной бот): " TELEGRAM_BOT_TOKEN \
-        '^[0-9]{5,}:[A-Za-z0-9_-]{30,}$' "Токен выглядит так: 1234567890:AAH…, его выдаёт @BotFather"
-    prompt_valid "  ${BOLD}ID админа${NC}   (ваш Telegram ID): " TELEGRAM_ADMIN_ID \
-        '^[0-9]{3,15}$' "ID — только цифры (узнать можно у @userinfobot)"
-    prompt_valid "  ${BOLD}Username бота${NC} (без @, по умолч. blinvpn_bot): " BOT_USERNAME_INPUT \
-        '^@?[A-Za-z0-9_]{3,32}$' "Username — латиница, цифры и _" 1
-    BOT_USERNAME="${BOT_USERNAME_INPUT:-blinvpn_bot}"
-    BOT_USERNAME="${BOT_USERNAME#@}"
-
-    # форум-группа уведомлений: в панели (настройки → форум)
+    # бот, админы, ЮKassa, канал — у каждого проекта в панели (Настройки → Проект / Уведомления)
+    hint "Бот, админы, канал и ЮKassa настраиваются в панели после установки (Настройки → Проект)."
 
     section "Remnawave · панель VPN"
     prompt_valid "  ${BOLD}Panel URL${NC}  (по умолч. http://localhost:3000): " REMWAVE_PANEL_URL_INPUT \
@@ -915,13 +975,6 @@ create_env_file() {
     REMWAVE_PANEL_URL="${REMWAVE_PANEL_URL%/}"
     prompt_valid "  ${BOLD}API Token${NC}  (из панели Remnawave): " REMWAVE_API_KEY \
         '^[!-~]{10,}$' "Токен — латинские символы без пробелов (Remnawave → API Tokens)"
-
-    section "Домены ссылок подписки"
-    hint "Пусто — ссылка как её отдаёт Remnawave / FurkVPN. Иначе домен в ссылке заменится на ваш, путь останется."
-    prompt_valid "  ${BOLD}Домен обычного VPN${NC} (например sub.example.com, Enter — не менять): " VPN_SUB_DOMAIN \
-        '^[A-Za-z0-9.-]+(:[0-9]{1,5})?$' "Только домен, без https:// и пути" 1
-    prompt_valid "  ${BOLD}Домен белых списков${NC} (Enter — не менять): " WHITELIST_SUB_DOMAIN \
-        '^[A-Za-z0-9.-]+(:[0-9]{1,5})?$' "Только домен, без https:// и пути" 1
 
     section "Белые списки · FurkVPN"
     hint "Ключ партнёра из @VPNpartenrsbot (карточка приложения). Пусто — белые списки будут скрыты, ключ можно добавить в .env позже."
@@ -938,11 +991,8 @@ create_env_file() {
     ( umask 077; : > .env )
     chmod 600 .env
     cat > .env <<EOF
-# бот telegram
-TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-TELEGRAM_ADMIN_ID=${TELEGRAM_ADMIN_ID}
-BOT_USERNAME=${BOT_USERNAME}
-VITE_BOT_USERNAME=${BOT_USERNAME}
+# сеть проектов (listvpn): бот, админы, канал, ЮKassa, домены подписки — в панели
+# (Настройки → Проект, Настройки → Уведомления); у каждого проекта свои. Здесь — только инфраструктура.
 
 # форум-группа: в панели (настройки → форум)
 
@@ -950,20 +1000,13 @@ VITE_BOT_USERNAME=${BOT_USERNAME}
 REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
 
-# домены ссылок подписки: путь берётся из Remnawave / FurkVPN, домен — отсюда (пусто — без замены)
-# пример: Remnawave отдала https://domain1.com/hIeb, VPN_SUB_DOMAIN=domain2.com → пользователь получит https://domain2.com/hIeb
-VPN_SUB_DOMAIN=${VPN_SUB_DOMAIN:-}
-WHITELIST_SUB_DOMAIN=${WHITELIST_SUB_DOMAIN:-}
+# домены ссылок подписки — в панели (Настройки → Проект), у каждого проекта свои
 
 # белые списки: FurkVPN Partner API v2 (https://api.furkvpn.com/docs/v2)
 FURK_API_KEY=${FURK_API_KEY}
 FURK_BASE_URL=https://api.furkvpn.com/api/v2
 
-# платежи: ЮKassa / telegram stars (ключи позже в .env)
-
-# ЮKassa: shopId и секретный ключ из личного кабинета (Интеграция → Ключи API)
-YOOKASSA_SHOP_ID=
-YOOKASSA_SECRET_KEY=
+# платежи: ЮKassa (shopId и ключ — в панели, Настройки → Проект) / telegram stars
 # чеки 54-ФЗ через ЮKassa: 1 — отправлять чек (нужна почта покупателя или YOOKASSA_RECEIPT_EMAIL)
 YOOKASSA_RECEIPT=0
 YOOKASSA_RECEIPT_EMAIL=
@@ -2041,13 +2084,82 @@ change_port_flow() {
     printf "     ${CYAN}%s${NC}   и   ${CYAN}%s/yookassa${NC}\n" "$(pub_url "$mini")" "$(pub_url "$(hook_for "$mini")")"
 }
 
+# ── сеть проектов: подключить / настроить проект (домен, бот, ЮKassa) ──
+project_setup_flow() {
+    local def; def="$(default_project)"
+    section "Проекты сети"
+    hint "Основной проект: $(project_name "$def") (${def}) — домен $(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || echo '—')."
+    local id dom
+    while read -r id; do
+        [[ -n "$id" ]] || continue
+        dom="$(project_domain "$id")"
+        printf "  ${CYAN}%-10s${NC} %-20s домен: %s\n" "$id" "$(project_name "$id")" "${dom:-—}"
+    done < <(extra_projects)
+    echo
+    hint "Здесь — только домен проекта (нужен сертификат). Бот, канал и ЮKassa — в панели: Настройки → Проект."
+    hint "Новый проект = копия основного: введите новый id (латиница, например fgn2) — папка projects/<id> создастся сама."
+    local pid name
+    prompt_valid "ID проекта: " pid '^[a-z][a-z0-9]{0,23}$' "Только латиница и цифры, с буквы, до 24 символов"
+    if [[ "$pid" == "$def" ]]; then
+        log_error "Основной проект настраивается обычной установкой (домены — пункт 2)."
+        return 1
+    fi
+    if [[ ! -f "projects/${pid}/project.json" ]]; then
+        prompt "Название проекта (как видят пользователи, например FGN): " name
+        [[ -n "$name" ]] || name="$pid"
+        mkdir -p "projects/${pid}"
+        cp -r "projects/${def}/assets" "projects/${pid}/assets" 2>/dev/null || true
+        sed -e "s/\"id\": *\"${def}\"/\"id\": \"${pid}\"/" \
+            -e "s/$(project_name "$def")/${name//\//\\/}/g" \
+            -e 's/"id": *"@[A-Za-z0-9_]*"/"id": ""/' -e 's|"url": *"https://t.me/[A-Za-z0-9_]*"|"url": ""|' \
+            "projects/${def}/project.json" > "projects/${pid}/project.json"
+        log_success "✔ Создан projects/${pid} (копия $(project_name "$def")). Канал и тексты — в projects/${pid}/project.json."
+    fi
+    local pre; pre="$(project_env_prefix "$pid")"
+    local cur_dom
+    cur_dom="$(project_domain "$pid")"
+    prompt "Домен мини-приложения $(project_name "$pid") [${cur_dom:-нет}] (Enter = оставить): " dom
+    dom="$(sanitize_domain "${dom:-$cur_dom}")"
+    if [[ -n "$dom" ]] && ! _is_domain "$dom"; then
+        log_error "Некорректный домен: ${dom}"
+        return 1
+    fi
+    [[ -n "$dom" ]] && { set_env_var "${pre}MINIAPP_DOMAIN" "$dom"; set_env_var "${pre}MINIAPP_URL" "$(pub_url "$dom")"; }
+    chmod 600 .env 2>/dev/null || true
+
+    if [[ -n "$dom" ]]; then
+        local ip_dom ip_srv; ip_dom="$(resolve_domain_ip "$dom" || true)"; ip_srv="$(get_server_ip || true)"
+        if [[ -n "$ip_srv" && "$ip_dom" != "$ip_srv" ]]; then
+            log_warn "A-запись ${dom} → ${ip_dom:-нет}, а сервер — ${ip_srv}. Сертификат не выпустится, пока DNS не указывает сюда."
+        fi
+    fi
+
+    log_info "\nПересборка и перезапуск (мини-приложения всех проектов, бот, API)..."
+    dc_build || return 1
+    dc up -d
+    dc restart api webhook bot 2>/dev/null || true
+    local mini panel email
+    mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
+    panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+    email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
+    if [[ -n "$mini" && -n "$panel" ]]; then
+        proxy_up "$mini" "$panel" "$email" || return 1
+    fi
+
+    log_success "\n✔ Проект $(project_name "$pid") добавлен${dom:+ на домен ${dom}}."
+    log_info "Дальше — в панели: переключатель «Проект» → $(project_name "$pid") →"
+    printf "  • Настройки → Проект: токен бота, канал, ЮKassa (бот подключится сам, без перезапуска)\n"
+    printf "  • Настройки → Цены: тарифы и пробный период (сейчас — копия основного проекта)\n"
+    [[ -n "$dom" ]] && printf "  • @BotFather → Menu Button / Web App: ${CYAN}%s${NC}\n" "$(pub_url "$dom")"
+}
+
 REPO_URL="${BLINVPN_REPO_URL:-https://github.com/Blin4Dev/listvpn.git}"
 REPO_BRANCH="${BLINVPN_BRANCH:-main}"
 PROJECT_DIR="blinvpn"
 NGINX_CONF="/etc/nginx/sites-available/${PROJECT_DIR}.conf"
 NGINX_LINK="/etc/nginx/sites-enabled/${PROJECT_DIR}.conf"
 
-log_success "--- Установка / обновление BatmanVPN ---"
+log_success "--- Установка / обновление listvpn (BatmanVPN, FGN …) ---"
 
 # обновление существующей установки
 # установка до перехода на Caddy определяется по конфигу nginx
@@ -2122,13 +2234,14 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
         step "3)" "Перенести панель на отдельный сервер"
     fi
     step "4)" "Сменить порт HTTPS (сейчас ${HTTPS_PORT})"
-    step "5)" "Выход"
+    step "5)" "Проекты сети (FGN и др.): добавить проект / домен"
+    step "6)" "Выход"
     echo
-    prompt "Ваш выбор [1-5] (Enter = 1): " ACTION_CHOICE
+    prompt "Ваш выбор [1-6] (Enter = 1): " ACTION_CHOICE
     ACTION_CHOICE="${ACTION_CHOICE:-1}"
 
     # запущен свежий install.sh (например, через curl), а код в папке старый → сначала обновить
-    if [[ "$ACTION_CHOICE" =~ ^[234]$ ]] && ! grep -qF "INSTALLER_VERSION=\"${INSTALLER_VERSION}\"" ./install.sh 2>/dev/null; then
+    if [[ "$ACTION_CHOICE" =~ ^[2345]$ ]] && ! grep -qF "INSTALLER_VERSION=\"${INSTALLER_VERSION}\"" ./install.sh 2>/dev/null; then
         log_warn "Код в $(pwd) старее этого установщика — без обновления выбранное действие сработает неправильно."
         if confirm "Обновить код сейчас (как пункт 1), затем повторить выбор? (y/n): "; then
             ACTION_CHOICE=1
@@ -2169,6 +2282,10 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
             exit 0
             ;;
         5)
+            project_setup_flow
+            exit 0
+            ;;
+        6)
             log_info "Выход без изменений."
             exit 0
             ;;
@@ -2349,3 +2466,7 @@ else
 fi
 printf "  API:              ${YELLOW}%s/api${NC}\n" "$(pub_url "$DOMAIN")"
 print_payment_webhooks "$(hook_for "$DOMAIN")"
+printf "${BOLD}  Дальше — в панели${NC}\n"
+printf "  • Настройки → Проект: токен бота, канал, ЮKassa (у каждого проекта свои)\n"
+printf "  • Настройки → Уведомления: Telegram ID админов (коды входа в панель) и форум\n"
+printf "  • @BotFather → Menu Button / Web App: ${CYAN}%s${NC}\n\n" "$(pub_url "$DOMAIN")"

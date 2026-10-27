@@ -1,3 +1,4 @@
+import { useProjects } from '../../lib/project';
 import React, { useState, useEffect } from 'react';
 import {
   Key, Gift, Percent, X, CheckCircle, CreditCard, ArrowUpRight, ArrowDownLeft, Hash, Ban, Clock, Edit2, Copy, Database, Wallet, Plus, Send, Trash2, Save, RefreshCw, Shield, ArrowLeft, ExternalLink,
@@ -22,6 +23,7 @@ export interface UserDetailData {
   aa_warning?: { sub_id: number; at: string; reason: string | null; grace_until: string; valid_until: string } | null;
   balance: number; partner_rate: number;
   partner_balance: number; is_partner: boolean; has_trial: boolean; trial_resettable?: boolean;
+  trial_status?: Record<string, { available: boolean; reason: string | null; text: string }>;
   referrals: { id: number; telegram_id: number | null; username: string | null; email: string | null; full_name: string | null }[];
   subscription: any | null;
   discount?: { percent: number; expires_at: string | null; code: string | null; name: string | null } | null;
@@ -86,6 +88,10 @@ export const UserDetailPage: React.FC<{
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [action, setAction] = useState<string | null>(null);
+  // фишка проекта пользователя: VPN и ключ обхода продлеваются одной кнопкой
+  const { list: projList, current: curProject } = useProjects();
+  const userProject = projList.find((p) => p.id === ((detail as { project?: string } | null)?.project || curProject?.id));
+  const singleRenew = !!userProject?.features?.single_renew;
   const [editTg, setEditTg] = useState(false);
   const [editEmail, setEditEmail] = useState(false);
   const [tgDraft, setTgDraft] = useState('');
@@ -233,16 +239,32 @@ export const UserDetailPage: React.FC<{
             {detail.anti_key ? (
               <span className="mono" style={{ wordBreak: 'break-all' }}>{detail.anti_key} · до {fmtDateTime(detail.anti_expires_at ?? null)}</span>
             ) : <span className="mono">нет</span>}
-            {canEdit && (
+            {canEdit && !singleRenew && (
               <button className="btn sm solid" onClick={() => setAction('EXTEND_BYPASS')}>
                 <Plus size={14} /> {detail.anti_key ? 'Продлить' : 'Выдать'}
               </button>
             )}
+            {singleRenew && <span className="faint" style={{ fontSize: 12 }}>продлевается вместе с подпиской</span>}
           </InfoRow>
           <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
+          {detail.trial_status && (
+            <InfoRow label="Пробный">
+              <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {(['miniapp', 'web'] as const).map((src) => {
+                  const t = detail.trial_status?.[src];
+                  if (!t) return null;
+                  return (
+                    <span key={src} className={t.available ? '' : 'faint'}>
+                      {src === 'miniapp' ? 'Мини-приложение' : 'Сайт'}: {t.available ? 'можно взять' : `нельзя — ${t.text || t.reason}`}
+                    </span>
+                  );
+                })}
+              </span>
+            </InfoRow>
+          )}
           {canEdit && (
             <div className="flex gap-2 mt-3">
-              <button className="btn sm" disabled={!(detail.trial_resettable ?? detail.has_trial)} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
+              <button className="btn sm" title={(detail.trial_resettable ?? detail.has_trial) ? '' : 'Сбрасывать нечего — пробный и так доступен'} disabled={!(detail.trial_resettable ?? detail.has_trial)} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
             </div>
           )}
         </DCard>
@@ -329,7 +351,7 @@ export const UserDetailPage: React.FC<{
         {!sub ? (
           <div className="flex flex-col gap-3">
             <div className="muted sm">Активной подписки нет.</div>
-            {canEdit && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction('EXTEND_SUB')}><Plus size={14} /> Выдать VPN</button>}
+            {canEdit && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction(singleRenew ? 'EXTEND_ALL' : 'EXTEND_SUB')}><Plus size={14} /> {singleRenew ? 'Выдать подписку' : 'Выдать VPN'}</button>}
           </div>
         ) : (
           <>
@@ -339,7 +361,7 @@ export const UserDetailPage: React.FC<{
             </InfoRow>
             <InfoRow label="Срок">
               {canEdit ? (<>
-                <button className="btn sm solid" onClick={() => setAction('EXTEND_SUB')}><Plus size={14} /> Продлить VPN</button>
+                <button className="btn sm solid" onClick={() => setAction(singleRenew ? 'EXTEND_ALL' : 'EXTEND_SUB')}><Plus size={14} /> {singleRenew ? 'Продлить' : 'Продлить VPN'}</button>
                 <button className="btn sm" onClick={() => setAction('REDUCE_SUB')}>Уменьшить</button>
               </>) : <span className="faint">—</span>}
             </InfoRow>

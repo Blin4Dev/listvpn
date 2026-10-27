@@ -1,3 +1,4 @@
+import { useProjects } from '../lib/project';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowLeft, CheckCircle, Clock, Users, Trash2, CornerUpLeft, Download, Edit2, ExternalLink, FileText, FileX, HelpCircle, Info, Lock, MessageCircle, Paperclip, Play, Save, Search, Send, ShieldAlert, Undo2, X, XCircle } from 'lucide-react';
 import { DotsMenu, Modal, Spinner } from '../components/ui';
@@ -29,6 +30,7 @@ const TAB_RU: Record<Tab, string> = { open: 'Открытые', mine: 'Мои', 
 const TAB_EMPTY: Record<Tab, string> = { open: 'Новых обращений нет', mine: 'У вас нет обращений в работе', work: 'Обращений в работе нет', archive: 'Архив пуст' };
 type ChatRow = {
   id: number; user_id: number; user_label: string; user_name?: string | null; is_banned: boolean; status?: string | null;
+  project?: string; project_name?: string;
   last_message_at?: string | null; last_preview?: string | null; last_sender?: string | null; unread: number;
   ticket?: Ticket | null; tab?: Tab; group?: '' | 'mine' | 'others' | 'escalated';
 };
@@ -381,6 +383,9 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
     const [editing, setEditing] = useState<SMsg | null>(null);
     const [flashId, setFlashId] = useState<number | null>(null);
     const [q, setQ] = useState('');
+    // поддержка общая на всю сеть: чаты всех проектов, фильтр по проекту
+    const { list: projList } = useProjects();
+    const [projFilter, setProjFilter] = useState('');
     const [data, setData] = useState<ChatData | null>(null);
     const [text, setText] = useState('');
     const [noteMode, setNoteMode] = useState(false);
@@ -396,10 +401,10 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
     const stick = useRef(true);
 
     const loadChats = useCallback(() => {
-      apiFetch(`/panel/support/chats?q=${encodeURIComponent(q)}&status=${status}`)
+      apiFetch(`/panel/support/chats?q=${encodeURIComponent(q)}&status=${status}&project=${encodeURIComponent(projFilter)}`)
         .then((x) => { setChats(Array.isArray(x?.chats) ? x.chats : []); setCounts(x?.counts || null); if (Array.isArray(x?.tabs)) setTabs(x.tabs); })
         .catch(() => setChats([]));
-    }, [q, status]);
+    }, [q, status, projFilter]);
     useEffect(() => { loadChats(); const t = setInterval(loadChats, 8000); return () => clearInterval(t); }, [loadChats]);
     useEffect(() => {
       const load = () => apiFetch('/panel/team-chat/unread').then((r) => setTeamUnread(Number(r?.unread || 0))).catch(() => {});
@@ -632,6 +637,12 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
             <Search className="ico" size={16} />
             <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Имя, @username, ID, email…" />
           </div>
+          {projList.length > 1 && (
+            <select className="input" value={projFilter} onChange={(e) => setProjFilter(e.target.value)} style={{ marginTop: 8 }}>
+              <option value="">Все проекты</option>
+              {projList.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          )}
         </div>
         <button onClick={() => setChatId(TEAM_CHAT_ID)}
           style={{ display: 'flex', gap: 10, alignItems: 'center', width: '100%', textAlign: 'left', padding: '11px 14px', border: 'none', borderBottom: '1px solid var(--border)', cursor: 'pointer', color: 'inherit', font: 'inherit',
@@ -683,6 +694,7 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div className="flex justify-between gap-2">
                     <span style={{ fontWeight: (c.unread || esc) ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.user_label}</span>
+                    {projList.length > 1 && c.project_name && <span className="badge" style={{ fontSize: 10.5, padding: '1px 6px', flexShrink: 0 }}>{c.project_name}</span>}
                     <span className="faint" style={{ fontSize: 11, flex: 'none' }}>
                       {c.ticket ? <span style={{ marginRight: 6 }}>№{c.ticket.number}{c.ticket.status === 'closed' ? ' · закрыт' : c.ticket.close_prompt ? ' · закрывается' : c.ticket.assigned_to_me ? '' : c.ticket.assigned_name ? ` · ведёт ${c.ticket.assigned_name}` : ''}</span> : null}
                       {shortWhen(c.last_message_at)}

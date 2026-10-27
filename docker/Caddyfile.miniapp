@@ -1,0 +1,54 @@
+# Мини-приложения всех проектов сети в одном контейнере: /srv/projects/<id>/
+# Проект — заголовок X-Project (его ставит Caddy на хосте по домену проекта), без него — проект по умолчанию.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:80 {
+	header {
+		-Server
+		defer
+	}
+	map {http.request.header.X-Project} {proj} {
+		~^([a-z][a-z0-9]{0,23})$ "${1}"
+		default {$DEFAULT_PROJECT:batman}
+	}
+	route {
+		# assets: живые из ./projects/<id>/assets и ./assets (volume), иначе собранные
+		@live_project_asset {
+			path /assets/*
+			file {
+				root /srv/live/projects/{proj}
+			}
+		}
+		handle @live_project_asset {
+			root * /srv/live/projects/{proj}
+			header Cache-Control "public, max-age=600"
+			file_server
+		}
+		@live_shared_asset {
+			path /assets/*
+			file {
+				root /srv/live/shared
+			}
+		}
+		handle @live_shared_asset {
+			root * /srv/live/shared
+			header Cache-Control "public, max-age=600"
+			file_server
+		}
+		@static path *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.svg *.ico *.webp *.gif *.mp4 *.webm
+		handle @static {
+			root * /srv/projects/{proj}
+			header Cache-Control "public, max-age=604800"
+			file_server
+		}
+		handle {
+			root * /srv/projects/{proj}
+			try_files {path} {path}/ /index.html
+			file_server
+		}
+	}
+}

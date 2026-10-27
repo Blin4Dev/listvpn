@@ -84,7 +84,15 @@ def ensure() -> None:
         if _ensured:
             return
         db.init_db()
-        for step in (sync_tariffs, seed_tasks, backfill_purchases, backfill_ledger):
+        # тарифы и задания — свои у каждого проекта сети
+        for p in db.projects.all_projects():
+            with db.projects.use(p.id):
+                for step in (sync_tariffs, seed_tasks):
+                    try:
+                        step()
+                    except Exception as exc:  # noqa: BLE001
+                        _log(f"init {p.id} {step.__name__}: {type(exc).__name__}: {exc}")
+        for step in (backfill_purchases, backfill_ledger):
             try:
                 step()
             except Exception as exc:  # noqa: BLE001
@@ -107,19 +115,19 @@ def sync_tariffs() -> None:
     ts = db.utcnow_iso()
     for i, m in enumerate(fulfillment.SUB_PERIODS):
         db.execute(
-            "INSERT INTO tariffs (code, title, price, currency, period_days, months, is_active, sort_order, updated_at) "
-            "VALUES (?, ?, ?, 'RUB', ?, ?, 1, ?, ?) "
-            "ON CONFLICT(code) DO UPDATE SET price = excluded.price, period_days = excluded.period_days, "
+            "INSERT INTO tariffs (project_id, code, title, price, currency, period_days, months, is_active, sort_order, "
+            "updated_at) VALUES (?, ?, ?, ?, 'RUB', ?, ?, 1, ?, ?) "
+            "ON CONFLICT(project_id, code) DO UPDATE SET price = excluded.price, period_days = excluded.period_days, "
             "months = excluded.months, updated_at = excluded.updated_at",
-            (tariff_code(m), _TITLES.get(m, f"{m} мес."), float(fulfillment.period_price(m)),
+            (db.pid(), tariff_code(m), _TITLES.get(m, f"{m} мес."), float(fulfillment.period_price(m)),
              int(fulfillment.period_days(m)), int(m), i, ts),
         )
 
 
 def list_tariffs() -> list[dict[str, Any]]:
     rows = db.fetchall(
-        "SELECT code, title, price, currency, period_days FROM tariffs WHERE is_active = 1 "
-        "ORDER BY sort_order, period_days, code"
+        "SELECT code, title, price, currency, period_days FROM tariffs WHERE is_active = 1 AND project_id = ? "
+        "ORDER BY sort_order, period_days, code", (db.pid(),)
     )
     return [{"code": r["code"], "title": r["title"], "price": _num(r["price"]),
              "currency": r["currency"] or "RUB", "period_days": int(r["period_days"])} for r in rows]
@@ -500,22 +508,25 @@ def seed_tasks() -> None:
     if db.get_setting("apiv1_tasks_seeded") == "1":
         return
     ts = db.utcnow_iso()
-    if not db.fetchone("SELECT 1 FROM tasks LIMIT 1"):
+    p = db.projects.current()
+    # code уникален во всей базе: у проекта по умолчанию — channel / vpn_15m, у остальных — fgn:channel …
+    pre = "" if p.is_default else f"{p.id}:"
+    if not db.fetchone("SELECT 1 FROM tasks WHERE project_id = ? LIMIT 1", (p.id,)):
+        rows = [("vpn_15m", "Проведи 15 минут в VPN", "Будьте подключены к VPN 15 минут", "vpn_minutes", 15,
+                 None, None, 1, 2, ts)]
+        if p.channel_id:
+            rows.insert(0, ("channel", "Подпишись на канал", "Подпишитесь на наш Telegram-канал", "channel", 1,
+                            p.channel_id, p.channel_url, 3, 1, ts))
         db.executemany(
-            "INSERT OR IGNORE INTO tasks (code, title, description, kind, target, channel_id, url, reward_days, "
-            "is_active, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
-            [
-                ("channel", "Подпишись на канал", "Подпишитесь на наш Telegram-канал", "channel", 1,
-                 "@BATMANNETWORK", "https://t.me/BATMANNETWORK", 3, 1, ts),
-                ("vpn_15m", "Проведи 15 минут в VPN", "Будьте подключены к VPN 15 минут", "vpn_minutes", 15,
-                 None, None, 1, 2, ts),
-            ],
+            "INSERT OR IGNORE INTO tasks (project_id, code, title, description, kind, target, channel_id, url, "
+            "reward_days, is_active, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            [(p.id, pre + r[0], *r[1:]) for r in rows],
         )
     db.set_setting("apiv1_tasks_seeded", "1")
 
 
 def get_task(task_id: int) -> Optional[dict[str, Any]]:
-    return db.fetchone("SELECT * FROM tasks WHERE id = ? AND is_active = 1", (int(task_id),))
+    return db.fetchone("SELECT * FROM tasks WHERE id = ? AND is_active = 1 AND project_id = ?", (int(task_id), db.pid()))
 
 
 def vpn_seconds(user_id: int) -> int:
@@ -537,7 +548,7 @@ def _progress(user: dict[str, Any], task: dict[str, Any], ut: Optional[dict[str,
         return cur >= target, min(cur, target)
     if kind == "channel":
         tg = user.get("telegram_id")
-        chan = (task.get("channel_id") or "@BATMANNETWORK").strip()
+        chan = (task.get("channel_id") or db.projects.current().channel_id).strip()
         if not tg or not chan:
             return False, 0
         checked = parse_iso((ut or {}).get("checked_at"))
@@ -578,7 +589,8 @@ def evaluate_task(user: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
 
 def list_tasks(user: dict[str, Any]) -> list[dict[str, Any]]:
     out = []
-    for t in db.fetchall("SELECT * FROM tasks WHERE is_active = 1 ORDER BY sort_order, id"):
+    for t in db.fetchall("SELECT * FROM tasks WHERE is_active = 1 AND project_id = ? ORDER BY sort_order, id",
+                         (db.projects.of_user(user) or db.pid(),)):
         ev = evaluate_task(user, t)
         out.append({
             "id": int(t["id"]), "title": t["title"], "reward_days": int(t["reward_days"] or 0),

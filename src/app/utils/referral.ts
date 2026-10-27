@@ -11,6 +11,7 @@ export type ReferralData = {
   partner_balance?: number;
   referrals_count?: number;
   active_count?: number;
+  friends?: { name: string; active: boolean }[];
   earned_total?: number;
   earned_month?: number;
   min_withdraw?: number;

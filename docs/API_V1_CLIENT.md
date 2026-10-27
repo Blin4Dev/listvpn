@@ -147,7 +147,7 @@ Content-Type: application/json
 ```json
 [
   {"id": 1, "title": "Подпишись на канал", "reward_days": 3, "status": "active",
-   "progress": 0, "target": 1, "url": "https://t.me/blinvpn"},
+   "progress": 0, "target": 1, "url": "https://t.me/BATMANNETWORK"},
   {"id": 2, "title": "Проведи 15 минут в VPN", "reward_days": 1, "status": "completed",
    "progress": 15, "target": 15, "url": null}
 ]

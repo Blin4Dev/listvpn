@@ -86,6 +86,9 @@ def build_router(core: Any) -> APIRouter:
         user = core.get_user(claims["user_id"])
         if not user:
             raise HTTPException(401, detail={"message": "Пользователь не найден", "code": "session_revoked"})
+        if not core.same_project(user):
+            # токен другого проекта сети: клиент должен слать X-Project своего проекта (или ходить на его домен)
+            raise HTTPException(401, detail={"message": "Токен выдан другому проекту", "code": "wrong_project"})
         return {"user": user, "sid": claims["sid"]}
 
     def session_dep(authorization: Optional[str] = Header(None)) -> dict[str, Any]:
@@ -104,8 +107,8 @@ def build_router(core: Any) -> APIRouter:
     def auth_channel(user: dict = Depends(auth)) -> dict[str, Any]:
         """действия с деньгами/наградами — как в мини-приложении, только с подпиской на канал."""
         if user.get("telegram_id") and core.channel_required() and not core._check_channel_membership(user):
-            raise HTTPException(403, detail={"message": "Подпишитесь на канал BatmanVPN, чтобы продолжить",
-                                             "code": "channel_required", "channel_url": core.REQUIRED_CHANNEL_URL})
+            raise HTTPException(403, detail={"message": f"Подпишитесь на канал {core.P().name}, чтобы продолжить",
+                                             "code": "channel_required", "channel_url": core.P().channel_url})
         return user
 
     def _limit(key: str, rule: tuple[int, int]) -> None:
@@ -150,13 +153,15 @@ def build_router(core: Any) -> APIRouter:
                 auth_date = int(dict(parse_qsl(init_data)).get("auth_date") or 0)
             except ValueError:
                 auth_date = 0
-            if core.TELEGRAM_BOT_TOKEN and (not auth_date or time.time() - auth_date > INITDATA_MAX_AGE):
+            if core.P().bot_token and (not auth_date or time.time() - auth_date > INITDATA_MAX_AGE):
                 raise _err(401, "initData устарел — откройте приложение заново", "init_data_expired")
             user = core._resolve_app_user_from_tg(data.get("user") or {}, allow_banned=True)
             core._enforce_blacklist(user)
         elif body.session_token:
             sess = core.get_app_session(body.session_token.strip())
             user = core.get_user(int(sess["user_id"])) if sess else None
+            if user and not core.same_project(user):
+                user = None
             if not user:
                 raise _err(401, "Сессия истекла, войдите заново", "session_invalid")
         else:
@@ -206,7 +211,8 @@ def build_router(core: Any) -> APIRouter:
         """{"bypass": {enabled, available, until, key, used_bytes?, limit_bytes?}} — тот же объект,
         что мини-приложение получает в /api/app/subscription. Нет пользователя — 404 user_not_found.
         Без активной подписки обход считается выключенным (enabled=false, key=null)."""
-        row = db.fetchone("SELECT id FROM users WHERE telegram_id = ?", (int(tg_id),))
+        # проект — по заголовку X-Project / домену (по умолчанию — основной проект сети)
+        row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND project_id = ?", (int(tg_id), db.pid()))
         user = core.get_user(int(row["id"])) if row else None
         if not user:
             raise _err(404, "Пользователь не найден", "user_not_found")
@@ -227,7 +233,7 @@ def build_router(core: Any) -> APIRouter:
     def referrals_me(user: dict = Depends(auth)) -> dict[str, Any]:
         uid = int(user["id"])
         return {
-            "invite_link": f"https://t.me/{core.BOT_USERNAME}?start=ref_{uid}",
+            "invite_link": f"https://t.me/{core.P().bot_username}?start=ref_{uid}",
             "stats": {
                 "invited": core.reflevels.invited_referrals(uid),
                 "earned_total": store._num(core.reflevels.earnings(uid)["total"]),

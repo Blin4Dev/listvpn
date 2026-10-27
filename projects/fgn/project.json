@@ -1,0 +1,29 @@
+{
+  "id": "fgn",
+  "name": "FGN",
+  "channel": {
+    "id": "",
+    "url": ""
+  },
+  "bot": {
+    "command_description": "Запустить FGN",
+    "welcome_title": "Добро пожаловать!",
+    "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
+    "open_app_text": "🚀 Открыть FGN"
+  },
+  "theme_color": "#05050A",
+  "features": {
+    "promo_days": true,
+    "promo_at_payment": true,
+    "single_renew": true,
+    "notify_not_connected": true,
+    "winback_gift": true
+  },
+  "features_doc": {
+    "promo_days": "промокод «+N дней к подписке» с кнопкой «Забрать»",
+    "promo_at_payment": "поле промокода на экране оплаты",
+    "single_renew": "в панели продление VPN и обхода одной кнопкой",
+    "notify_not_connected": "напоминание, если оплатил, но не подключил подписку",
+    "winback_gift": "давно не оплачивал — дарим дни (кнопка «Забрать»)"
+  }
+}

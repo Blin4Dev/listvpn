@@ -54,7 +54,7 @@ def config() -> dict:
         return {
             "mode": data["mode"], "host": str(data.get("host") or ""), "port": int(data.get("port") or 465),
             "user": user, "password": pwd or "", "from": user if data["mode"] == "smtp" else (f"no-reply@{dom}" if dom else ""),
-            "from_name": str(data.get("from_name") or "BatmanVPN"), "domain": dom, "source": "panel",
+            "from_name": _brand() if _brand() != "BatmanVPN" else str(data.get("from_name") or "BatmanVPN"), "domain": dom, "source": "panel",
         }
     host = _env("MAIL_SMTP_HOST")
     en = _env("MAIL_ENABLED", "1") in ("1", "true", "True", "yes")
@@ -66,7 +66,7 @@ def config() -> dict:
         "mode": ("smtp" if host else "direct") if en else "off", "host": host,
         "port": int(_env("MAIL_SMTP_PORT", "587") or 587), "user": _env("MAIL_SMTP_USER"),
         "password": _env("MAIL_SMTP_PASSWORD"), "from": frm or (f"no-reply@{d}" if d else ""),
-        "from_name": _env("MAIL_FROM_NAME", "BatmanVPN") or "BatmanVPN", "domain": d, "source": "env",
+        "from_name": _env("MAIL_FROM_NAME", "") or _brand(), "domain": d, "source": "env",
     }
 
 
@@ -357,6 +357,25 @@ def send(to: str, subject: str, *, html: Optional[str] = None, text: Optional[st
     return False, last_err
 
 
+def _brand() -> str:
+    """название проекта, от имени которого письмо (BatmanVPN, FGN …)."""
+    try:
+        try:
+            from . import projects  # type: ignore
+        except ImportError:
+            import projects  # type: ignore
+        return projects.current().name
+    except Exception:  # noqa: BLE001
+        return "BatmanVPN"
+
+
+def _brand_logo() -> str:
+    name = _brand()
+    if name.endswith("VPN") and len(name) > 3:
+        return f"{name[:-3]}<span style='color:#E00000'>VPN</span>"
+    return name
+
+
 def _brand_wrap(inner_html: str) -> str:
     return (
         "<div style=\"background:#111;padding:32px 0;font-family:'Inter',Arial,sans-serif\">"
@@ -364,7 +383,7 @@ def _brand_wrap(inner_html: str) -> str:
         "<table role='presentation' width='440' cellpadding='0' cellspacing='0' "
         "style='max-width:440px;background:#1c1c1c;border-radius:20px;overflow:hidden'>"
         "<tr><td style='padding:28px 32px 8px'>"
-        "<div style='font-size:22px;font-weight:700;color:#fff'>Batman<span style='color:#E00000'>VPN</span></div>"
+        f"<div style='font-size:22px;font-weight:700;color:#fff'>{_brand_logo()}</div>"
         "</td></tr>"
         f"<tr><td style='padding:8px 32px 30px;color:#d4d4d4;font-size:15px;line-height:1.6'>{inner_html}</td></tr>"
         "<tr><td style='padding:18px 32px;border-top:1px solid #2a2a2a;color:#6b6b6b;font-size:12px'>"
@@ -376,14 +395,14 @@ def _brand_wrap(inner_html: str) -> str:
 def send_login_code(to: str, code: str) -> tuple[bool, str]:
     inner = (
         "<p style='margin:0 0 14px;color:#fff;font-size:17px;font-weight:600'>Код для входа</p>"
-        "<p style='margin:0 0 18px'>Используйте этот код, чтобы войти в BatmanVPN:</p>"
+        f"<p style='margin:0 0 18px'>Используйте этот код, чтобы войти в {_brand()}:</p>"
         f"<div style='font-size:34px;font-weight:700;letter-spacing:8px;color:#F18726;"
         f"background:#111;border-radius:14px;padding:18px 0;text-align:center'>{_esc(code)}</div>"
         "<p style='margin:18px 0 0;color:#8a8a8a;font-size:13px'>Код действует 10 минут. "
         "Если вы не запрашивали вход — просто проигнорируйте это письмо.</p>"
     )
-    text = f"Ваш код для входа в BatmanVPN: {code}\nКод действует 10 минут."
-    return send(to, "Код для входа в BatmanVPN", html=_brand_wrap(inner), text=text)
+    text = f"Ваш код для входа в {_brand()}: {code}\nКод действует 10 минут."
+    return send(to, f"Код для входа в {_brand()}", html=_brand_wrap(inner), text=text)
 
 
 def _notice(to: str, subject: str, title: str, paragraphs: list[str], footer: str) -> tuple[bool, str]:
@@ -396,25 +415,26 @@ def _notice(to: str, subject: str, title: str, paragraphs: list[str], footer: st
     return send(to, subject, html=_brand_wrap(inner), text=text)
 
 
-_NOT_YOU = "Если это были не вы — войдите в BatmanVPN и отвяжите эту почту или напишите в поддержку."
+def _not_you() -> str:
+    return f"Если это были не вы — войдите в {_brand()} и отвяжите эту почту или напишите в поддержку."
 
 
 def send_email_bound(to: str) -> tuple[bool, str]:
     return _notice(
-        to, "Почта привязана к BatmanVPN", "Почта привязана",
-        [f"Адрес <b>{_esc(to)}</b> привязан к вашему аккаунту BatmanVPN. "
+        to, f"Почта привязана к {_brand()}", "Почта привязана",
+        [f"Адрес <b>{_esc(to)}</b> привязан к вашему аккаунту {_brand()}. "
          "Теперь по нему можно входить на сайт."],
-        _NOT_YOU,
+        _not_you(),
     )
 
 
 def send_email_unbound(to: str, new_email: Optional[str] = None) -> tuple[bool, str]:
     if new_email:
-        body = [f"Почта аккаунта BatmanVPN изменена на <b>{_esc(mask_email(new_email))}</b>. "
+        body = [f"Почта аккаунта {_brand()} изменена на <b>{_esc(mask_email(new_email))}</b>. "
                 "Входить по этому адресу больше нельзя."]
     else:
-        body = ["Этот адрес отвязан от аккаунта BatmanVPN. Входить по нему больше нельзя."]
-    return _notice(to, "Почта отвязана от BatmanVPN", "Почта отвязана", body,
+        body = [f"Этот адрес отвязан от аккаунта {_brand()}. Входить по нему больше нельзя."]
+    return _notice(to, f"Почта отвязана от {_brand()}", "Почта отвязана", body,
                    "Если это были не вы — срочно напишите в поддержку.")
 
 
@@ -424,8 +444,8 @@ def send_login_notice(to: str, when: str, method: str, ip: str = "", device: str
         rows.append(f"Устройство: <b>{_esc(device)}</b>")
     if ip:
         rows.append(f"IP-адрес: <b>{_esc(ip)}</b>")
-    return _notice(to, "Вход в аккаунт BatmanVPN", "Выполнен вход в аккаунт",
-                   ["В ваш аккаунт BatmanVPN только что вошли.", "<br>".join(rows)],
+    return _notice(to, f"Вход в аккаунт {_brand()}", "Выполнен вход в аккаунт",
+                   [f"В ваш аккаунт {_brand()} только что вошли.", "<br>".join(rows)],
                    "Если это были не вы — срочно напишите в поддержку.")
 
 
@@ -444,8 +464,8 @@ def send_support_reply(to: str, text: str, files: int = 0, url: str = "") -> tup
                      "padding:12px 20px;border-radius:12px;font-weight:600'>Открыть чат</a>")
     inner = ("<p style='margin:0 0 14px;color:#fff;font-size:17px;font-weight:600'>Вам ответила поддержка</p>"
              + "".join(f"<p style='margin:0 0 14px'>{p}</p>" for p in parts))
-    plain = "Вам ответила поддержка BatmanVPN\n\n" + short + (f"\n\nВложений: {files}" if files else "") + (f"\n\nОткрыть чат: {url}" if url else "")
-    return send(to, "Ответ поддержки BatmanVPN", html=_brand_wrap(inner), text=plain)
+    plain = f"Вам ответила поддержка {_brand()}\n\n" + short + (f"\n\nВложений: {files}" if files else "") + (f"\n\nОткрыть чат: {url}" if url else "")
+    return send(to, f"Ответ поддержки {_brand()}", html=_brand_wrap(inner), text=plain)
 
 
 def mask_email(e: str) -> str:

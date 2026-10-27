@@ -8,6 +8,11 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
+try:
+    from . import projects  # type: ignore
+except ImportError:
+    import projects  # type: ignore
+
 API_BASE = "https://api.telegram.org"
 
 # разметка панели -> telegram html
@@ -33,19 +38,25 @@ def format_markup(text: str) -> str:
     return text
 
 
-def _token() -> str:
-    return (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+def _token(project: Optional[str] = None) -> str:
+    """бот проекта: явный project, иначе проект текущего запроса / задачи."""
+    return projects.get(project).bot_token if project else projects.current().bot_token
+
+
+def admin_call(method: str, payload: dict[str, Any], **kw: Any) -> Optional[dict[str, Any]]:
+    """служебные сообщения команде (форум, сотрудники) — всегда ботом проекта по умолчанию."""
+    return call(method, payload, project=projects.DEFAULT, **kw)
 
 
 def call(method: str, payload: dict[str, Any], *, timeout: float = 30.0,
-         _retries: int = 1, on_throttle=None) -> Optional[dict[str, Any]]:
+         _retries: int = 1, on_throttle=None, project: Optional[str] = None) -> Optional[dict[str, Any]]:
     """
     Вызов Bot API. При 429 (Too Many Requests) уважаем parameters.retry_after
     и делаем один повтор — так соблюдаем лимит Telegram (~30 сообщений/сек для
     рассылки разным людям). Если передан on_throttle(retry_after) — вызываем его
     (рассылка использует это, чтобы АВТОМАТИЧЕСКИ снизить скорость).
     """
-    token = _token()
+    token = _token(project)
     if not token:
         return None
     url = f"{API_BASE}/bot{token}/{method}"
@@ -76,7 +87,8 @@ def call(method: str, payload: dict[str, Any], *, timeout: float = 30.0,
                     pass
             if _retries > 0:
                 time.sleep(min(retry_after, 30) + 0.1)
-                return call(method, payload, timeout=timeout, _retries=_retries - 1, on_throttle=on_throttle)
+                return call(method, payload, timeout=timeout, _retries=_retries - 1, on_throttle=on_throttle,
+                            project=project)
     except (urllib.error.URLError, TimeoutError, OSError):
         return None
     if not body.get("ok"):
@@ -84,13 +96,13 @@ def call(method: str, payload: dict[str, Any], *, timeout: float = 30.0,
     return body.get("result")
 
 
-def get_chat_member_status(chat_id: Any, user_id: int) -> Optional[str]:
+def get_chat_member_status(chat_id: Any, user_id: int, *, project: Optional[str] = None) -> Optional[str]:
     """
     Статус пользователя в канале/чате (getChatMember). Возвращает строку статуса
     ('creator'|'administrator'|'member'|'restricted'|'left'|'kicked') либо None,
     если проверить нельзя (бот не админ канала / ошибка сети).
     """
-    res = call("getChatMember", {"chat_id": chat_id, "user_id": int(user_id)}, timeout=5.0)
+    res = call("getChatMember", {"chat_id": chat_id, "user_id": int(user_id)}, timeout=5.0, project=project)
     if isinstance(res, dict):
         return str(res.get("status") or "") or None
     return None
@@ -104,9 +116,10 @@ def send_document(
     message_thread_id: Optional[int] = None,
     parse_mode: str = "HTML",
     timeout: float = 120.0,
+    project: Optional[str] = None,
 ) -> bool:
     """Отправляет файл (sendDocument) через multipart/form-data. Для бэкапов."""
-    token = _token()
+    token = _token(project)
     if not token or not os.path.isfile(file_path):
         return False
     boundary = "----blinvpn" + os.urandom(16).hex()

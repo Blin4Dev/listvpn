@@ -1,0 +1,16 @@
+{
+  "id": "batman",
+  "name": "BatmanVPN",
+  "channel": {
+    "id": "@BATMANNETWORK",
+    "url": "https://t.me/BATMANNETWORK"
+  },
+  "bot": {
+    "command_description": "Запустить BatmanVPN",
+    "welcome_title": "Добро пожаловать!",
+    "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
+    "open_app_text": "🚀 Открыть BatmanVPN"
+  },
+  "theme_color": "#05050A",
+  "features": {}
+}

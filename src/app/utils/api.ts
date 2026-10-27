@@ -1,4 +1,5 @@
 // клиент api мини-приложения
+import { PROJECT_ID } from "./brand";
 
 export type Plan = { devices: number; price_rub: number; price_stars: number };
 export type PlansResponse = {
@@ -74,7 +75,8 @@ export function clearAppToken(): void {
 }
 
 export function initDataHeader(): Record<string, string> {
-  const headers: Record<string, string> = {};
+  // проект сети (BatmanVPN, FGN …): бэкенд один, бот / цены / платёжка — по проекту
+  const headers: Record<string, string> = { "X-Project": PROJECT_ID };
   try {
     const initData = (
       window as unknown as { Telegram?: { WebApp?: { initData?: string } } }
@@ -251,6 +253,13 @@ export type PaymentStatusResponse = {
   // купленный подарок: код для друга
   gift_code?: string | null;
   subscription?: unknown;
+  // для экрана итога оплаты
+  months?: number;
+  days?: number | null;
+  whitelist?: boolean;
+  stars?: number | null;
+  referral_applied?: number;
+  extra_devices?: number;
 };
 
 export type UnseenPayment = {
@@ -596,7 +605,7 @@ export async function fetchMembership(force = false): Promise<Membership> {
     return await appFetch<Membership>(`/membership${force ? "?force=1" : ""}`);
   } catch {
     // проверка не удалась: не блокируем
-    return { required: false, subscribed: true, channel_url: "https://t.me/blinvpn" };
+    return { required: false, subscribed: true, channel_url: "https://t.me/BATMANNETWORK" };
   }
 }
 
@@ -760,4 +769,35 @@ export function uploadSupportFile(file: File, onProgress: (p: number) => void): 
     xhr.send(file);
   });
   return { promise, abort: () => xhr.abort() };
+}
+
+
+// ── подарочные дни «нажмите Забрать» (промокод на дни, подарок вернувшимся) ──
+export type DayGift = { id: number; days: number; source: string; text: string; expires_at?: string | null };
+
+export async function fetchDayGifts(): Promise<DayGift[]> {
+  try {
+    const r = await appFetch<{ items: DayGift[] }>("/day-gifts");
+    return Array.isArray(r?.items) ? r.items : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function claimDayGift(id: number): Promise<{ days: number; expires_at?: string | null; message: string }> {
+  return appFetch(`/day-gifts/${id}/claim`, { method: "POST" });
+}
+
+export type PromoRedeem = {
+  type?: "discount" | "gift" | "days";
+  value?: number;
+  discount_percent?: number;
+  expires_at?: string;
+  days?: number;
+  gift_id?: number;
+  message?: string;
+};
+
+export async function redeemPromo(code: string): Promise<PromoRedeem> {
+  return appFetch<PromoRedeem>("/promocode/redeem", { method: "POST", body: JSON.stringify({ code }) });
 }

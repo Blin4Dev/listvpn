@@ -39,7 +39,16 @@ _STAGE_48 = 48 * _H
 _STAGE_24 = 24 * _H
 _LOOKBACK = 24 * _H  # окно для expired; дальше del*
 
-MINIAPP_URL = (os.getenv("MINIAPP_URL") or "").strip().rstrip("/")
+import projects  # type: ignore  # noqa: E402
+
+
+def _app_url() -> str:
+    """мини-приложение проекта, пользователям которого сейчас пишем."""
+    return projects.current().miniapp_url
+
+
+def _open_app() -> str:
+    return f"Открыть {projects.current().name}"
 
 
 def _utcnow() -> datetime:
@@ -166,9 +175,9 @@ def _stage_for(remaining_sec: float) -> Optional[str]:
 
 
 def _renew_keyboard() -> Optional[dict[str, Any]]:
-    if not MINIAPP_URL:
+    if not _app_url():
         return None
-    return {"inline_keyboard": [[{"text": "Продлить подписку", "web_app": {"url": MINIAPP_URL}}]]}
+    return {"inline_keyboard": [[{"text": "Продлить подписку", "web_app": {"url": _app_url()}}]]}
 
 
 def _already_sent(subscription_id: int, stage: str, cycle_exp: str) -> bool:
@@ -199,8 +208,8 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
         "FROM subscriptions s JOIN users u ON u.id = s.user_id "
         "WHERE s.status IN ('Active', 'Expired') AND s.expires_at IS NOT NULL "
         "AND s.expires_at BETWEEN ? AND ? "
-        "AND COALESCE(u.is_banned, 0) = 0 AND u.telegram_id IS NOT NULL",
-        (lo, hi),
+        "AND COALESCE(u.is_banned, 0) = 0 AND u.telegram_id IS NOT NULL AND u.project_id = ?",
+        (lo, hi, projects.current_id()),
     )
 
     sent = 0
@@ -229,7 +238,7 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
         }
         kb = _renew_keyboard()
         if kb and no_renew:
-            kb = {"inline_keyboard": [[{"text": "Открыть BatmanVPN", "web_app": {"url": MINIAPP_URL}}]]}
+            kb = {"inline_keyboard": [[{"text": _open_app(), "web_app": {"url": _app_url()}}]]}
         if kb:
             payload["reply_markup"] = kb
 
@@ -272,7 +281,7 @@ def _ob_message(stage: str) -> tuple[str, list[dict[str, Any]]]:
     if stage == "m30":
         return _build([
             (ch, em), (" ", None), ("Вы всё еще не оформили подписку!", b),
-            ("\n\nА ведь с BatmanVPN вы бы получили доступ в свободный интернет, "
+            ("\n\nА ведь с " + projects.current().name + " вы бы получили доступ в свободный интернет, "
              "безопасность и качественную поддержку.", None),
         ])
     if stage == "h24":
@@ -298,15 +307,15 @@ def _ob_message(stage: str) -> tuple[str, list[dict[str, Any]]]:
         (ch, em), (" ", None), ("Мы пытались...", b),
         ("\n\nЗдесь могло быть ещё одно сообщение, чтобы заставить вас купить подписку, "
          "но вы хорошо держитесь. Поэтому мы оставим вас, но знайте — ", None),
-        ("если свободный интернет, то только BatmanVPN", b), (".", None),
+        ("если свободный интернет, то только " + projects.current().name, b), (".", None),
     ])
 
 
 def _ob_keyboard(stage: str) -> Optional[dict[str, Any]]:
     # h72 без кнопки
-    if stage == "h72" or not MINIAPP_URL:
+    if stage == "h72" or not _app_url():
         return None
-    return {"inline_keyboard": [[{"text": "Оформить подписку", "web_app": {"url": MINIAPP_URL}}]]}
+    return {"inline_keyboard": [[{"text": "Оформить подписку", "web_app": {"url": _app_url()}}]]}
 
 
 def _ob_mark(user_id: int, stage: str) -> None:
@@ -323,8 +332,8 @@ def run_onboarding_once(api: Callable[..., Any], log: Callable[[str], None] = pr
         "SELECT u.id AS uid, u.telegram_id AS tg, u.first_start_at AS fs FROM users u "
         "WHERE u.telegram_id IS NOT NULL AND COALESCE(u.is_banned, 0) = 0 "
         "AND u.first_start_at IS NOT NULL AND u.first_start_at >= ? "
-        "AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id = u.id)",
-        (lo,),
+        "AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id = u.id) AND u.project_id = ?",
+        (lo, projects.current_id()),
     )
     sent = 0
     for r in rows:
@@ -393,7 +402,8 @@ def run_trial_connection_checks(api: Callable[..., Any], log: Callable[[str], No
     cutoff = (now - timedelta(minutes=15)).isoformat()
     give_up = (now - timedelta(hours=6)).isoformat()
     rows = db.fetchall(
-        "SELECT * FROM trial_checks WHERE checked = 0 AND granted_at <= ?", (cutoff,))
+        "SELECT c.* FROM trial_checks c JOIN users u ON u.id = c.user_id "
+        "WHERE c.checked = 0 AND c.granted_at <= ? AND u.project_id = ?", (cutoff, projects.current_id()))
     sent = 0
     for r in rows:
         tg = int(r.get("telegram_id") or 0)
@@ -415,10 +425,10 @@ def run_trial_connection_checks(api: Callable[..., Any], log: Callable[[str], No
             "chat_id": tg, "text": text, "entities": entities,
             "link_preview_options": {"is_disabled": True},
         }
-        if MINIAPP_URL:
+        if _app_url():
             payload["reply_markup"] = {
-                "inline_keyboard": [[{"text": "Открыть BatmanVPN", "web_app": {"url": MINIAPP_URL}}],
-                                    [{"text": "Поддержка", "web_app": {"url": f"{MINIAPP_URL}/support"}}]]}
+                "inline_keyboard": [[{"text": _open_app(), "web_app": {"url": _app_url()}}],
+                                    [{"text": "Поддержка", "web_app": {"url": f"{_app_url()}/support"}}]]}
         if api("sendMessage", payload) is not None:
             sent += 1
         time.sleep(0.05)  # ~20 msg/s
@@ -428,6 +438,124 @@ def run_trial_connection_checks(api: Callable[..., Any], log: Callable[[str], No
 
 
 
+
+
+# ── фишки проекта (features в projects/<id>/project.json) ──
+_GROWTH_DEFAULTS = {"notconn_hours": 3, "winback_after_days": 14, "winback_gift_days": 3}
+_MAX_PER_PASS = 200
+
+
+def _growth(key: str) -> int:
+    try:
+        return int(float(db.get_setting(key, str(_GROWTH_DEFAULTS[key])) or _GROWTH_DEFAULTS[key]))
+    except (TypeError, ValueError):
+        return _GROWTH_DEFAULTS[key]
+
+
+def _days_ru(n: int) -> str:
+    n = int(n)
+    w = "день" if n % 10 == 1 and n % 100 != 11 else ("дня" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "дней")
+    return f"{n} {w}"
+
+
+def _noticed(user_id: int, kind: str, ref: str) -> bool:
+    return db.fetchone("SELECT 1 FROM user_notices WHERE user_id = ? AND kind = ? AND ref = ?",
+                       (int(user_id), kind, ref)) is not None
+
+
+def _notice(user_id: int, kind: str, ref: str) -> None:
+    db.execute("INSERT OR IGNORE INTO user_notices (user_id, kind, ref, sent_at) VALUES (?, ?, ?, ?)",
+               (int(user_id), kind, ref, _utcnow().isoformat()))
+
+
+def run_not_connected(api: Callable[..., Any], log: Callable[[str], None] = print) -> int:
+    """оплатил, но так и не подключил подписку (через notconn_hours часов) → одно напоминание. features.notify_not_connected"""
+    if not projects.current().feature("notify_not_connected"):
+        return 0
+    try:
+        import provisioning  # type: ignore
+    except Exception:  # noqa: BLE001
+        return 0
+    now = _utcnow()
+    older = (now - timedelta(hours=_growth("notconn_hours"))).isoformat()
+    newer = (now - timedelta(days=7)).isoformat()
+    rows = db.fetchall(
+        "SELECT s.id AS sid, s.user_id AS uid, u.telegram_id AS tg, u.email AS email "
+        "FROM subscriptions s JOIN users u ON u.id = s.user_id "
+        "WHERE s.type = 'vpn' AND s.status = 'Active' AND s.created_at <= ? AND s.created_at >= ? "
+        "AND u.project_id = ? AND u.telegram_id IS NOT NULL AND COALESCE(u.is_banned, 0) = 0 "
+        "AND NOT EXISTS (SELECT 1 FROM user_notices n WHERE n.user_id = s.user_id AND n.kind = 'notconn' "
+        "AND n.ref = CAST(s.id AS TEXT)) ORDER BY s.id LIMIT ?",
+        (older, newer, projects.current_id(), _MAX_PER_PASS))
+    sent = 0
+    for r in rows:
+        connected = provisioning.user_ever_connected(int(r["tg"]), r.get("email"))
+        if connected is None:
+            continue  # Remnawave не ответила — проверим в следующий проход
+        _notice(int(r["uid"]), "notconn", str(r["sid"]))
+        if connected:
+            continue
+        p = projects.current()
+        payload: dict[str, Any] = {
+            "chat_id": int(r["tg"]),
+            "text": (f"🔌 Подписка {p.name} оплачена, но вы ещё не подключились.\n\n"
+                     "Добавьте подписку в приложение — это займёт минуту. Если что-то не получается, напишите в поддержку."),
+            "link_preview_options": {"is_disabled": True},
+        }
+        if _app_url():
+            payload["reply_markup"] = {"inline_keyboard": [
+                [{"text": "Подключить", "style": "primary", "web_app": {"url": f"{_app_url()}/subscription?setup=1"}}],
+                [{"text": "Поддержка", "web_app": {"url": f"{_app_url()}/support"}}]]}
+        if api("sendMessage", payload) is not None:
+            sent += 1
+        time.sleep(0.05)
+    if sent:
+        log(f"[notconn:{projects.current_id()}] напоминаний: {sent}")
+    return sent
+
+
+def run_winback(api: Callable[..., Any], log: Callable[[str], None] = print) -> int:
+    """давно не оплачивал: подписка кончилась winback_after_days назад → дарим winback_gift_days дней
+    (кнопка «Забрать»). Один подарок на каждый перерыв. features.winback_gift"""
+    if not projects.current().feature("winback_gift"):
+        return 0
+    now = _utcnow()
+    after = _growth("winback_after_days")
+    gift_days = _growth("winback_gift_days")
+    lapsed_before = (now - timedelta(days=after)).isoformat()
+    lapsed_after = (now - timedelta(days=after + 30)).isoformat()  # совсем старых не трогаем
+    rows = db.fetchall(
+        "SELECT u.id AS uid, u.telegram_id AS tg, MAX(s.expires_at) AS last_exp "
+        "FROM users u JOIN subscriptions s ON s.user_id = u.id "
+        "WHERE u.project_id = ? AND u.telegram_id IS NOT NULL AND COALESCE(u.is_banned, 0) = 0 "
+        "AND s.expires_at IS NOT NULL GROUP BY u.id "
+        "HAVING SUM(CASE WHEN s.type = 'vpn' THEN 1 ELSE 0 END) > 0 "
+        "AND MAX(s.expires_at) <= ? AND MAX(s.expires_at) >= ? "
+        "AND SUM(CASE WHEN s.status = 'Active' AND s.expires_at > ? THEN 1 ELSE 0 END) = 0 "
+        "AND SUM(CASE WHEN s.status = 'Banned' THEN 1 ELSE 0 END) = 0 LIMIT ?",
+        (projects.current_id(), lapsed_before, lapsed_after, now.isoformat(), _MAX_PER_PASS))
+    sent = 0
+    for r in rows:
+        ref = str(r["last_exp"])[:19]
+        if _noticed(int(r["uid"]), "winback", ref):
+            continue
+        _notice(int(r["uid"]), "winback", ref)
+        services.create_day_gift(int(r["uid"]), gift_days, "winback")
+        p = projects.current()
+        payload: dict[str, Any] = {
+            "chat_id": int(r["tg"]),
+            "text": (f"🎁 Давно не виделись! Дарим {_days_ru(gift_days)} подписки {p.name}.\n\n"
+                     "Чтобы получить, нажмите кнопку «Забрать»."),
+        }
+        if _app_url():
+            payload["reply_markup"] = {"inline_keyboard": [
+                [{"text": "Забрать", "style": "success", "web_app": {"url": f"{_app_url()}/?gifts=1"}}]]}
+        if api("sendMessage", payload) is not None:
+            sent += 1
+        time.sleep(0.05)
+    if sent:
+        log(f"[winback:{projects.current_id()}] подарков отправлено: {sent}")
+    return sent
 
 
 _DAY = 24 * _H
@@ -482,8 +610,8 @@ def _send(api: Callable[..., Any], chat_id: int, built: tuple[str, list[dict[str
         "chat_id": chat_id, "text": text, "entities": entities,
         "link_preview_options": {"is_disabled": True},
     }
-    if keyboard_text and MINIAPP_URL:
-        payload["reply_markup"] = {"inline_keyboard": [[{"text": keyboard_text, "web_app": {"url": MINIAPP_URL}}]]}
+    if keyboard_text and _app_url():
+        payload["reply_markup"] = {"inline_keyboard": [[{"text": keyboard_text, "web_app": {"url": _app_url()}}]]}
     return api("sendMessage", payload) is not None
 
 
@@ -518,7 +646,7 @@ def _antiabuse_warning(kind: str, count: int, limit: int) -> tuple[str, list[dic
 
 
 def send_antiabuse_warning(api: Callable[..., Any], chat_id: int, kind: str, count: int, limit: int) -> bool:
-    return _send(api, chat_id, _antiabuse_warning(kind, count, limit), "Открыть BatmanVPN")
+    return _send(api, chat_id, _antiabuse_warning(kind, count, limit), _open_app())
 
 
 def delete_subscription(sub: dict[str, Any], log: Callable[[str], None] = print) -> bool:
@@ -558,8 +686,8 @@ def run_expiry_cleanup(api: Callable[..., Any], log: Callable[[str], None] = pri
         "COALESCE(s.no_renew, 0) AS no_renew "
         "FROM subscriptions s JOIN users u ON u.id = s.user_id "
         "WHERE s.status IN ('Active', 'Expired') AND s.type IN ('vpn', 'trial') "
-        "AND s.expires_at IS NOT NULL AND s.expires_at <= ?",
-        (now.isoformat(),),
+        "AND s.expires_at IS NOT NULL AND s.expires_at <= ? AND u.project_id = ?",
+        (now.isoformat(), projects.current_id()),
     )
     done = 0
     for row in rows:
@@ -618,6 +746,18 @@ def _blacklist_refresh_sec() -> int:
         return 3600
 
 
+def _each_project(fn: Callable[..., Any], api: Callable[..., Any], log: Callable[[str], None], tag: str) -> None:
+    """проход по каждому проекту сети: его пользователи, его бот (api берёт токен проекта из контекста)."""
+    for p in projects.all_projects():
+        if not p.bot_token:
+            continue
+        with projects.use(p.id):
+            try:
+                fn(api, log)
+            except Exception as exc:  # noqa: BLE001
+                log(f"[{tag}:{p.id}] ошибка прохода: {type(exc).__name__}: {exc}")
+
+
 def start_background(api: Callable[..., Any], log: Callable[[str], None] = print) -> threading.Thread:
     """фоновый цикл напоминаний в демон-потоке."""
 
@@ -639,22 +779,12 @@ def start_background(api: Callable[..., Any], log: Callable[[str], None] = print
                 grace.run_once(log)
             except Exception as exc:  # noqa: BLE001
                 log(f"[grace] ошибка прохода: {type(exc).__name__}: {exc}")
-            try:
-                run_once(api, log)
-            except Exception as exc:  # noqa: BLE001
-                log(f"[reminders] ошибка прохода: {type(exc).__name__}: {exc}")
-            try:
-                run_expiry_cleanup(api, log)
-            except Exception as exc:  # noqa: BLE001
-                log(f"[expiry] ошибка прохода: {type(exc).__name__}: {exc}")
-            try:
-                run_onboarding_once(api, log)
-            except Exception as exc:  # noqa: BLE001
-                log(f"[onboarding] ошибка прохода: {type(exc).__name__}: {exc}")
-            try:
-                run_trial_connection_checks(api, log)
-            except Exception as exc:  # noqa: BLE001
-                log(f"[trial-check] ошибка прохода: {type(exc).__name__}: {exc}")
+            _each_project(run_once, api, log, "reminders")
+            _each_project(run_expiry_cleanup, api, log, "expiry")
+            _each_project(run_onboarding_once, api, log, "onboarding")
+            _each_project(run_trial_connection_checks, api, log, "trial-check")
+            _each_project(run_not_connected, api, log, "notconn")
+            _each_project(run_winback, api, log, "winback")
             # antiabuse ~раз в 10 мин
             aa_counter += 1
             if aa_counter * INTERVAL >= 600:

@@ -14,9 +14,20 @@ API_BASE = "https://api.telegram.org"
 CURRENCY = "XTR"  # валюта звезд
 
 
+try:
+    import projects as _projects  # type: ignore  # src/core: env проекта (FGN__YOOKASSA_SHOP_ID …)
+except ImportError:  # pragma: no cover
+    _projects = None  # type: ignore
+
+
+def _brand() -> str:
+    return _projects.current().name if _projects is not None else "BatmanVPN"
+
+
 def _env(*keys: str, default: str = "") -> str:
+    """env текущего проекта сети: ID__NAME, у проекта по умолчанию — как раньше, без префикса."""
     for key in keys:
-        val = (os.getenv(key) or "").strip()
+        val = (_projects.env(key) if _projects is not None else (os.getenv(key) or "")).strip()
         if val:
             return val
     return default
@@ -72,11 +83,11 @@ class TelegramStars:
         if amount < 1:
             amount = 1
         body: dict[str, Any] = {
-            "title": title[:32] or "BatmanVPN",
-            "description": description[:255] or "Подписка BatmanVPN",
+            "title": title[:32] or _brand(),
+            "description": description[:255] or f"Подписка {_brand()}",
             "payload": payload,
             "currency": CURRENCY,
-            "prices": [{"label": title[:32] or "BatmanVPN", "amount": amount}],
+            "prices": [{"label": title[:32] or _brand(), "amount": amount}],
         }
         if photo_url:
             body["photo_url"] = photo_url

@@ -1,3 +1,4 @@
+import { useProject } from '../lib/project';
 import React, { useState, useEffect } from 'react';
 import {
   Users, Mail, Plus, Send,
@@ -8,6 +9,7 @@ import { fmtInt } from '../lib/format';
 import type { ToastType } from '../lib/types';
 
 export const MailingPage: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void }> = ({ onToast }) => {
+  const project = useProject();
   const [stats, setStats] = useState<{ totalSent: number } | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [selected, setSelected] = useState<any | null>(null);
@@ -76,7 +78,7 @@ export const MailingPage: React.FC<{ onToast: (t: string, m: string, ty: ToastTy
                 <button type="button" className={`nav-item ${chEmail ? 'on' : ''}`} style={{ flex: 1, justifyContent: 'center' }} onClick={() => setChEmail(!chEmail)}><Mail size={15} /> Почта</button>
               </div>
             </div>
-            {chEmail && <div><label className="field-label">Тема письма</label><input className="input" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Например: Новости BatmanVPN" /></div>}
+            {chEmail && <div><label className="field-label">Тема письма</label><input className="input" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder={`Например: Новости ${project?.name || "проекта"}`} /></div>}
             <div><label className="field-label">Текст сообщения</label><textarea className="textarea" style={{ minHeight: 128 }} value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Текст рассылки… Поддерживается Markdown" /></div>
             <div><label className="field-label">Тип кнопки</label>
               <select className="select" value={buttonType} onChange={(e) => { setButtonType(e.target.value); setButtonLabel(''); setButtonUrl(''); setPromoCode(''); }}>

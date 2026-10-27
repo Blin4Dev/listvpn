@@ -42,9 +42,16 @@ NOTIFY_NETWORKS = [
 ]
 
 
+try:
+    import projects as _projects  # type: ignore  # src/core: env проекта (FGN__YOOKASSA_SHOP_ID …)
+except ImportError:  # pragma: no cover
+    _projects = None  # type: ignore
+
+
 def _env(*keys: str, default: str = "") -> str:
+    """env текущего проекта сети: ID__NAME, у проекта по умолчанию — как раньше, без префикса."""
     for key in keys:
-        val = (os.getenv(key) or "").strip()
+        val = (_projects.env(key) if _projects is not None else (os.getenv(key) or "")).strip()
         if val:
             return val
     return default

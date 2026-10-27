@@ -3,11 +3,13 @@ import {
   DollarSign, Users, Link, X, Edit2, Copy, MousePointer, ToggleLeft, ToggleRight, Trash2, RefreshCw, BarChart2,
 } from 'lucide-react';
 import { Modal, PageHead, Stat } from '../components/ui';
-import { BOT_USERNAME, apiFetch } from '../lib/api';
+import { apiFetch } from '../lib/api';
+import { useProject } from '../lib/project';
 import { fmtInt, fmtMoney } from '../lib/format';
 import type { ToastType, TrackingLink, TrackingLinkUser } from '../lib/types';
 
 export const TrackingLinksPage: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void }> = ({ onToast }) => {
+  const project = useProject();
   const [links, setLinks] = useState<TrackingLink[]>([]);
   const [stats, setStats] = useState<{ total_links: number; total_clicks: number; total_unique_users: number; total_revenue: number; paid_users: number } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -70,7 +72,7 @@ export const TrackingLinksPage: React.FC<{ onToast: (t: string, m: string, ty: T
 
       <div className="card" style={{ padding: 24 }}>
         <h3 className="h-sec">Новая ссылка</h3>
-        <p className="sub mt-1 mb-4">Формат: <span className="mono">t.me/{BOT_USERNAME}?start=trk_код</span></p>
+        <p className="sub mt-1 mb-4">Формат: <span className="mono">t.me/{project?.bot_username || 'бот_проекта'}?start=trk_код</span></p>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Название (YouTube, VK Ads…)" />
           <input className="input mono" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.replace(/[^A-Za-z0-9_-]/g, '') })} placeholder="Код (ad, yt1…)" />

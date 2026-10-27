@@ -6,12 +6,15 @@ RUN for i in 1 2 3; do \
       npm install --no-audit --no-fund --registry "$NPM_REGISTRY" --fetch-retries 5 --fetch-retry-maxtimeout 120000 --fetch-timeout 120000 && exit 0; \
       echo "npm install: попытка $i не удалась, повтор через 10 с" >&2; sleep 10; \
     done; exit 1
+COPY scripts ./scripts
 COPY src/app ./src/app
 COPY src/site ./src/site
 COPY assets ./assets
+COPY projects ./projects
+# мини-приложения всех проектов: dist/miniapp/<id>/
 RUN npm run build:miniapp
 
 FROM caddy:2.8.4-alpine
-COPY docker/Caddyfile.spa /etc/caddy/Caddyfile
-COPY --from=build /app/dist/miniapp /srv/html
+COPY docker/Caddyfile.miniapp /etc/caddy/Caddyfile
+COPY --from=build /app/dist/miniapp /srv/projects
 EXPOSE 80

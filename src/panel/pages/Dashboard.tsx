@@ -5,6 +5,7 @@ import {
 import { Legend, LineChart } from '../components/charts';
 import { Delta, Kpi, PageHead, Panel, Spinner } from '../components/ui';
 import { apiFetch } from '../lib/api';
+import { ScopeToggle, scopeQuery, type Scope } from '../components/ScopeToggle';
 import { fmtInt, fmtMoney } from '../lib/format';
 
 export const TODO_STYLE: Record<string, { c: string; icon: React.ElementType }> = {
@@ -15,11 +16,14 @@ export const TODO_STYLE: Record<string, { c: string; icon: React.ElementType }> 
 
 export const Dashboard: React.FC<{ onNavigate: (page: string) => void; onOpenUser: (id: number) => void }> = ({ onNavigate }) => {
   const [d, setD] = useState<any>(null);
-  const load = async () => { try { setD(await apiFetch('/panel/dashboard')); } catch (e) { console.error(e); } };
-  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, []);
+  const [scope, setScope] = useState<Scope>('project');
+  const load = async () => { try { setD(await apiFetch(`/panel/dashboard?${scopeQuery(scope)}`)); } catch (e) { console.error(e); } };
+  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [scope]);
   const today = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
   const head = (
-    <PageHead title="Главная" sub={today.charAt(0).toUpperCase() + today.slice(1)} />
+    <PageHead title="Главная" sub={today.charAt(0).toUpperCase() + today.slice(1)}>
+      <ScopeToggle value={scope} onChange={(v) => { setD(null); setScope(v); }} />
+    </PageHead>
   );
   if (!d) return <div className="flex flex-col gap-6">{head}<div style={{ padding: 60, display: 'flex', justifyContent: 'center' }}><Spinner size={24} /></div></div>;
   const r = d.revenue;

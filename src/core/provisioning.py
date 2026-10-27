@@ -57,10 +57,13 @@ def _local_user_id(telegram_id: Optional[int], email: Optional[str]) -> Optional
         except ImportError:
             import database as db  # type: ignore
         row = None
+        # в рамках текущего проекта: у одного telegram_id в разных проектах разные аккаунты
         if telegram_id:
-            row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? ORDER BY id LIMIT 1", (int(telegram_id),))
+            row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND project_id = ? ORDER BY id LIMIT 1",
+                              (int(telegram_id), db.pid()))
         if not row and email:
-            row = db.fetchone("SELECT id FROM users WHERE lower(email) = lower(?) ORDER BY id LIMIT 1", (str(email),))
+            row = db.fetchone("SELECT id FROM users WHERE lower(email) = lower(?) AND project_id = ? ORDER BY id LIMIT 1",
+                              (str(email), db.pid()))
         return int(row["id"]) if row else None
     except Exception:  # noqa: BLE001
         return None
@@ -127,14 +130,18 @@ def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[
     return None
 
 
-def own_panel_users(client: Any) -> list[dict[str, Any]]:
-    """все наши пользователи панели (batman_<id>, где id есть в нашей базе) — для массовых действий."""
+def own_panel_users(client: Any, project: Optional[str] = None) -> list[dict[str, Any]]:
+    """все наши пользователи панели (batman_<id>, где id есть в нашей базе) — для массовых действий.
+    project — только пользователи этого проекта сети (Remnawave общий на все проекты)."""
     try:
         try:
             from . import database as db  # type: ignore
         except ImportError:
             import database as db  # type: ignore
-        local = {int(r["id"]) for r in db.fetchall("SELECT id FROM users")}
+        if project:
+            local = {int(r["id"]) for r in db.fetchall("SELECT id FROM users WHERE project_id = ?", (project,))}
+        else:
+            local = {int(r["id"]) for r in db.fetchall("SELECT id FROM users")}
     except Exception:  # noqa: BLE001
         return []
     out: list[dict[str, Any]] = []

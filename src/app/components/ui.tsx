@@ -1,4 +1,5 @@
 ﻿import React from "react";
+import { BRAND_NAME } from "../utils/brand";
 import { T, btnReset, pageFrame, pageOuter } from "../theme";
 
 type IconProps = {
@@ -480,7 +481,7 @@ export function BrandMark({ size = "lg" }: { size?: "sm" | "lg" }) {
   return (
     <img
       src="/assets/logo.png"
-      alt="BatmanVPN"
+      alt={BRAND_NAME}
       width={px}
       height={px}
       draggable={false}
@@ -535,7 +536,7 @@ export function BrandSplash() {
           src="/assets/logo.png"
           width={200}
           height={200}
-          alt="BatmanVPN"
+          alt={BRAND_NAME}
           draggable={false}
           style={{
             width: "min(200px, 42vh)",

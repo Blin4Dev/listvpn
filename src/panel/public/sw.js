@@ -1,12 +1,12 @@
-/* Push-уведомления панели BatmanVPN. Показывает уведомление и по клику открывает нужный раздел. */
+/* Push-уведомления панели listvpn. Показывает уведомление и по клику открывает нужный раздел. */
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener('push', (event) => {
   let d = {};
-  try { d = event.data ? event.data.json() : {}; } catch (_) { d = { title: 'BatmanVPN', body: event.data ? event.data.text() : '' }; }
+  try { d = event.data ? event.data.json() : {}; } catch (_) { d = { title: 'listvpn', body: event.data ? event.data.text() : '' }; }
   const url = typeof d.url === 'string' && d.url.startsWith('/') && !d.url.startsWith('//') ? d.url : '/';
-  event.waitUntil(self.registration.showNotification(String(d.title || 'BatmanVPN').slice(0, 120), {
+  event.waitUntil(self.registration.showNotification(String(d.title || 'listvpn').slice(0, 120), {
     body: String(d.body || '').slice(0, 400),
     tag: d.tag ? String(d.tag).slice(0, 60) : undefined,
     icon: '/assets/logo.png',

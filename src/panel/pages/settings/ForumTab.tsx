@@ -18,6 +18,8 @@ export const FORUM_TOPICS: { id: string; label: string; hint: string }[] = [
 
 export const ForumSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void }> = ({ onToast }) => {
   const [chatId, setChatId] = useState('');
+  const [adminIds, setAdminIds] = useState('');
+  const [adminEnv, setAdminEnv] = useState('');
   const [topics, setTopics] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -27,6 +29,8 @@ export const ForumSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: To
     try {
       const d = await apiFetch('/panel/forum');
       setChatId(d?.forum_chat_id || '');
+      setAdminIds(d?.admin_ids || '');
+      setAdminEnv(d?.admin_ids_env || '');
       setTopics(d?.topics || {});
     } catch { onToast('Ошибка', 'Не удалось загрузить настройки форума', 'error'); }
     finally { setLoading(false); }
@@ -36,7 +40,7 @@ export const ForumSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: To
   const save = async () => {
     setSaving(true);
     try {
-      await apiFetch('/panel/forum', { method: 'PUT', body: JSON.stringify({ forum_chat_id: chatId.trim(), topics }) });
+      await apiFetch('/panel/forum', { method: 'PUT', body: JSON.stringify({ forum_chat_id: chatId.trim(), topics, admin_ids: adminIds }) });
       onToast('Готово', 'Настройки форума сохранены', 'success');
     } catch { onToast('Ошибка', 'Не удалось сохранить', 'error'); }
     finally { setSaving(false); }
@@ -51,6 +55,14 @@ export const ForumSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: To
         <div className="inset flex items-start gap-3" style={{ padding: 14 }}>
           <Send size={18} className="faint" style={{ marginTop: 2, flex: 'none' }} />
           <div className="sub" style={{ fontSize: 13 }}>Создайте группу с топиками (форум), добавьте бота админом. Укажите ID группы (например <span className="mono">-1001234567890</span>) и ID каждого топика. Если не задать — коды/уведомления придут администратору в ЛС.</div>
+        </div>
+        <div>
+          <label className="field-label">Telegram ID администраторов (через запятую)</label>
+          <input className="input mono" value={adminIds} onChange={(e) => setAdminIds(e.target.value)} placeholder="123456789, 987654321" />
+          <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>
+            Сюда бот основного проекта шлёт коды входа в панель и уведомления, если форум не задан. Узнать ID — @userinfobot.
+            Проверьте ID: без форума код входа придёт только им.{adminEnv && <> Ещё из .env: <span className="mono">{adminEnv}</span>.</>}
+          </div>
         </div>
         <div><label className="field-label">ID группы-форума</label><input className="input mono" value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="-1001234567890" /></div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

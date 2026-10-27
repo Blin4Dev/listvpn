@@ -210,7 +210,9 @@ def _warn(sub: dict[str, Any], kind: str, count: int, limit: int, notify, log) -
     log(f"[antiabuse] предупреждение подписке #{sub['id']} (user {sub.get('user_id')}): {kind} {count}, лимит {limit}")
     if notify and sub.get("telegram_id"):
         try:
-            notify(int(sub["telegram_id"]), kind, count, limit)
+            # предупреждение — ботом проекта пользователя
+            with db.projects.use(db.projects.of_user(sub.get("user_id"))):
+                notify(int(sub["telegram_id"]), kind, count, limit)
         except Exception as exc:  # noqa: BLE001
             log(f"[antiabuse] не удалось отправить предупреждение: {exc}")
     try:
@@ -336,6 +338,17 @@ def _ban_account_trial(uid: int, hwid: str, count: int, limit: int, log) -> None
 
 
 def scan_trial_hwids(log=print) -> dict[str, Any]:
+    """по проектам: настройки пробного у каждого свои, и один человек может взять пробный в каждом бренде."""
+    total = {"checked": 0, "banned": 0}
+    for p in db.projects.all_projects():
+        with db.projects.use(p.id):
+            r = _scan_trial_hwids_project(log)
+        total["checked"] += int(r.get("checked") or 0)
+        total["banned"] += int(r.get("banned") or 0)
+    return total
+
+
+def _scan_trial_hwids_project(log=print) -> dict[str, Any]:
     on, limit = trial_hwid_limits()
     if not on:
         return {"checked": 0, "banned": 0, "skipped": "disabled"}
@@ -344,8 +357,8 @@ def scan_trial_hwids(log=print) -> dict[str, Any]:
         return {"checked": 0, "banned": 0, "skipped": "remnawave_off"}
     subs = db.fetchall(
         "SELECT s.id, s.user_id FROM subscriptions s JOIN users u ON u.id = s.user_id "
-        "WHERE s.type = 'trial' AND s.status = 'Active' AND COALESCE(u.is_banned, 0) = 0 "
-        "ORDER BY s.id DESC LIMIT ?", (MAX_PER_RUN,))
+        "WHERE s.type = 'trial' AND s.status = 'Active' AND COALESCE(u.is_banned, 0) = 0 AND u.project_id = ? "
+        "ORDER BY s.id DESC LIMIT ?", (db.pid(), MAX_PER_RUN))
     touched: set[str] = set()
     now = db.utcnow_iso()
     for sub in subs:
@@ -361,7 +374,8 @@ def scan_trial_hwids(log=print) -> dict[str, Any]:
             touched.add(hwid)
     banned = 0
     for hwid in touched:
-        rows = db.fetchall("SELECT user_id, seen_at FROM trial_hwids WHERE hwid = ?", (hwid,))
+        rows = db.fetchall("SELECT h.user_id, h.seen_at FROM trial_hwids h JOIN users u ON u.id = h.user_id "
+                           "WHERE h.hwid = ? AND u.project_id = ?", (hwid, db.pid()))
         uids = [int(r["user_id"]) for r in rows]
         paid = _paid_user_ids(uids)
         # оставляем самые ранние аккаунты на hwid; остальные сверх лимита баним

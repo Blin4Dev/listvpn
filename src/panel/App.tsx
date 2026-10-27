@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Home, Ticket, DollarSign, Users, Mail, Gift, Percent, Link, Settings, Menu, X, Wallet, Lock, BarChart2, Server, MessageCircle,
-  Shuffle, Eye, UserCog, Coins, Bell, BellOff, ChevronDown,
+  Shuffle, Eye, UserCog, Coins, Bell, BellOff, ChevronDown, Layers,
 } from 'lucide-react';
 import { UserActionModal } from './components/UserActionModal';
 import { Spinner, ToastContainer } from './components/ui';
 import { apiFetch, clearPanelToken, getPanelToken, parseApiErr, setWriteGuard } from './lib/api';
 import { MeContext, canOpenPage, isOwner, type Me } from './lib/access';
+import { NETWORK_PAGES, NETWORK_SETTINGS, ProjectContext, getProjectId, rememberProject, switchProject, type ProjectsState } from './lib/project';
 import { disablePush, enablePush, pushSupported, syncPush } from './lib/push';
 import type { Toast, ToastType } from './lib/types';
 import { Dashboard } from './pages/Dashboard';
@@ -31,6 +32,18 @@ import { UserDetailPage } from './pages/user/UserDetailPage';
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [me, setMe] = useState<Me | null>(null);
+  // проекты сети (BatmanVPN, FGN …) и открытый в панели
+  const [projects, setProjects] = useState<ProjectsState | null>(null);
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    apiFetch('/panel/projects').then((r) => {
+      const list = (r?.items || []) as ProjectsState['list'];
+      const saved = getProjectId();
+      const current = list.find((p) => p.id === saved) || list.find((p) => p.id === r?.default) || list[0] || null;
+      if (current && current.id !== saved) rememberProject(current.id);
+      setProjects({ list, current });
+    }).catch(() => setProjects({ list: [], current: null }));
+  }, [isAuthenticated]);
 
   // кто вошёл и что ему доступно
   const loadMe = () => {
@@ -45,15 +58,15 @@ export default function App() {
   };
   useEffect(() => { loadMe(); }, []);
 
-  if (isAuthenticated === null || (isAuthenticated && !me)) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Spinner size={36} /></div>;
+  if (isAuthenticated === null || (isAuthenticated && (!me || !projects))) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Spinner size={36} /></div>;
   if (!isAuthenticated) return <LoginForm onLogin={() => { setIsAuthenticated(null); loadMe(); }} />;
-  return <MeContext.Provider value={me}><AuthenticatedApp me={me!} onLogout={async () => {
+  return <MeContext.Provider value={me}><ProjectContext.Provider value={projects!}><AuthenticatedApp me={me!} onLogout={async () => {
     // отписать push с этого устройства и закрыть сессию
     try { await disablePush(); } catch { /* */ }
     const t = getPanelToken();
     if (t) { fetch('/api/panel/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${t}` } }).catch(() => {}); }
     clearPanelToken(); setMe(null); setIsAuthenticated(false);
-  }} /></MeContext.Provider>;
+  }} /></ProjectContext.Provider></MeContext.Provider>;
 }
 
 export const NAV = [
@@ -71,7 +84,7 @@ const PAGE_PATHS: Record<string, string> = {
   'Рассылка': '/mailing', 'Промокоды': '/promocodes', 'Подарки': '/gifts', 'Акции': '/promotions', 'Ссылки': '/links',
   'Мониторинг': '/monitoring', 'Балансировщик': '/balancer', 'Настройки': '/settings', 'Сотрудники': '/staff', 'Зарплата': '/salary',
 };
-export const SETTINGS_TABS = ['price', 'antiabuse', 'offer', 'privacy', 'squads', 'mail', 'captcha', 'forum', 'backups', 'storage'] as const;
+export const SETTINGS_TABS = ['project', 'price', 'antiabuse', 'offer', 'privacy', 'squads', 'mail', 'captcha', 'forum', 'backups', 'storage'] as const;
 export type SettingsTab = typeof SETTINGS_TABS[number];
 
 type Route = { page: string; userId: number | null; nodeId: number | null; tab: SettingsTab; chatId?: number | null };
@@ -109,7 +122,26 @@ export function buildPath(r: Route): string {
   return PAGE_PATHS[r.page] || '/';
 }
 
+function ProjectSwitcher() {
+  const { list, current } = React.useContext(ProjectContext);
+  if (!current) return null;
+  return (
+    <div style={{ padding: '12px 14px 0' }}>
+      <div className="nav-group" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Layers size={12} /> Проект</div>
+      {list.length > 1 ? (
+        <select className="input" value={current.id} onChange={(e) => switchProject(e.target.value)} style={{ width: '100%' }}>
+          {list.map((p) => <option key={p.id} value={p.id}>{p.name}{p.configured ? '' : ' · бот не подключён'}</option>)}
+        </select>
+      ) : <div className="h-sec" style={{ fontSize: 14 }}>{current.name}</div>}
+      {!current.configured && <div className="faint" style={{ fontSize: 11.5, marginTop: 6 }}>
+        Нет токена бота: {current.is_default ? 'TELEGRAM_BOT_TOKEN' : `${current.id.toUpperCase()}__TELEGRAM_BOT_TOKEN`} в .env
+      </div>}
+    </div>
+  );
+}
+
 export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: Me }) {
+  const project = React.useContext(ProjectContext).current;
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [route0] = useState(() => {
     const r = parseRoute(window.location.pathname, window.location.search);
@@ -211,8 +243,9 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
       }} className="md:!translate-x-0">
         <div className="flex items-center gap-3" style={{ padding: 20, borderBottom: '1px solid var(--border)' }}>
           <img src="/assets/logo.png" alt="" style={{ width: 34, height: 34, borderRadius: 8, objectFit: 'contain' }} onError={(e) => { e.currentTarget.style.display = 'none'; }} />
-          <div><div className="h-sec">BatmanVPN</div><div className="faint" style={{ fontSize: 12 }}>Панель управления</div></div>
+          <div><div className="h-sec">listvpn</div><div className="faint" style={{ fontSize: 12 }}>Панель сети</div></div>
         </div>
+        <ProjectSwitcher />
         <nav style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 20 }}>
           {visibleNav.map((section) => (
             <div key={section.group}>
@@ -255,6 +288,12 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
         <div style={{ position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(10px)', borderBottom: '1px solid var(--border)' }}>
           <button className="icon-btn md:!hidden" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>{isMobileMenuOpen ? <X size={20} /> : <Menu size={20} />}</button>
           <div className="flex-1" />
+          {project && <span className="badge" style={{ marginRight: 10 }} title={
+            (detailUserId == null && (NETWORK_PAGES.has(activePage) || (activePage === 'Настройки' && NETWORK_SETTINGS.has(settingsTab))))
+              ? 'Раздел общий для всех проектов сети' : `Данные и настройки проекта ${project.name}`}>
+            <Layers size={13} /> {(detailUserId == null && (NETWORK_PAGES.has(activePage) || (activePage === 'Настройки' && NETWORK_SETTINGS.has(settingsTab))))
+              ? 'Вся сеть' : project.name}
+          </span>}
           {readOnly && <span className="badge" style={{ marginRight: 10 }}><Eye size={13} /> Только просмотр</span>}
           {pushSupported() && (
             <button className="icon-btn" style={{ marginRight: 8 }} onClick={togglePush} title={pushOn ? 'Push-уведомления включены — выключить' : 'Включить push-уведомления'}>

@@ -43,13 +43,18 @@ def activate_promocode(user_id: int, code: str) -> dict[str, Any]:
     code = (code or "").upper().strip()
     if not code:
         raise ServiceError("Пустой промокод", 400)
-    promo = db.fetchone("SELECT * FROM promocodes WHERE code = ?", (code,))
+    # промокод действует только в своём проекте (у BatmanVPN и FGN разные промокоды)
+    promo = db.fetchone("SELECT * FROM promocodes WHERE code = ? AND project_id = "
+                        "COALESCE((SELECT project_id FROM users WHERE id = ?), ?)", (code, user_id, db.pid()))
     if not promo or not promo.get("is_active") or code in SYSTEM_PROMO_CODES:
         raise ServiceError("Промокод не найден", 404)
     if promo.get("expires_at"):
         exp = _parse_iso(str(promo["expires_at"]))
         if exp and exp < _utcnow():
             raise ServiceError("Срок действия промокода истёк", 400)
+    is_days = str(promo.get("type") or "discount") == "days"
+    if is_days and not db.projects.get(db.projects.of(promo)).feature("promo_days"):
+        raise ServiceError("Промокод не найден", 404)
     already = db.fetchone(
         "SELECT id FROM promocode_activations WHERE promocode_id = ? AND user_id = ?",
         (promo["id"], user_id),
@@ -57,7 +62,7 @@ def activate_promocode(user_id: int, code: str) -> dict[str, Any]:
     if already:
         raise ServiceError("Промокод уже активирован", 400)
 
-    percent = float(promo.get("value") or 0)
+    percent = 0.0 if is_days else float(promo.get("value") or 0)
     expires_at = (_utcnow() + timedelta(days=PROMO_DISCOUNT_DAYS)).isoformat()
 
     # атомарный uses_count с проверкой uses_limit
@@ -82,7 +87,54 @@ def activate_promocode(user_id: int, code: str) -> dict[str, Any]:
         # откатить uses_count при гонке unique-index
         db.execute("UPDATE promocodes SET uses_count = uses_count - 1 WHERE id = ?", (promo["id"],))
         raise ServiceError("Промокод уже активирован", 400)
-    return {"percent": percent, "expires_at": expires_at, "code": code, "name": promo.get("name")}
+    if is_days:
+        # дни к подписке: подарок ждёт кнопку «Забрать» (в мини-приложении или из сообщения бота)
+        days = max(1, int(float(promo.get("value") or 0)))
+        gift = create_day_gift(user_id, days, "promo", promocode_id=int(promo["id"]))
+        return {"type": "days", "days": days, "gift_id": gift["id"], "code": code, "name": promo.get("name"),
+                "percent": 0, "expires_at": gift.get("expires_at")}
+    return {"type": "discount", "percent": percent, "expires_at": expires_at, "code": code, "name": promo.get("name")}
+
+
+DAY_GIFT_VALID_DAYS = 14  # сколько дней подарок ждёт кнопку «Забрать»
+
+
+def create_day_gift(user_id: int, days: int, source: str, *, promocode_id: Optional[int] = None,
+                    valid_days: int = DAY_GIFT_VALID_DAYS) -> dict[str, Any]:
+    now = _utcnow()
+    db.execute(
+        "INSERT INTO day_gifts (user_id, days, source, promocode_id, status, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        (int(user_id), int(days), source, promocode_id, now.isoformat(), (now + timedelta(days=valid_days)).isoformat()),
+    )
+    return db.fetchone("SELECT * FROM day_gifts WHERE id = ?", (db.last_id(),)) or {}
+
+
+def pending_day_gifts(user_id: int) -> list[dict[str, Any]]:
+    return db.fetchall(
+        "SELECT id, days, source, created_at, expires_at FROM day_gifts WHERE user_id = ? AND status = 'pending' "
+        "AND (expires_at IS NULL OR expires_at > ?) ORDER BY id", (int(user_id), _utcnow().isoformat()))
+
+
+def take_day_gift(user_id: int, gift_id: int) -> dict[str, Any]:
+    """захват подарка (один раз); начисление дней — вызывающий. Откат — release_day_gift."""
+    g = db.fetchone("SELECT * FROM day_gifts WHERE id = ? AND user_id = ?", (int(gift_id), int(user_id)))
+    if not g:
+        raise ServiceError("Подарок не найден", 404)
+    if g["status"] != "pending":
+        raise ServiceError("Подарок уже получен", 400)
+    exp = _parse_iso(g.get("expires_at"))
+    if exp and exp < _utcnow():
+        raise ServiceError("Срок подарка истёк", 400)
+    cur = db.execute("UPDATE day_gifts SET status = 'claimed', claimed_at = ? WHERE id = ? AND status = 'pending'",
+                     (_utcnow().isoformat(), int(gift_id)))
+    if not cur.rowcount:
+        raise ServiceError("Подарок уже получен", 400)
+    return g
+
+
+def release_day_gift(gift_id: int) -> None:
+    db.execute("UPDATE day_gifts SET status = 'pending', claimed_at = NULL WHERE id = ?", (int(gift_id),))
 
 
 def grant_personal_discount(user_id: int, percent: float, hours: int, code: str = "DRIP10") -> bool:
@@ -127,7 +179,7 @@ def register_tracking_click(
     code = (code or "").strip()
     if not code:
         return None
-    link = db.fetchone("SELECT * FROM tracking_links WHERE code = ?", (code,))
+    link = db.fetchone("SELECT * FROM tracking_links WHERE code = ? AND project_id = ?", (code, db.pid()))
     if not link or not link.get("is_active"):
         return None
 

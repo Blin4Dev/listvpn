@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { btnReset } from "../components/ui";
 import { N, NoirButton, NoirField, NoirLoading, NoirScreen } from "../components/noir";
-import { BRAND_NAME } from "../utils/brand";
+import { BRAND_NAME, PROJECT_ID } from "../utils/brand";
 import { CaptchaBox, type CaptchaPublic } from "../components/CaptchaBox";
 import { TelegramLoginWidget } from "../components/TelegramLoginWidget";
 import {
@@ -37,7 +37,7 @@ export default function Authentication({ onAuthed }: { onAuthed: () => void }) {
   useEffect(() => {
     void (async () => {
       try {
-        const res = await fetch("/api/app/config");
+        const res = await fetch("/api/app/config", { headers: { "X-Project": PROJECT_ID } });
         const body = (await res.json().catch(() => null)) as {
           botUsername?: string;
           captcha?: CaptchaPublic;

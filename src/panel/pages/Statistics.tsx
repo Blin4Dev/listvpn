@@ -5,6 +5,7 @@ import {
 import { Columns, Funnel, HBarChart } from '../components/charts';
 import { Delta, Kpi, PageHead, Panel, Row, Segmented, Spinner, StatSection } from '../components/ui';
 import { apiFetch } from '../lib/api';
+import { ScopeToggle, scopeQuery, type Scope } from '../components/ScopeToggle';
 import { fmtInt, fmtMoney, gb, hoursStr, pctStr, toSeries } from '../lib/format';
 
 export const PERIOD_OPTS = [
@@ -100,17 +101,19 @@ export const StatisticsPage: React.FC<{ onOpenUser: (id: number) => void }> = ({
   const [s, setS] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [today, setToday] = useState<any>(null);
-  useEffect(() => { apiFetch('/panel/dashboard').then(setToday).catch(() => { /* без блока «Сегодня» */ }); }, []);
+  const [scope, setScope] = useState<Scope>('project');
+  useEffect(() => { apiFetch(`/panel/dashboard?${scopeQuery(scope)}`).then(setToday).catch(() => { /* без блока «Сегодня» */ }); }, [scope]);
   useEffect(() => {
     let alive = true; setLoading(true);
-    const q = period === 'custom' && range ? `from=${range.from}&to=${range.to}` : `period=${period}`;
+    const q = (period === 'custom' && range ? `from=${range.from}&to=${range.to}` : `period=${period}`) + (scope === 'all' ? '&scope=all' : '');
     apiFetch(`/panel/statistics?${q}`).then((d) => { if (alive) setS(d); }).catch(console.error).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [period, range]);
+  }, [period, range, scope]);
 
   const head = (
     <PageHead title="Статистика" sub={s ? `${new Date(s.from).toLocaleDateString('ru-RU')} — ${new Date(s.to).toLocaleDateString('ru-RU')}` : undefined}>
-      <div className="flex items-center gap-3">{loading && s && <Spinner size={16} />}
+      <div className="flex items-center gap-3 flex-wrap">{loading && s && <Spinner size={16} />}
+        <ScopeToggle value={scope} onChange={setScope} />
         <PeriodPicker period={period} range={range} onPreset={(p) => { setRange(null); setPeriod(p); }} onRange={(r) => { setRange(r); setPeriod('custom'); }} /></div>
     </PageHead>
   );

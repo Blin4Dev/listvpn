@@ -214,7 +214,9 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
             </div>
           </Section>
 
-          <Section title="Подписка на канал" sub={`Канал ${channelUrl.replace(/^https?:\/\//, '') || 't.me/BATMANNETWORK'}. Только для входа через Telegram; бот должен быть админом канала.`}>
+          <Section title="Подписка на канал" sub={channelUrl
+            ? `Канал ${channelUrl.replace(/^https?:\/\//, '')}. Только для входа через Telegram; бот проекта должен быть админом канала.`
+            : 'Канал проекта не задан — укажите channel в projects/<проект>/project.json.'}>
             <div className="inset flex items-center justify-between gap-3" style={{ padding: 14 }}>
               <div>
                 <div style={{ fontWeight: 500 }}>Подписка обязательна</div>

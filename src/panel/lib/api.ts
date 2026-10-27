@@ -1,3 +1,4 @@
+import { getProjectId } from './project';
 
 
 declare const importMeta: any | undefined;
@@ -36,6 +37,9 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
   if (cleanPath.startsWith('/panel')) {
     const token = getPanelToken();
     if (token) headers['Authorization'] = `Bearer ${token}`;
+    // проект сети, открытый в панели (цены, пользователи, рассылки — по проекту)
+    const project = getProjectId();
+    if (project && !headers['X-Project']) headers['X-Project'] = project;
   }
   const res = await fetch(url, { ...options, headers });
   if (!res.ok) {

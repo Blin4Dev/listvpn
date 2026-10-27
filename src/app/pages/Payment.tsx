@@ -21,6 +21,73 @@ import {
   type TrafficInfo,
 } from "../utils/api";
 import { deviceWord } from "../utils/devices";
+import { redeemPromo, type DayGift } from "../utils/api";
+import { hasFeature } from "../utils/brand";
+import { DayGiftSheet } from "../components/DayGiftSheet";
+
+// промокод прямо на экране оплаты (фишка проекта promo_at_payment)
+function PromoField({ onDiscount, onDayGift }: { onDiscount: () => void; onDayGift: (g: DayGift) => void }) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const apply = async () => {
+    const c = code.trim();
+    if (!c || busy) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await redeemPromo(c);
+      if (r.type === "days" && r.gift_id) {
+        onDayGift({ id: r.gift_id, days: Number(r.days || 0), source: "promo", text: r.message || "" });
+        setNote({ ok: true, text: `+${r.days} дн. к подписке — заберите подарок` });
+      } else if (r.type === "gift") {
+        setNote({ ok: true, text: "Подарок активирован — подписка уже ваша" });
+      } else {
+        setNote({ ok: true, text: `Скидка ${Math.round(Number(r.discount_percent ?? r.value ?? 0))}% применена` });
+        onDiscount();
+      }
+      setCode("");
+    } catch (e) {
+      setNote({ ok: false, text: e instanceof Error ? e.message : "Не удалось применить промокод" });
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="blin-press"
+        style={{ ...btnReset, marginTop: 12, alignSelf: "flex-start", fontFamily: N.font, fontSize: 15, color: N.muted,
+                 display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+        <MSIcon name="confirmation_number" style={{ fontSize: 19 }} /> У меня есть промокод
+      </button>
+    );
+  }
+  return (
+    <NoirCard style={{ marginTop: 12, padding: "12px 12px 12px 16px" }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <input
+          value={code}
+          autoFocus
+          onChange={(e) => { setCode(e.target.value.toUpperCase().replace(/\s+/g, "")); setNote(null); }}
+          onKeyDown={(e) => { if (e.key === "Enter") void apply(); }}
+          placeholder="Промокод"
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck={false}
+          style={{ flex: 1, minWidth: 0, height: 44, border: "none", outline: "none", background: "transparent",
+                   color: N.text, fontFamily: N.font, fontSize: 16.5, letterSpacing: code ? "0.05em" : 0 }}
+        />
+        <button type="button" onClick={() => void apply()} disabled={!code.trim() || busy} className="blin-press"
+          style={{ ...btnReset, height: 40, padding: "0 16px", borderRadius: 14, fontFamily: N.font, fontSize: 15,
+                   background: code.trim() ? N.red : "rgba(255,255,255,0.08)", color: N.text, cursor: "pointer" }}>
+          {busy ? "…" : "Применить"}
+        </button>
+      </div>
+      {note ? <div style={{ marginTop: 6, fontSize: 13.5, color: note.ok ? "#3DD68C" : "#FF6B6B" }}>{note.text}</div> : null}
+    </NoirCard>
+  );
+}
 
 const METHOD_ICON: Record<string, string> = {
   sbp: "account_balance",
@@ -162,6 +229,8 @@ export default function Payment() {
       ? Math.max(0, totalDevices - planDevices)
       : 0;
 
+  const [promoTick, setPromoTick] = useState(0);
+  const [dayGift, setDayGift] = useState<DayGift | null>(null);
   useEffect(() => {
     if (!methodsReady) return;
     let alive = true;
@@ -183,7 +252,7 @@ export default function Payment() {
 
     })();
     return () => { alive = false; };
-  }, [planDevices, method, extraDevices, useRefBal, purpose, subParam, months, whitelist, methodsReady, isStars]);
+  }, [planDevices, method, extraDevices, useRefBal, purpose, subParam, months, whitelist, methodsReady, isStars, promoTick]);
 
   // суммы
   const price = quote ? quote.price : 0;
@@ -308,6 +377,9 @@ export default function Payment() {
         <div style={{ height: 1, background: N.divider, marginTop: 10 }} />
         <SumRow strong label="Итого" value={quoteReady ? (isStars ? `${Math.round(total)} ⭐` : fmt(paidFromBalance ? 0 : total)) : "…"} />
       </NoirCard>
+      {hasFeature("promo_at_payment") && !isGift ? (
+        <PromoField onDiscount={() => setPromoTick((t) => t + 1)} onDayGift={setDayGift} />
+      ) : null}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
         {methods.map((m) => {
@@ -374,6 +446,7 @@ export default function Payment() {
       </div>
 
       {pending ? <PaymentSheet payment={pending} returnTo={returnTo} onClose={() => setPending(null)} /> : null}
+      {dayGift ? <DayGiftSheet gift={dayGift} onClose={() => setDayGift(null)} /> : null}
     </NoirScreen>
   );
 }
