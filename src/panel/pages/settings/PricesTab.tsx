@@ -40,7 +40,7 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
   const [extraStars, setExtraStars] = useState('40');
   const [wlConfigured, setWlConfigured] = useState(false);
   const [wlError, setWlError] = useState('');
-  const [furk, setFurk] = useState<{ configured?: boolean; ok?: boolean; balance?: number; credit?: number; error?: string } | null>(null);
+  const [furk, setFurk] = useState<{ configured?: boolean; ok?: boolean; balance?: number; credit?: number; error?: string; disabled?: boolean } | null>(null);
   // способы оплаты: вкл/выкл и комиссия
   const [payMethods, setPayMethods] = useState<{ id: string; title: string; enabled: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -188,7 +188,9 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
             sub="Единый тариф: каждая покупка, продление и подарок — ВПН + анти-ключ FURK (500 ГБ) на тот же срок, по цене периода выше. Отдельных цен для белых списков больше нет."
           >
             <div className="inset" style={{ padding: '10px 14px', fontSize: 13.5 }}>
-              {!wlConfigured
+              {furk?.disabled
+                ? (furk.error || 'FurkVPN в этом проекте выключен — обходы настраиваются в Remnawave.')
+                : !wlConfigured
                 ? `FurkVPN API не подключён — подписки выдаются без белых списков. Добавьте FURK_API_KEY в .env (ключ из @VPNpartenrsbot).${wlError ? ` (${wlError})` : ''}`
                 : furk && furk.ok === false
                   ? `FurkVPN API не отвечает или ключ неверный (${furk.error || 'ошибка'}).`

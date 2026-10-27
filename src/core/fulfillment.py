@@ -121,8 +121,16 @@ def get_user(user_id: int) -> Optional[dict[str, Any]]:
     return db.fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
 
 
+def squad_setting(key: str, project_id: Optional[str] = None) -> list[str]:
+    """сквады проекта; у проекта не заданы — общие сети (настройки основного проекта)."""
+    own = db.loads(db.get_setting(key, "[]", project=project_id), []) or []
+    if own:
+        return list(own)
+    return list(db.loads(db.get_setting(key, "[]", project=projects.DEFAULT), []) or [])
+
+
 def vpn_squads() -> list[str]:
-    return db.loads(db.get_setting("squad_mapping_vpn", "[]"), []) or []
+    return squad_setting("squad_mapping_vpn")
 
 
 # ── тарифы по периодам ──
@@ -283,8 +291,18 @@ def period_days(months: int) -> int:
     return int(PERIOD_DAYS.get(int(months or 1), DAYS_PER_MONTH * int(months or 1)))
 
 
-def whitelist_available() -> bool:
-    return bool(furk is not None and furk.is_configured())
+def furk_enabled(project_id: Optional[str] = None) -> bool:
+    """FurkVPN для проекта: features.furk в project.json (по умолчанию вкл.).
+    У FGN выключен — обходы у него свои, прямо в Remnawave (сквады)."""
+    try:
+        p = projects.get(project_id) if project_id else projects.current()
+        return bool(p.feature("furk", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def whitelist_available(project_id: Optional[str] = None) -> bool:
+    return bool(furk is not None and furk_enabled(project_id) and furk.is_configured())
 
 
 def user_whitelist(user: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -316,7 +334,7 @@ def grant_whitelist(user: dict[str, Any], months: int = 1, idem: Optional[str] =
         if done.get("anti_last_idem") == str(idem):
             out.update(ok=True, already=True)
             return out
-    if furk is None or not furk.is_configured():
+    if not whitelist_available(projects.of(user)):
         out["error"] = "furk_not_configured"
         return out
     try:
@@ -370,7 +388,7 @@ def squads_for_sub(sub: Optional[dict[str, Any]]) -> list[str]:
 
 
 def trial_squads() -> list[str]:
-    return db.loads(db.get_setting("squad_mapping_trial", "[]"), []) or vpn_squads()
+    return squad_setting("squad_mapping_trial") or vpn_squads()
 
 
 def compute_user_state(user_id: int) -> str:
@@ -617,7 +635,7 @@ def _grant_trial_bypass(user: dict[str, Any]) -> dict[str, Any]:
     выдачу пробного VPN, ошибка уходит в лог."""
     if not trial_bypass_enabled():
         return {"ok": False, "skipped": "disabled"}
-    if not whitelist_available():
+    if not whitelist_available(projects.of(user)):
         return {"ok": False, "skipped": "furk_not_configured"}
     uid = int(user["id"])
     idem = f"trial-{uid}"

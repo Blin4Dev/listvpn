@@ -188,7 +188,8 @@ def build_router(core: Any) -> APIRouter:
     @r.get("/subscription")
     def get_subscription(user: dict = Depends(auth_any)) -> dict[str, Any]:
         fresh = _fresh(user)
-        return store.subscription_payload(fresh, _sub_or_404(fresh))  # type: ignore[return-value]
+        view = core.family_owner_for(fresh) or fresh  # участник семьи — подписка владельца
+        return store.subscription_payload(view, _sub_or_404(view))  # type: ignore[return-value]
 
     @r.post("/subscription/resync", status_code=202)
     def resync_subscription(user: dict = Depends(auth)) -> JSONResponse:
@@ -216,6 +217,7 @@ def build_router(core: Any) -> APIRouter:
         user = core.get_user(int(row["id"])) if row else None
         if not user:
             raise _err(404, "Пользователь не найден", "user_not_found")
+        user = core.family_owner_for(user) or user  # участник семьи — обход владельца
         if user.get("is_banned") or core.subscription_status_for_user(user) not in ("active", "trial"):
             return {"bypass": {"enabled": False, "available": core.fulfillment.whitelist_available(),
                                "until": None, "key": None}}

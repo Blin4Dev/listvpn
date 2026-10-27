@@ -84,20 +84,38 @@ def cursor() -> Iterator[sqlite3.Cursor]:
         raise
 
 
+def _in_tx() -> bool:
+    return int(getattr(_local, "tx_depth", 0) or 0) > 0
+
+
 @contextmanager
 def transaction() -> Iterator[sqlite3.Connection]:
+    """BEGIN IMMEDIATE … COMMIT. db.execute внутри НЕ коммитит сам (иначе транзакция
+    закрывалась бы на первой записи); вложенный transaction() — часть внешней."""
     conn = connect()
+    if _in_tx():
+        _local.tx_depth += 1
+        try:
+            yield conn
+        finally:
+            _local.tx_depth -= 1
+        return
     conn.execute("BEGIN IMMEDIATE")
+    _local.tx_depth = 1
     try:
         yield conn
         conn.commit()
-    except Exception:
+    except BaseException:
         conn.rollback()
         raise
+    finally:
+        _local.tx_depth = 0
 
 
 def execute(sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
     conn = connect()
+    if _in_tx():
+        return conn.execute(sql, params)  # коммит/откат — на выходе из transaction()
     try:
         cur = conn.execute(sql, params)
         conn.commit()
@@ -110,6 +128,9 @@ def execute(sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
 
 def executemany(sql: str, seq: list) -> None:
     conn = connect()
+    if _in_tx():
+        conn.executemany(sql, seq)
+        return
     try:
         conn.executemany(sql, seq)
         conn.commit()
@@ -1098,8 +1119,8 @@ def _seed_projects(conn: sqlite3.Connection) -> None:
         if conn.execute("SELECT 1 FROM settings WHERE key = ?", (flag,)).fetchone():
             continue
         for k, v in base.items():
-            if k == "apiv1_tasks_seeded":
-                continue
+            if k in ("apiv1_tasks_seeded", "squad_mapping_vpn", "squad_mapping_trial"):
+                continue  # сквады не копируем: пусто = общие сети, свои задаются в панели проекта
             if k in ("offer_text", "privacy_text"):
                 v = (v or "").replace(default.name, p.name)
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (f"@{p.id}/{k}", v))

@@ -17,6 +17,7 @@ export interface UserDetailData {
   id: number; telegram_id: number | null; username: string | null;
   first_name: string | null; last_name: string | null; email: string | null;
   registration_date: string | null; anti_key?: string | null; anti_expires_at?: string | null; status: string; is_banned: boolean; key_blocked?: boolean; ban_reason?: string | null; blacklist_reason?: string | null; blacklist_ignored?: boolean;
+  family?: { role: 'member'; owner_id: number; owner_name: string; active: boolean } | { role: 'owner'; max_members: number; members: { id: number; name: string; status: string; user_id?: number | null }[] } | null;
   subscriptions_history?: { id: number; status: string; type?: string; expiry_date?: string | null; created_at?: string | null; deleted_at?: string | null; devices_limit?: number; ban_reason?: string | null; banned_at?: string | null }[];
   banned_at?: string | null;
   moderation?: { id: number; kind: string; label: string; reason: string | null; sub_id: number | null; actor: string | null; actor_name: string | null; created_at: string | null }[];
@@ -100,6 +101,16 @@ export const UserDetailPage: React.FC<{
   const [special, setSpecial] = useState<'' | 'exchange' | 'transfer'>('');
   // привязка email/tg, уже занятых другим аккаунтом → предупреждение о merge
   const [mergeAsk, setMergeAsk] = useState<{ act: string; value: any; message: string; merge: any } | null>(null);
+
+  // семья: убрать участника (row — строка семьи владельца) или вывести самого пользователя из семьи
+  const familyRemove = async (row?: number) => {
+    if (!window.confirm(row ? 'Убрать из семьи? Ключ владельца будет перевыпущен.' : 'Вывести пользователя из семьи? Ключ владельца будет перевыпущен.')) return;
+    try {
+      await apiFetch(`/panel/users/${userId}/family${row ? `?row=${row}` : ''}`, { method: 'DELETE' });
+      onToast('Готово', 'Убран из семьи', 'success');
+      void load();
+    } catch (e) { onToast('Ошибка', parseErr(e), 'error'); }
+  };
 
   const load = async () => {
     try { setDetail(await apiFetch(`/panel/users/${userId}/detail`)); }
@@ -189,6 +200,26 @@ export const UserDetailPage: React.FC<{
             {(detail.subscriptions_history || []).filter((h) => h.status === 'Banned').map((h) => (
               <div key={h.id} className="sub" style={{ color: 'var(--danger)' }}>Подписка #{h.id} заблокирована: {h.ban_reason || 'причина не записана'}{h.banned_at ? ` · ${fmtDateTime(h.banned_at)}` : ''}</div>
             ))}
+            {detail.family && detail.family.role === 'member' && (
+              <div className="sub">
+                Участник семьи <button className="link" style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }} onClick={() => onOpenUser((detail.family as any).owner_id)}>{detail.family.owner_name}</button>
+                {detail.family.active ? '' : ' (сейчас не действует)'}
+                {canEdit && <> · <button style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove()}>вывести из семьи</button></>}
+              </div>
+            )}
+            {detail.family && detail.family.role === 'owner' && (
+              <div className="sub">
+                Семья ({detail.family.members.length + 1}/{detail.family.max_members}):{' '}
+                {detail.family.members.map((m, i) => (
+                  <span key={m.id}>
+                    {i > 0 && ', '}
+                    {m.user_id ? <button style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }} onClick={() => onOpenUser(Number(m.user_id))}>{m.name}</button> : m.name}
+                    {m.status === 'pending' ? ' (приглашён)' : ''}
+                    {canEdit && <button title="Убрать из семьи" style={{ background: 'none', border: 0, padding: '0 2px', cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove(m.id)}>×</button>}
+                  </span>
+                ))}
+              </div>
+            )}
             {detail.aa_warning && (
               <div className="sub" style={{ color: '#fb923c' }}>
                 <AlertTriangle size={13} style={{ display: 'inline', verticalAlign: '-2px' }} /> Предупреждение анти-абуза {fmtDateTime(detail.aa_warning.at)}{detail.aa_warning.reason ? `: ${detail.aa_warning.reason}` : ''}. Повторное нарушение после {fmtDateTime(detail.aa_warning.grace_until)} — бан (действует до {fmtDateTime(detail.aa_warning.valid_until)}).

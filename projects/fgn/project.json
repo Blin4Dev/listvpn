@@ -17,13 +17,15 @@
     "promo_at_payment": true,
     "single_renew": true,
     "notify_not_connected": true,
-    "winback_gift": true
+    "winback_gift": true,
+    "furk": false
   },
   "features_doc": {
     "promo_days": "промокод «+N дней к подписке» с кнопкой «Забрать»",
     "promo_at_payment": "поле промокода на экране оплаты",
     "single_renew": "в панели продление VPN и обхода одной кнопкой",
     "notify_not_connected": "напоминание, если оплатил, но не подключил подписку",
-    "winback_gift": "давно не оплачивал — дарим дни (кнопка «Забрать»)"
+    "winback_gift": "давно не оплачивал — дарим дни (кнопка «Забрать»)",
+    "furk": "белые списки через FurkVPN (false — обходы свои, в Remnawave)"
   }
 }

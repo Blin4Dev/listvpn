@@ -181,7 +181,7 @@ def provision(
     devices: int = 1,
     squads: Optional[list[str]] = None,
     email: Optional[str] = None,
-    traffic_limit_bytes: int = 0,
+    traffic_limit_bytes: Optional[int] = None,  # None — не трогать; 0 — безлимит
     traffic_reset_strategy: str = "MONTH",
     reset_traffic: bool = False,
     user_id: Optional[int] = None,
@@ -226,7 +226,7 @@ def provision(
                 patch["active_internal_squads"] = squad_list
             if ext_squad:
                 patch["external_squad_uuid"] = ext_squad
-            if traffic_limit_bytes:
+            if traffic_limit_bytes is not None:  # 0 тоже шлём: иначе после пробной оставался её лимит
                 patch["traffic_limit_bytes"] = traffic_limit_bytes
             if email:
                 patch["email"] = email
@@ -269,7 +269,7 @@ def provision(
                     extra["active_internal_squads"] = squad_list
                 if ext_squad:
                     extra["external_squad_uuid"] = ext_squad
-                if traffic_limit_bytes:
+                if traffic_limit_bytes is not None:
                     extra["traffic_limit_bytes"] = traffic_limit_bytes
                 if email:
                     extra["email"] = email

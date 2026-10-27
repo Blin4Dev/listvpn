@@ -19,7 +19,8 @@ import hmac
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 try:
@@ -34,6 +35,8 @@ CODE_LEN = 8
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 DEFAULT_MAX_MEMBERS = 5  # владелец + 4 участника
 MAX_MEMBERS_CAP = 20
+NOT_FOUND_BY_ID = "Не нашли пользователя с таким ID — пригласите по @username или почте"
+INVITE_TTL_DAYS = 30  # непринятое приглашение столько висит и держит место, потом снимается само
 
 
 class FamilyError(Exception):
@@ -128,14 +131,42 @@ INVITE_PREFIX = "IV"
 INVITE_LEN = 10
 
 
-def _invite_key(project_id: str) -> bytes:
-    """ключ HMAC: токен бота проекта (стабилен, пока бот не заменён), иначе секрет установки."""
+_INVITE_KEYS: dict[str, tuple[str, bytes]] = {}
+
+
+def _invite_seed(project_id: str) -> str:
     try:
         seed = projects.get(project_id).bot_token or ""
     except Exception:  # noqa: BLE001
         seed = ""
-    seed = seed or os.getenv("INTERNAL_API_SECRET") or ""
-    return hashlib.sha256(b"listvpn:family-invite:" + seed.encode("utf-8")).digest()
+    return seed or os.getenv("INTERNAL_API_SECRET") or ""
+
+
+def _invite_key(project_id: str) -> bytes:
+    """ключ HMAC: токен бота проекта (стабилен, пока бот не заменён), иначе секрет установки.
+
+    Без секрета токен был бы предсказуем — тогда персональный вход в семью не выдаём вовсе.
+    """
+    pid = str(project_id or projects.DEFAULT)
+    seed = _invite_seed(pid)
+    if not seed:
+        raise FamilyError("Приглашения в семью временно недоступны", 503)
+    cached = _INVITE_KEYS.get(pid)
+    # seed сверяем: сменили бота в панели — старые токены перестают действовать
+    if cached is not None and cached[0] == seed:
+        return cached[1]
+    key = hashlib.sha256(b"listvpn:family-invite:" + seed.encode("utf-8")).digest()
+    _INVITE_KEYS[pid] = (seed, key)
+    return key
+
+
+def invite_available(project_id: Optional[str] = None) -> bool:
+    """можно ли выдавать персональные токены приглашений (нужен секрет проекта)"""
+    try:
+        _invite_key(str(project_id or projects.DEFAULT))
+        return True
+    except FamilyError:
+        return False
 
 
 def invite_token(row_id: int, project_id: str, subject: Any) -> str:
@@ -160,9 +191,9 @@ def _token_owner_id(user: dict[str, Any], token: str, project_id: str) -> Option
     marks = ", ".join("?" for _ in cands)
     rows = db.fetchall(
         "SELECT id, owner_id, member_id, invite_query, project_id FROM family_members "
-        "WHERE status = 'pending' AND project_id = ? AND "
+        "WHERE status = 'pending' AND created_at >= ? AND project_id = ? AND "
         f"(member_id = ? OR (member_id IS NULL AND lower(invite_query) IN ({marks})))",
-        (project_id, uid, *cands),
+        (_stale_before(), project_id, uid, *cands),
     )
     for row in rows:
         expected = invite_token(int(row["id"]), str(row.get("project_id") or project_id),
@@ -173,17 +204,34 @@ def _token_owner_id(user: dict[str, Any], token: str, project_id: str) -> Option
 
 
 # ── кто есть кто ──
+def _stale_before() -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=INVITE_TTL_DAYS)).replace(microsecond=0).isoformat()
+
+
+def purge_stale(owner_id: Optional[int] = None) -> int:
+    """снять истёкшие непринятые приглашения (чтобы не держали место); активных не трогаем."""
+    sql = "DELETE FROM family_members WHERE status = 'pending' AND created_at < ?"
+    params: tuple = (_stale_before(),)
+    if owner_id is not None:
+        sql += " AND owner_id = ?"
+        params += (int(owner_id),)
+    return int(db.execute(sql, params).rowcount or 0)
+
+
+def cleanup_orphans(owner_id: Optional[int] = None) -> int:
+    """удалить записи удалённых аккаунтов (у member_id нет внешнего ключа)."""
+    sql = ("DELETE FROM family_members WHERE member_id IS NOT NULL "
+           "AND member_id NOT IN (SELECT id FROM users)")
+    params: tuple = ()
+    if owner_id is not None:
+        sql += " AND owner_id = ?"
+        params = (int(owner_id),)
+    return int(db.execute(sql, params).rowcount or 0)
+
+
 def has_members(owner_id: int) -> bool:
     """у аккаунта есть своя семья (участники или непринятые приглашения)."""
     return _seats_taken(owner_id) > 0
-
-
-def has_code(owner_id: int) -> bool:
-    return bool(db.fetchone("SELECT 1 FROM family_codes WHERE owner_id = ?", (int(owner_id),)))
-
-
-def is_member(user_id: int) -> bool:
-    return active_owner_id(int(user_id)) is not None
 
 
 # ── подписки ──
@@ -217,6 +265,15 @@ def has_paid_sub(user_id: int) -> bool:
     return False
 
 
+def member_ids(owner_id: int) -> list[int]:
+    """активные участники семьи владельца"""
+    rows = db.fetchall(
+        "SELECT member_id FROM family_members WHERE owner_id = ? AND status = 'active' AND member_id IS NOT NULL",
+        (int(owner_id),),
+    )
+    return [int(r["member_id"]) for r in rows]
+
+
 def active_owner_id(member_id: int) -> Optional[int]:
     """владелец семьи, в которой состоит аккаунт (None — не в семье)"""
     row = db.fetchone(
@@ -224,14 +281,6 @@ def active_owner_id(member_id: int) -> Optional[int]:
         (int(member_id),),
     )
     return int(row["owner_id"]) if row else None
-
-
-def member_ids(owner_id: int) -> list[int]:
-    rows = db.fetchall(
-        "SELECT member_id FROM family_members WHERE owner_id = ? AND status = 'active' AND member_id IS NOT NULL",
-        (int(owner_id),),
-    )
-    return [int(r["member_id"]) for r in rows]
 
 
 # ── участники ──
@@ -247,13 +296,14 @@ def _member_name(row: dict[str, Any]) -> str:
 
 
 def members(owner_id: int) -> list[dict[str, Any]]:
+    """участники и живые приглашения (протухшие не показываем)"""
     rows = db.fetchall(
-        "SELECT f.id, f.member_id, f.status, f.invite_query, "
+        "SELECT f.id, f.member_id, f.status, f.invite_query, f.created_at, "
         "       u.username, u.first_name, u.last_name, u.email, u.telegram_id "
         "FROM family_members f LEFT JOIN users u ON u.id = f.member_id "
-        "WHERE f.owner_id = ? "
+        "WHERE f.owner_id = ? AND (f.status != 'pending' OR f.created_at >= ?) "
         "ORDER BY CASE f.status WHEN 'active' THEN 0 ELSE 1 END, f.id",
-        (int(owner_id),),
+        (int(owner_id), _stale_before()),
     )
     return [
         {
@@ -266,14 +316,41 @@ def members(owner_id: int) -> list[dict[str, Any]]:
 
 
 def _seats_taken(owner_id: int) -> int:
-    row = db.fetchone("SELECT COUNT(*) AS n FROM family_members WHERE owner_id = ?", (int(owner_id),))
+    """сколько мест занято; протухшие приглашения мест уже не держат"""
+    row = db.fetchone(
+        "SELECT COUNT(*) AS n FROM family_members WHERE owner_id = ? "
+        "AND NOT (status = 'pending' AND created_at < ?)",
+        (int(owner_id), _stale_before()),
+    )
     return int(row["n"]) if row else 0
 
 
-def _check_room(owner_id: int, project_id: Optional[str]) -> None:
-    limit = max_members(project_id) - 1  # одно место — владельцу
-    if _seats_taken(owner_id) >= limit:
-        raise FamilyError(f"В семье уже максимум участников ({limit}). Удалите кого-нибудь, чтобы добавить нового.")
+def _room(project_id: Optional[str]) -> int:
+    return max_members(project_id) - 1  # одно место — владельцу
+
+
+def _no_room(limit: int) -> FamilyError:
+    return FamilyError(f"В семье уже максимум участников ({limit}). Удалите кого-нибудь, чтобы добавить нового.")
+
+
+def _insert_member(project_id: str, owner_id: int, member_id: Optional[int], invite_query: Optional[str],
+                   status: str, accepted_at: Optional[str] = None) -> bool:
+    """вставка с проверкой свободного места в одном запросе: False — мест нет.
+
+    Отдельная проверка + INSERT гоняются на разных соединениях, поэтому условие
+    встроено в сам INSERT: место проверяется и занимается атомарно.
+    """
+    limit = _room(project_id)
+    cur = db.execute(
+        "INSERT INTO family_members (project_id, owner_id, member_id, invite_query, status, created_at, accepted_at) "
+        "SELECT ?, ?, ?, ?, ?, ?, ? WHERE ("
+        "  SELECT COUNT(*) FROM family_members WHERE owner_id = ? "
+        "  AND NOT (status = 'pending' AND created_at < ?)"
+        ") < ?",
+        (project_id, int(owner_id), member_id, invite_query, status, _now(), accepted_at,
+         int(owner_id), _stale_before(), limit),
+    )
+    return int(cur.rowcount or 0) > 0
 
 
 def _candidates(user: dict[str, Any]) -> list[str]:
@@ -337,45 +414,45 @@ def add_member(owner_id: int, project_id: str, query: str) -> Optional[dict[str,
         tid = int(target["id"])
         if tid == int(owner_id):
             raise FamilyError("Это вы — пригласите другого пользователя")
-        if target.get("is_banned"):
-            raise FamilyError("Этот пользователь заблокирован")
-        if active_owner_id(tid) is not None:
-            raise FamilyError("У пользователя уже есть семья")
-        if has_members(tid):
-            raise FamilyError("У пользователя своя семья — он не может вступить в чужую")
-        if has_live_sub(tid):
-            raise FamilyError("У пользователя своя активная подписка — семья ему не нужна")
+        in_family = active_owner_id(tid)
+        if in_family == int(owner_id):
+            raise FamilyError("Этот пользователь уже в вашей семье")
+        # статус чужого аккаунта (бан, своя подписка, другая семья) не раскрываем:
+        # такой аккаунт обрабатываем как «не найден» — приглашение по запросу, без сообщения
+        if target.get("is_banned") or in_family is not None or has_members(tid) or has_live_sub(tid):
+            target = None
+    if target is None and q.isdigit():
+        # приглашение по номеру, которого нет, досталось бы случайному будущему аккаунту
+        raise FamilyError(NOT_FOUND_BY_ID)
+    if target is not None:
+        tid = int(target["id"])
+        code_for(int(owner_id), project_id)  # у владельца с участниками всегда есть код
         with db.transaction():
             row = db.fetchone(
                 "SELECT id, status FROM family_members WHERE owner_id = ? AND member_id = ?",
                 (int(owner_id), tid),
             )
             if row:
-                if str(row.get("status")) != "active":
-                    db.execute("UPDATE family_members SET invite_query = ? WHERE id = ?", (q, row["id"]))
-                return target  # уже приглашён — просто обновили запрос
-            _check_room(owner_id, project_id)
-            db.execute(
-                "INSERT INTO family_members (project_id, owner_id, member_id, invite_query, status, created_at) "
-                "VALUES (?, ?, ?, ?, 'pending', ?)",
-                (project_id, int(owner_id), tid, q, _now()),
-            )
+                # уже приглашён — продлеваем срок, чтобы приглашение не протухло
+                db.execute("UPDATE family_members SET invite_query = ?, created_at = ? WHERE id = ?",
+                           (q, _now(), row["id"]))
+                return target
+            if not _insert_member(project_id, int(owner_id), tid, q, "pending"):
+                raise _no_room(_room(project_id))
         return target
 
     # такого аккаунта ещё нет: приглашение «по логину/почте» — подхватится при входе
+    code_for(int(owner_id), project_id)
     with db.transaction():
-        _check_room(owner_id, project_id)
         dup = db.fetchone(
             "SELECT id FROM family_members WHERE owner_id = ? AND member_id IS NULL AND lower(invite_query) = ?",
             (int(owner_id), q.lower()),
         )
         if dup:
+            db.execute("UPDATE family_members SET created_at = ? WHERE id = ?", (_now(), dup["id"]))
             return None
-        db.execute(
-            "INSERT INTO family_members (project_id, owner_id, member_id, invite_query, status, created_at) "
-            "VALUES (?, ?, NULL, ?, 'pending', ?)",
-            (project_id, int(owner_id), q, _now()),
-        )
+        if not _insert_member(project_id, int(owner_id), None, q, "pending"):
+            raise _no_room(_room(project_id))
     return None
 
 
@@ -388,28 +465,39 @@ def remove_member(owner_id: int, key: Any) -> Optional[dict[str, Any]]:
     if not raw.isdigit():
         raise FamilyError("Не указан участник")
     num = int(raw)
+    # id записи приоритетнее: иначе id строки может совпасть с чужим member_id
+    # и удалится не тот участник
     row = db.fetchone(
-        "SELECT id, member_id, status FROM family_members WHERE owner_id = ? AND (id = ? OR member_id = ?)",
-        (int(owner_id), num, num),
+        "SELECT id, member_id, status FROM family_members WHERE owner_id = ? AND (id = ? OR member_id = ?) "
+        "ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1",
+        (int(owner_id), num, num, num),
     )
     if not row:
         raise FamilyError("Участник не найден", 404)
     db.execute("DELETE FROM family_members WHERE id = ?", (int(row["id"]),))
+    cleanup_orphans(int(owner_id))
     if not row.get("member_id"):
         return None
-    return db.fetchone("SELECT * FROM users WHERE id = ?", (int(row["member_id"]),))
+    member = db.fetchone("SELECT * FROM users WHERE id = ?", (int(row["member_id"]),))
+    if member is not None:
+        # был ли он уже участником (тогда у него есть ссылка на подписку — её надо отозвать)
+        member["family_was_active"] = str(row.get("status")) == "active"
+    return member
 
 
-def leave(member_id: int) -> bool:
-    """выйти из семьи (подписка владельца больше не действует для этого аккаунта)"""
+def leave(member_id: int) -> Optional[int]:
+    """выйти из семьи (подписка владельца больше не действует для этого аккаунта).
+
+    Возвращает id владельца (None — аккаунт не был в семье).
+    """
     row = db.fetchone(
-        "SELECT id FROM family_members WHERE member_id = ? AND status = 'active' LIMIT 1",
+        "SELECT id, owner_id FROM family_members WHERE member_id = ? AND status = 'active' LIMIT 1",
         (int(member_id),),
     )
     if not row:
-        return False
+        return None
     db.execute("DELETE FROM family_members WHERE id = ?", (int(row["id"]),))
-    return True
+    return int(row["owner_id"])
 
 
 def join(user: dict[str, Any], raw_code: Any) -> dict[str, Any]:
@@ -448,36 +536,38 @@ def join(user: dict[str, Any], raw_code: Any) -> dict[str, Any]:
         raise FamilyError("У вас своя семья — сначала удалите из неё участников")
     if has_live_sub(uid):
         raise FamilyError("У вас есть своя активная подписка — она важнее семейной")
-    if not db.fetchone("SELECT 1 FROM family_members WHERE owner_id = ? AND member_id = ?", (owner_id, uid)):
-        _check_room(owner_id, project_id)
 
     cands = _candidates(user)
+    low = [c.lower() for c in cands]
     marks = ", ".join("?" for _ in cands)
-    with db.transaction():
-        # приглашение этого владельца (по id или по логину/почте) превращаем в участие
-        invite = db.fetchone(
-            "SELECT id FROM family_members WHERE owner_id = ? AND status = 'pending' AND "
-            f"(member_id = ? OR (member_id IS NULL AND lower(invite_query) IN ({marks}))) "
-            "ORDER BY CASE WHEN member_id = ? THEN 0 ELSE 1 END, id LIMIT 1",
-            (owner_id, uid, *[c.lower() for c in cands], uid),
-        )
-        if invite:
-            db.execute(
-                "UPDATE family_members SET member_id = ?, status = 'active', accepted_at = ? WHERE id = ?",
-                (uid, _now(), int(invite["id"])),
+    try:
+        with db.transaction():
+            # приглашение этого владельца (по id или по логину/почте) превращаем в участие
+            invite = db.fetchone(
+                "SELECT id FROM family_members WHERE owner_id = ? AND status = 'pending' AND created_at >= ? AND "
+                f"(member_id = ? OR (member_id IS NULL AND lower(invite_query) IN ({marks}))) "
+                "ORDER BY CASE WHEN member_id = ? THEN 0 ELSE 1 END, id LIMIT 1",
+                (owner_id, _stale_before(), uid, *low, uid),
             )
-        else:
+            if invite:
+                db.execute(
+                    "UPDATE family_members SET member_id = ?, status = 'active', accepted_at = ? WHERE id = ?",
+                    (uid, _now(), int(invite["id"])),
+                )
+            else:
+                # место проверяется и занимается одним запросом: иначе два одновременных
+                # входа оба увидят свободное место
+                if not _insert_member(project_id, owner_id, uid, None, "active", _now()):
+                    raise _no_room(_room(project_id))
+            # прочие непринятые приглашения этому аккаунту больше не нужны
             db.execute(
-                "INSERT INTO family_members (project_id, owner_id, member_id, invite_query, status, created_at, accepted_at) "
-                "VALUES (?, ?, ?, NULL, 'active', ?, ?)",
-                (project_id, owner_id, uid, _now(), _now()),
+                "DELETE FROM family_members WHERE status = 'pending' AND owner_id != ? AND "
+                f"(member_id = ? OR (member_id IS NULL AND lower(invite_query) IN ({marks})))",
+                (owner_id, uid, *low),
             )
-        # прочие непринятые приглашения этому аккаунту больше не нужны
-        db.execute(
-            "DELETE FROM family_members WHERE status = 'pending' AND owner_id != ? AND "
-            f"(member_id = ? OR (member_id IS NULL AND lower(invite_query) IN ({marks})))",
-            (owner_id, uid, *[c.lower() for c in cands]),
-        )
+    except sqlite3.IntegrityError:
+        # параллельный вход того же аккаунта уже создал активную запись
+        raise FamilyError("Вы уже в семье") from None
     return {"owner_id": owner_id, "owner_name": _label(owner), "code": code}
 
 
@@ -498,29 +588,21 @@ def pending_invite(user: dict[str, Any]) -> Optional[dict[str, Any]]:
         "SELECT f.id, f.owner_id, f.project_id, f.member_id, f.invite_query, "
         "       u.username, u.first_name, u.last_name, u.email, u.telegram_id, u.id AS uid "
         "FROM family_members f JOIN users u ON u.id = f.owner_id "
-        f"WHERE f.status = 'pending' AND f.project_id = ? AND (f.member_id = ? OR "
+        f"WHERE f.status = 'pending' AND f.created_at >= ? AND f.project_id = ? AND (f.member_id = ? OR "
         f"(f.member_id IS NULL AND lower(f.invite_query) IN ({marks}))) AND COALESCE(u.is_banned, 0) = 0 "
         "ORDER BY f.id DESC LIMIT 1",
-        (project_id, int(user["id"]), *cands),
+        (_stale_before(), project_id, int(user["id"]), *cands),
     )
     if not row:
         return None
     owner_id = int(row["owner_id"])
     if not has_paid_sub(owner_id):
         return None  # владелец без платной подписки — приглашение не показываем
+    if not invite_available(str(row.get("project_id") or project_id)):
+        return None  # нечем подписать токен — не показываем битое приглашение
     return {
         "code": invite_token(int(row["id"]), str(row.get("project_id") or project_id), _invite_subject(row)),
         "from_name": _label(row),
         "family_id": int(row["id"]),
         "owner_id": owner_id,
-    }
-
-
-def family_payload(owner_id: int, project_id: Optional[str], role: str = "owner") -> dict[str, Any]:
-    """ответ мини-приложению: код + участники + лимит"""
-    return {
-        "code": code_for(owner_id, project_id),
-        "members": members(owner_id),
-        "max_members": max_members(project_id),
-        "role": role,
     }

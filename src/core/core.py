@@ -988,7 +988,19 @@ def family_owner_for(u: dict[str, Any]) -> Optional[dict[str, Any]]:
     Своя оплаченная подписка всегда важнее семейной, поэтому проверяем сначала её.
     """
     try:
-        if subscription_status_for_user(u) in ("active", "trial"):
+        status = subscription_status_for_user(u)
+        # заблокированному (бан аккаунта или блок подписки админом) семья не помогает:
+        # иначе блокировка обходилась бы ключом владельца
+        if status in ("banned", "blocked"):
+            return None
+        if status in ("active", "trial"):
+            # своя подписка появилась — место в семье освобождаем (best-effort)
+            try:
+                left_owner = family.leave(int(u["id"])) if family.active_owner_id(int(u["id"])) else None
+                if left_owner is not None:
+                    _family_revoke_owner_key(get_user(left_owner), _user_label(u))
+            except Exception:  # noqa: BLE001
+                pass
             return None
         owner_id = family.active_owner_id(int(u["id"]))
         if not owner_id:
@@ -1856,10 +1868,15 @@ def get_backup_settings() -> dict[str, Any]:
     }
 
 
-def get_squad_mapping() -> dict[str, list[str]]:
+def get_squad_mapping() -> dict[str, Any]:
+    """сквады открытого в панели проекта; own_* — заданы ли свои (иначе действуют общие сети)."""
+    own_vpn = db.loads(db.get_setting("squad_mapping_vpn", "[]"), []) or []
+    own_trial = db.loads(db.get_setting("squad_mapping_trial", "[]"), []) or []
     return {
-        "vpn": db.loads(db.get_setting("squad_mapping_vpn", "[]"), []) or [],
-        "trial": db.loads(db.get_setting("squad_mapping_trial", "[]"), []) or [],
+        "vpn": fulfillment.squad_setting("squad_mapping_vpn"),
+        "trial": fulfillment.squad_setting("squad_mapping_trial"),
+        "own_vpn": bool(own_vpn), "own_trial": bool(own_trial),
+        "project": db.pid(),
     }
 
 
@@ -2489,9 +2506,22 @@ def _is_public_ip(ip: str) -> bool:
 
 
 def _client_ip(request: Optional[Request]) -> str:
-    """реальный ip клиента: CF / X-Real-IP / первый публичный в XFF."""
+    """реальный ip клиента: CF / X-Real-IP / первый публичный в XFF.
+
+    Заголовкам верим, только если запрос пришёл от прокси из внутренней сети (Caddy/nginx
+    в docker) или явно включён TRUST_PROXY_HEADERS=1. Иначе клиент мог бы подставить любой
+    CF-Connecting-IP и обходить лимиты по IP.
+    """
     if not request:
         return ""
+    peer = ""
+    try:
+        peer = request.client.host if request.client else ""
+    except Exception:  # noqa: BLE001
+        peer = ""
+    trust = (os.getenv("TRUST_PROXY_HEADERS") or "").strip().lower() in ("1", "true", "yes")
+    if peer and _is_public_ip(peer) and not trust:
+        return peer
     h = request.headers
     for key in ("cf-connecting-ip", "CF-Connecting-IP", "true-client-ip", "True-Client-IP",
                 "x-real-ip", "X-Real-IP"):
@@ -4217,6 +4247,45 @@ def panel_user_hwid_unlink(user_id: int, body: HwidUnlinkBody, _: dict = Depends
     return {"success": True}
 
 
+def _panel_family_info(user: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """семья в карточке панели: чей участник / кто в его семье."""
+    uid = int(user["id"])
+    owner_id = family.active_owner_id(uid)
+    if owner_id:
+        owner = get_user(owner_id)
+        return {"role": "member", "owner_id": owner_id, "owner_name": _user_label(owner) if owner else f"#{owner_id}",
+                "active": family_owner_for(user) is not None}
+    members = family.members(uid)
+    if members:
+        rows = db.fetchall("SELECT id, member_id FROM family_members WHERE owner_id = ?", (uid,))
+        uid_by_row = {int(r["id"]): r.get("member_id") for r in rows}
+        return {"role": "owner", "max_members": family.max_members(projects.of(user)),
+                "members": [{**m, "user_id": uid_by_row.get(int(m["id"]))} for m in members]}
+    return None
+
+
+@app.delete("/api/panel/users/{user_id}/family")
+def panel_user_family_remove(user_id: int, row: Optional[int] = None,
+                             _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """убрать из семьи: участника (row не указан — сам user_id выходит) или строку семьи владельца."""
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    if row is None:
+        owner_id = family.leave(user_id)
+        if owner_id is None:
+            raise HTTPException(400, detail={"message": "Пользователь не в семье"})
+        _family_revoke_owner_key(get_user(owner_id), _user_label(user))
+        return {"success": True}
+    try:
+        removed = family.remove_member(user_id, row)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    if removed and removed.get("family_was_active"):
+        _family_revoke_owner_key(user, _user_label(removed))
+    return {"success": True}
+
+
 @app.get("/api/panel/users/{user_id}/detail")
 def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
     """полная карточка юзера для панели."""
@@ -4237,6 +4306,7 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
     ))
 
     return {
+        "family": _panel_family_info(user),
         "id": user["id"],
         "project": projects.of(user),
         "telegram_id": user.get("telegram_id"),
@@ -4638,6 +4708,15 @@ def _delete_user_keep_history(user_id: int) -> None:
                 try:
                     tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 except Exception:  # noqa: BLE001 — таблицы может не быть в старой БД
+                    pass
+            # семья: внешние ключи здесь выключены, каскад не сработает — чистим руками,
+            # иначе останется активная строка, которая считает место в чужой семье
+            for sql in ("DELETE FROM family_members WHERE owner_id = ?",
+                        "DELETE FROM family_members WHERE member_id = ?",
+                        "DELETE FROM family_codes WHERE owner_id = ?"):
+                try:
+                    tx.execute(sql, (user_id,))
+                except Exception:  # noqa: BLE001 — таблиц может не быть в старой БД
                     pass
             tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
     finally:
@@ -5099,6 +5178,16 @@ def merge_accounts(keep_id: int, drop_id: int) -> dict[str, Any]:
              drop.get("referred_by"), drop.get("referred_by"), drop.get("tracking_code"), keep_id),
         )
         drop_tg, drop_email = drop.get("telegram_id"), drop.get("email")
+        # семья: семью drop не переносим (участники не должны получить чужую подписку),
+        # а его участие переходит на keep, если тот ещё ни в чьей семье
+        db.execute("DELETE FROM family_members WHERE owner_id = ?", (drop_id,))
+        db.execute("DELETE FROM family_codes WHERE owner_id = ?", (drop_id,))
+        db.execute("DELETE FROM family_members WHERE member_id = ? AND status != 'active'", (drop_id,))
+        if db.fetchone("SELECT 1 FROM family_members WHERE member_id = ? AND status = 'active'", (keep_id,)):
+            db.execute("DELETE FROM family_members WHERE member_id = ?", (drop_id,))
+        else:
+            db.execute("UPDATE OR IGNORE family_members SET member_id = ? WHERE member_id = ?", (keep_id, drop_id))
+            db.execute("DELETE FROM family_members WHERE member_id = ?", (drop_id,))
         db.execute("DELETE FROM users WHERE id = ?", (drop_id,))
         # недостающие способы входа с drop
         if drop_tg and not keep.get("telegram_id"):
@@ -5833,6 +5922,9 @@ def panel_remnawave_squads(_: dict = Depends(require_owner)) -> list[dict[str, A
 def panel_furk_status(_: dict = Depends(require_owner)) -> dict[str, Any]:
     """белые списки (FurkVPN): подключён ли API и баланс партнёра."""
     furk = fulfillment.furk
+    if not fulfillment.furk_enabled():
+        return {"configured": False, "disabled": True,
+                "error": f"в проекте {P().name} FurkVPN выключен — обходы настраиваются в Remnawave"}
     if furk is None or not furk.is_configured():
         return {"configured": False, "error": "нет FURK_API_KEY в .env"}
     try:
@@ -6721,6 +6813,33 @@ def _family_tg_notify(u: Optional[dict[str, Any]], text: str) -> None:
         print(f"[family] не удалось отправить сообщение: {exc}", flush=True)
 
 
+def _family_revoke_owner_key(owner: Optional[dict[str, Any]], who: str) -> None:
+    """участник ушёл из семьи, но ссылка подписки владельца у него осталась в VPN-клиенте:
+    перевыпускаем ключ владельца, чтобы старая ссылка перестала работать."""
+    if not owner:
+        return
+    try:
+        reset_user_subscription(owner)
+        # устройства ушедшего занимали слоты владельца: отвязываем все, как при обычном перевыпуске
+        try:
+            client, rw = _rw_find_user(get_user(int(owner["id"])) or owner)
+            if client and rw:
+                client.delete_all_user_hwid_devices({"userId": _rw_num_id(rw)})
+        except Exception as exc:  # noqa: BLE001
+            forum.report_error("Семья: не удалось отвязать устройства владельца", f"{type(exc).__name__}: {exc}")
+        for mid in family.member_ids(int(owner["id"])):
+            _family_tg_notify(get_user(mid), "Ключ семейной подписки обновился. Откройте приложение и "
+                                             "добавьте подписку заново на своих устройствах.")
+    except Exception as exc:  # noqa: BLE001
+        forum.report_error("Семья: не удалось перевыпустить ключ владельца",
+                           f"owner={owner.get('id')}: {type(exc).__name__}: {exc}")
+        _family_tg_notify(owner, f"{_esc_html(who)} больше не в вашей семье. Перевыпустите ключ в приложении "
+                                 "(Подписка → Перевыпустить ключ), чтобы старая ссылка перестала работать.")
+        return
+    _family_tg_notify(owner, f"{_esc_html(who)} больше не в вашей семье. Мы перевыпустили ключ, чтобы старая "
+                             "ссылка перестала работать, — обновите подписку на своих устройствах в приложении.")
+
+
 def _family_state(fresh: dict[str, Any]) -> dict[str, Any]:
     """состояние семьи для экрана «Добавить в семью».
 
@@ -6739,7 +6858,8 @@ def _family_state(fresh: dict[str, Any]) -> dict[str, Any]:
         return {"role": "none", "code": None, "members": [], "can_invite": False,
                 "max_members": family.max_members(pid), "owner_name": None}
     return {
-        # код создаём только владельцу с живой подпиской (без подписки он всё равно бесполезен)
+        # код создаём только владельцу с живой подпиской (без подписки он всё равно бесполезен);
+        # запись появляется один раз, когда владелец сам открыл экран семьи, дальше GET — только чтение
         "code": family.code_for(uid, pid) if live else None,
         "members": family.members(uid),
         "max_members": family.max_members(pid),
@@ -6772,8 +6892,13 @@ def app_family_add(body: FamilyInviteBody, user: dict = Depends(require_channel_
     except family.FamilyError as exc:
         raise HTTPException(exc.status, detail={"message": exc.message})
     if target:
-        _family_tg_notify(target, f"Вас пригласили в семейную подписку {_esc_html(P().name)}. "
-                                  "Откройте приложение, чтобы принять приглашение.")
+        # не больше одного сообщения в сутки от одного владельца одному человеку
+        # (цикл «пригласить → удалить» не должен превращаться в рассылку)
+        ok_msg, _ = ratelimit.rate_limit(f"family:msg:{int(fresh['id'])}:{int(target['id'])}", 1, 86400)
+        ok_target, _ = ratelimit.rate_limit(f"family:msg-to:{int(target['id'])}", 5, 86400)
+        if ok_msg and ok_target:
+            _family_tg_notify(target, f"Вас пригласили в семейную подписку {_esc_html(P().name)}. "
+                                      "Откройте приложение, чтобы принять приглашение.")
     return _family_state(get_user(int(fresh["id"])) or fresh)
 
 
@@ -6784,12 +6909,16 @@ def app_family_remove(key: str, user: dict = Depends(require_channel_dep)) -> di
     assert fresh is not None
     if family_owner_for(fresh) is not None:
         raise HTTPException(403, detail={"message": "Вы участник семьи — участников удаляет владелец"})
+    allowed, retry = ratelimit.rate_limit(f"family:del:{int(fresh['id'])}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много изменений. Повторите через {retry} сек."})
     try:
         removed = family.remove_member(int(fresh["id"]), key)
     except family.FamilyError as exc:
         raise HTTPException(exc.status, detail={"message": exc.message})
-    if removed:
+    if removed and removed.get("family_was_active"):
         _family_tg_notify(removed, f"Вас убрали из семейной подписки {_esc_html(P().name)}.")
+        _family_revoke_owner_key(fresh, _user_label(removed))
     return _family_state(get_user(int(fresh["id"])) or fresh)
 
 
@@ -6839,8 +6968,10 @@ def app_family_leave(user: dict = Depends(require_channel_dep)) -> dict[str, Any
     """выйти из семьи: подписка владельца больше не действует."""
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    if not family.leave(int(fresh["id"])):
+    owner_id = family.leave(int(fresh["id"]))
+    if owner_id is None:
         raise HTTPException(400, detail={"message": "Вы не в семье"})
+    _family_revoke_owner_key(get_user(owner_id), _user_label(fresh))
     return {"success": True}
 
 
@@ -7042,6 +7173,9 @@ def _trial_available_for(user_id: int, source: Optional[str] = None) -> bool:
 
 def _bypass_info(user_id: int) -> dict[str, Any]:
     """белые списки: анти-ключ FURK (ссылка, срок, трафик) — как «Ключ обхода» в старом боте."""
+    if not fulfillment.furk_enabled():
+        # в проекте FurkVPN выключен (FGN): обходы в Remnawave, старый анти-ключ не показываем
+        return {"enabled": False, "until": None, "key": None, "available": False}
     wl = fulfillment.user_whitelist({"id": user_id})
     on = bool(wl["active"])
     out: dict[str, Any] = {"enabled": on, "until": wl["until"] if on else None,

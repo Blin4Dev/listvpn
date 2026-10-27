@@ -65,6 +65,8 @@ PROJECT_SETTING_KEYS = frozenset({
     "apiv1_tasks_seeded",
     # семейная подписка: сколько человек в семье вместе с владельцем
     "family_max_members",
+    # сквады Remnawave: у проекта свои (FGN — свои обходы); не задано — берутся общие сети
+    "squad_mapping_vpn", "squad_mapping_trial",
     # фишки проекта (features в project.json): напоминания и подарки
     "notconn_hours", "winback_after_days", "winback_gift_days",
 })

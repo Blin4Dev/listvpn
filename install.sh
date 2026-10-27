@@ -316,10 +316,11 @@ extra_projects() {
         id="$(basename "$d")"
         [[ -f "${d}project.json" && "$id" != "$def" && "$id" =~ ^[a-z][a-z0-9]{0,23}$ ]] && printf '%s\n' "$id"
     done
+    return 0
 }
 project_domain() { get_env_var "$(project_env_prefix "$1")MINIAPP_DOMAIN" .env 2>/dev/null || true; }
 # домены дополнительных проектов (для сертификатов)
-extra_project_domains() { local id d; while read -r id; do [[ -n "$id" ]] || continue; d="$(project_domain "$id")"; [[ -n "$d" ]] && printf '%s\n' "$d"; done < <(extra_projects); }
+extra_project_domains() { local id d; while read -r id; do [[ -n "$id" ]] || continue; d="$(project_domain "$id")"; [[ -n "$d" ]] && printf '%s\n' "$d"; done < <(extra_projects); return 0; }
 
 # спросить домен вебхуков; Enter — текущий (по умолчанию как у мини-приложения).
 # ask_hook_domain <mini> <panel> [текущий]

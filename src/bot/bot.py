@@ -238,7 +238,7 @@ def _send_gift(chat_id: int, raw: str) -> bool:
         return True
     m = info["months"]
     period = {1: "1 месяц", 3: "3 месяца", 6: "6 месяцев", 12: "12 месяцев"}.get(m, f"{m} мес.")
-    extra = " + белые списки" if info["whitelist"] else ""
+    extra = " + белые списки" if (info["whitelist"] and fulfillment.furk_enabled()) else ""
     text = f"🎁 Вам подарок — подписка на {period}{extra}.\n\nКод: <code>{code}</code>"
     markup: dict[str, Any] = {}
     if _miniapp_url():

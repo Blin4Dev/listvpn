@@ -203,8 +203,8 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
     hi = (now + timedelta(seconds=_STAGE_72)).isoformat()
 
     rows = db.fetchall(
-        "SELECT s.id AS sub_id, s.expires_at AS expires_at, u.telegram_id AS telegram_id, "
-        "COALESCE(s.no_renew, 0) AS no_renew "
+        "SELECT s.id AS sub_id, s.user_id AS owner_id, s.type AS sub_type, s.expires_at AS expires_at, "
+        "u.telegram_id AS telegram_id, COALESCE(s.no_renew, 0) AS no_renew "
         "FROM subscriptions s JOIN users u ON u.id = s.user_id "
         "WHERE s.status IN ('Active', 'Expired') AND s.expires_at IS NOT NULL "
         "AND s.expires_at BETWEEN ? AND ? "
@@ -246,6 +246,8 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
         if result is not None:
             _mark_sent(sub_id, stage, exp_raw)
             sent += 1
+            if str(row.get("sub_type") or "vpn") != "trial":
+                sent += _notify_family(api, int(row["owner_id"]), stage, remaining)
         else:
             log(f"[reminders] не удалось отправить {stage} для подписки {sub_id}")
         time.sleep(0.05)  # ~20 msg/s
@@ -253,6 +255,33 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
     if sent:
         log(f"[reminders] отправлено напоминаний: {sent}")
     return sent
+
+
+def _notify_family(api: Callable[..., Any], owner_id: int, stage: str, remaining: float) -> int:
+    """участникам семьи — что общая подписка скоро закончится (продлевает владелец)."""
+    rows = db.fetchall(
+        "SELECT u.telegram_id AS tg FROM family_members f JOIN users u ON u.id = f.member_id "
+        "WHERE f.owner_id = ? AND f.status = 'active' AND u.telegram_id IS NOT NULL "
+        "AND COALESCE(u.is_banned, 0) = 0", (int(owner_id),))
+    if not rows:
+        return 0
+    owner = db.fetchone("SELECT username, first_name FROM users WHERE id = ?", (int(owner_id),)) or {}
+    who = f"@{owner['username']}" if owner.get("username") else (owner.get("first_name") or "владелец")
+    if stage == "expired":
+        text = f"Семейная подписка {projects.current().name} закончилась. Продлить её может {who}."
+    else:
+        hours = max(1, int(remaining // 3600))
+        left = f"{hours // 24} дн." if hours >= 48 else f"{hours} ч."
+        text = f"Семейная подписка {projects.current().name} закончится через {left} Продлить её может {who}."
+    payload: dict[str, Any] = {"text": text, "link_preview_options": {"is_disabled": True}}
+    if _app_url():
+        payload["reply_markup"] = {"inline_keyboard": [[{"text": _open_app(), "web_app": {"url": _app_url()}}]]}
+    n = 0
+    for r in rows:
+        if api("sendMessage", {**payload, "chat_id": int(r["tg"])}) is not None:
+            n += 1
+        time.sleep(0.05)
+    return n
 
 
 # онбординг от first_start_at; любая подписка обрывает
@@ -332,7 +361,9 @@ def run_onboarding_once(api: Callable[..., Any], log: Callable[[str], None] = pr
         "SELECT u.id AS uid, u.telegram_id AS tg, u.first_start_at AS fs FROM users u "
         "WHERE u.telegram_id IS NOT NULL AND COALESCE(u.is_banned, 0) = 0 "
         "AND u.first_start_at IS NOT NULL AND u.first_start_at >= ? "
-        "AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id = u.id) AND u.project_id = ?",
+        "AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id = u.id) "
+        # участник семьи пользуется подпиской владельца — «оформите подписку» ему не шлём
+        "AND NOT EXISTS (SELECT 1 FROM family_members f WHERE f.member_id = u.id AND f.status = 'active') AND u.project_id = ?",
         (lo, projects.current_id()),
     )
     sent = 0
@@ -528,7 +559,9 @@ def run_winback(api: Callable[..., Any], log: Callable[[str], None] = print) -> 
         "SELECT u.id AS uid, u.telegram_id AS tg, MAX(s.expires_at) AS last_exp "
         "FROM users u JOIN subscriptions s ON s.user_id = u.id "
         "WHERE u.project_id = ? AND u.telegram_id IS NOT NULL AND COALESCE(u.is_banned, 0) = 0 "
-        "AND s.expires_at IS NOT NULL GROUP BY u.id "
+        "AND s.expires_at IS NOT NULL "
+        # участнику семьи подарок «давно не виделись» не нужен (заберёт — выпадет из семьи)
+        "AND NOT EXISTS (SELECT 1 FROM family_members f WHERE f.member_id = u.id AND f.status = 'active') GROUP BY u.id "
         "HAVING SUM(CASE WHEN s.type = 'vpn' THEN 1 ELSE 0 END) > 0 "
         "AND MAX(s.expires_at) <= ? AND MAX(s.expires_at) >= ? "
         "AND SUM(CASE WHEN s.status = 'Active' AND s.expires_at > ? THEN 1 ELSE 0 END) = 0 "

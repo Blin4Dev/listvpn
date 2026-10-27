@@ -56,9 +56,20 @@ def _log(msg: str) -> None:
 
 
 def _client_ip(request: Request) -> str:
+    """ip отправителя: заголовкам прокси верим, только если запрос пришёл от своего прокси
+    из внутренней сети (или TRUST_PROXY_HEADERS=1) — иначе X-Real-IP подделывается."""
+    import ipaddress
+    peer = request.client.host if request.client else ""
+    trust = (os.getenv("TRUST_PROXY_HEADERS") or "").strip().lower() in ("1", "true", "yes")
+    try:
+        internal = bool(peer) and not ipaddress.ip_address(peer).is_global
+    except ValueError:
+        internal = False
+    if peer and not internal and not trust:
+        return peer
     return (request.headers.get("x-real-ip")
             or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-            or (request.client.host if request.client else ""))
+            or peer)
 
 
 def _ack(note: str = "") -> JSONResponse:
