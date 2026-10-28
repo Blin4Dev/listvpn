@@ -38,5 +38,5 @@ export const useProjects = () => useContext(ProjectContext);
 export const useProject = () => useContext(ProjectContext).current;
 
 // разделы панели, общие для всей сети (не зависят от выбранного проекта)
-export const NETWORK_PAGES = new Set(['Мониторинг', 'Балансировщик', 'Сотрудники', 'Зарплата', 'Поддержка']);
+export const NETWORK_PAGES = new Set(['Мониторинг', 'Сотрудники', 'Зарплата', 'Поддержка']);
 export const NETWORK_SETTINGS = new Set(['antiabuse', 'squads', 'mail', 'captcha', 'forum', 'backups', 'storage']);

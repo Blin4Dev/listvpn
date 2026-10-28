@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Home, Ticket, DollarSign, Users, Mail, Gift, Percent, Link, Settings, Menu, X, Wallet, Lock, BarChart2, Server, MessageCircle,
-  Shuffle, Eye, UserCog, Coins, Bell, BellOff, ChevronDown, Layers,
+  Eye, UserCog, Coins, Bell, BellOff, ChevronDown, Layers,
 } from 'lucide-react';
 import { UserActionModal } from './components/UserActionModal';
 import { Spinner, ToastContainer } from './components/ui';
@@ -21,7 +21,6 @@ import { StaffPage } from './pages/staff/StaffPage';
 import { SalaryPage } from './pages/staff/SalaryPage';
 import { StatisticsPage } from './pages/Statistics';
 import { SupportPage } from './pages/Support';
-import { BalancerPage } from './pages/Balancer';
 import { TrackingLinksPage } from './pages/TrackingLinks';
 import { UsersPage } from './pages/Users';
 import { WithdrawalsPage } from './pages/Withdrawals';
@@ -74,7 +73,7 @@ export const NAV = [
   { group: 'Пользователи', items: [{ name: 'Пользователи', icon: Users }, { name: 'Выводы', icon: Wallet }] },
   { group: 'Поддержка', items: [{ name: 'Поддержка', icon: MessageCircle }, { name: 'Сотрудники', icon: UserCog }, { name: 'Зарплата', icon: Coins }] },
   { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Ticket }, { name: 'Подарки', icon: Gift }, { name: 'Акции', icon: Percent }, { name: 'Ссылки', icon: Link }] },
-  { group: 'Другое', items: [{ name: 'Мониторинг', icon: Server }, { name: 'Балансировщик', icon: Shuffle }, { name: 'Настройки', icon: Settings }] },
+  { group: 'Другое', items: [{ name: 'Мониторинг', icon: Server }, { name: 'Настройки', icon: Settings }] },
 ];
 
 // пути страниц (f5, назад, прямые ссылки)
@@ -82,7 +81,7 @@ const PAGE_PATHS: Record<string, string> = {
   'Главная': '/', 'Статистика': '/statistics', 'Финансы': '/finance',
   'Пользователи': '/users', 'Поддержка': '/support', 'Выводы': '/withdrawals',
   'Рассылка': '/mailing', 'Промокоды': '/promocodes', 'Подарки': '/gifts', 'Акции': '/promotions', 'Ссылки': '/links',
-  'Мониторинг': '/monitoring', 'Балансировщик': '/balancer', 'Настройки': '/settings', 'Сотрудники': '/staff', 'Зарплата': '/salary',
+  'Мониторинг': '/monitoring', 'Настройки': '/settings', 'Сотрудники': '/staff', 'Зарплата': '/salary',
 };
 export const SETTINGS_TABS = ['project', 'price', 'antiabuse', 'offer', 'privacy', 'squads', 'mail', 'captcha', 'forum', 'backups', 'storage'] as const;
 export type SettingsTab = typeof SETTINGS_TABS[number];
@@ -101,8 +100,6 @@ export function parseRoute(pathname: string, search: string): Route {
     const n = new URLSearchParams(search).get('node');
     return { ...base, page: 'Мониторинг', nodeId: n && /^\d+$/.test(n) ? Number(n) : null };
   }
-  // старый /settings/xbm → балансировщик
-  if (path === '/settings/xbm') return { ...base, page: 'Балансировщик' };
   const st = path.match(/^\/settings(?:\/([a-z]+))?$/);
   if (st) {
     // /settings и старый /settings/prices → цены
@@ -327,7 +324,6 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
               {activePage === 'Подарки' && <GiftsPage onToast={addToast} onOpenUser={(id) => setDetailUserId(id)} />}
               {activePage === 'Акции' && <PromotionsPage onToast={addToast} />}
               {activePage === 'Ссылки' && <TrackingLinksPage onToast={addToast} />}
-              {activePage === 'Балансировщик' && <BalancerPage onToast={addToast} />}
               {activePage === 'Мониторинг' && <MonitoringPage onToast={addToast} nodeId={monNodeId} setNodeId={setMonNodeId} />}
               {activePage === 'Настройки' && <SettingsPage onToast={addToast} tab={settingsTab} onTab={setSettingsTab} />}
               {activePage === 'Сотрудники' && <StaffPage onToast={addToast} />}

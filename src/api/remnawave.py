@@ -152,7 +152,7 @@ class RemnawaveAPI:
         }
         if self.base_url.startswith("http://"):
             # прямое подключение к панели (http://localhost:3000, http://remnawave:3000) мимо HTTPS-прокси:
-            # без этих заголовков Remnawave отклоняет запрос (так же делают SDK Remnawave и xbm)
+            # без этих заголовков Remnawave отклоняет запрос (так же делает SDK Remnawave)
             hdrs["X-Forwarded-For"] = "127.0.0.1"
             hdrs["X-Forwarded-Proto"] = "https"
         if headers:

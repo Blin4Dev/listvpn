@@ -85,11 +85,6 @@ except ImportError:  # pragma: no cover
     import teamchat  # type: ignore
 
 try:
-    from . import xbm  # type: ignore
-except ImportError:  # pragma: no cover
-    import xbm  # type: ignore
-
-try:
     from . import grace  # type: ignore
     from . import names  # type: ignore
 except ImportError:  # pragma: no cover
@@ -5215,9 +5210,15 @@ def merge_accounts(keep_id: int, drop_id: int) -> dict[str, Any]:
                 if drop_rw_id and drop_rw_id != keep_rw_id:
                     client.delete_user(drop_rw_id)
                 if final and keep_rw_id:
+                    upd: dict[str, Any] = {}
+                    if final.get("type") != "trial":  # стала платной → лимит и сквады платной, а не пробной
+                        upd["traffic_limit_bytes"] = int(final.get("traffic_limit") or 0) * fulfillment.GB
+                        sq = db.loads(final.get("squads_json"), []) or fulfillment.vpn_squads()
+                        if sq:
+                            upd["active_internal_squads"] = sq
                     client.update_user(id=keep_rw_id, expire_at=parse_iso(final["expires_at"]),
                                        hwid_device_limit=int(final.get("devices_limit") or 1), status="ACTIVE",
-                                       email=fresh.get("email") or None)
+                                       email=fresh.get("email") or None, **upd)
                 elif final and not keep_rw_id:
                     _rw_sync_expiry(fresh)
         except Exception as exc:  # noqa: BLE001
@@ -7173,15 +7174,19 @@ def _trial_available_for(user_id: int, source: Optional[str] = None) -> bool:
 
 def _bypass_info(user_id: int) -> dict[str, Any]:
     """белые списки: анти-ключ FURK (ссылка, срок, трафик) — как «Ключ обхода» в старом боте."""
-    if not fulfillment.furk_enabled():
+    # проект — по самому пользователю, а не по домену запроса: иначе запрос Batman,
+    # пришедший с «чужого» домена/без X-Project, считался FGN и ключ обхода пропадал
+    pid = projects.of_user(int(user_id)) or projects.current_id()
+    if not fulfillment.furk_enabled(pid):
         # в проекте FurkVPN выключен (FGN): обходы в Remnawave, старый анти-ключ не показываем
         return {"enabled": False, "until": None, "key": None, "available": False}
     wl = fulfillment.user_whitelist({"id": user_id})
     on = bool(wl["active"])
+    avail = fulfillment.whitelist_available(pid)
     out: dict[str, Any] = {"enabled": on, "until": wl["until"] if on else None,
                            "key": wl["key"] if on else None,
-                           "available": fulfillment.whitelist_available()}
-    if on and wl["key_id"] and fulfillment.whitelist_available():
+                           "available": avail}
+    if on and wl["key_id"] and avail:
         out.update(fulfillment.furk.traffic(str(wl["key_id"])))
     if on and not out.get("limit_bytes") and not out.get("unlimited"):
         # трафик у FURK не узнали — показываем лимит ключа (500 ГБ), а не дату
@@ -8655,117 +8660,6 @@ def _autofine_notify(st: dict[str, Any], text: str) -> None:
         pass
 
 
-def _xbm_client():
-    client = _rw_client()
-    if client is None:
-        raise xbm.XbmError("Remnawave не настроена — хосты взять неоткуда", 503)
-    return client
-
-
-def _xbm_hosts_raw() -> Any:
-    return _xbm_client().get_hosts()
-
-
-def _xbm_templates() -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
-    """шаблоны xray json из remnawave."""
-    try:
-        return xbm.normalize_templates(_xbm_client().get_subscription_templates()), None
-    except xbm.XbmError as e:
-        return None, e.message
-    except Exception as exc:  # noqa: BLE001
-        return None, f"Не удалось получить шаблоны из Remnawave: {type(exc).__name__}"
-
-
-def _xbm_sync(hosts: Optional[list[dict[str, Any]]] = None, strict: bool = False) -> dict[str, Any]:
-    client = _xbm_client()
-    return xbm.sync(client.get_hosts, client.get_subscription_templates, client.get_subscription_template,
-                    hosts=hosts, strict=strict)
-
-
-def _xbm_state(hosts: Optional[list[dict[str, Any]]] = None, error: Optional[str] = None,
-               templates: Optional[list[dict[str, Any]]] = None, templates_error: Optional[str] = None) -> dict[str, Any]:
-    s = xbm.get_settings()
-    hosts = hosts or []
-    in_group = {u: g["id"] for g in s["groups"] for u in g["hosts"]}
-    return {
-        "xbm": xbm.health(),
-        "configured": xbm.configured(),
-        "settings": s,
-        "hosts": [{k: h[k] for k in ("uuid", "remark", "address", "port", "disabled", "hidden", "description")}
-                  | {"group": in_group.get(h["uuid"])} for h in hosts],
-        "templates": [{"uuid": t["uuid"], "name": t["name"]} for t in templates] if templates is not None else None,
-        "templates_error": templates_error,
-        "duplicates": xbm.duplicate_remarks(hosts),
-        "last_sync": xbm.last_sync(),
-        "error": error,
-        "limits": {"name": xbm.MAX_NAME, "description": xbm.MAX_DESCRIPTION, "groups": xbm.MAX_GROUPS},
-    }
-
-
-@app.get("/api/panel/xbm")
-def panel_xbm_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
-    try:
-        hosts = xbm.normalize_hosts(_xbm_hosts_raw())
-    except xbm.XbmError as e:
-        return _xbm_state([], e.message)
-    except Exception as exc:  # noqa: BLE001
-        return _xbm_state([], f"Не удалось получить хосты из Remnawave: {type(exc).__name__}")
-    tpls, tpl_err = _xbm_templates()
-    return _xbm_state(hosts, templates=tpls, templates_error=tpl_err)
-
-
-@app.put("/api/panel/xbm")
-def panel_xbm_save(body: dict[str, Any] = Body(...), _: dict = Depends(require_owner)) -> dict[str, Any]:
-    if len(json.dumps(body, ensure_ascii=False)) > 256_000:
-        raise HTTPException(413, detail={"message": "Слишком большие настройки"})
-    try:
-        hosts = xbm.normalize_hosts(_xbm_hosts_raw())
-        tpls, tpl_err = _xbm_templates()
-        with xbm.save_lock:  # сверка не вклинится между save и rollback
-            prev = db.get_setting(xbm.SETTINGS_KEY, "")
-            xbm.save_settings(xbm.validate(body, hosts, tpls))
-            try:
-                _xbm_sync(hosts, strict=True)
-            except Exception:
-                # panel.json не записался: откатываем настройки в панели
-                db.set_setting(xbm.SETTINGS_KEY, prev)
-                raise
-    except xbm.XbmError as e:
-        raise HTTPException(e.status, detail={"message": e.message})
-    except OSError as exc:
-        raise HTTPException(500, detail={"message": f"Не удалось записать настройки для XBM: {exc.strerror or exc}"})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, detail={"message": f"Remnawave не ответила: {type(exc).__name__}"})
-    return _xbm_state(hosts, templates=tpls, templates_error=tpl_err)
-
-
-@app.get("/api/panel/xbm/preview")
-def panel_xbm_preview(user_id: int = Query(..., ge=1, le=2 ** 62), _: dict = Depends(require_owner)) -> dict[str, Any]:
-    """как подписку юзера увидит happ через xbm."""
-    sub = db.fetchone("SELECT short_uuid FROM subscriptions WHERE user_id = ? AND status = 'Active' AND short_uuid IS NOT NULL "
-                      "AND short_uuid != '' ORDER BY id DESC LIMIT 1", (int(user_id),))
-    if not sub:
-        raise HTTPException(404, detail={"message": "У пользователя нет активной подписки"})
-    # hwid уже привязанного устройства, если есть
-    hwid = None
-    user = get_user(int(user_id))
-    try:
-        client, rw = _rw_find_user(user) if user else (None, None)
-        if client and rw:
-            raw = unwrap_rw(client.get_user_hwid_devices(_rw_num_id(rw)))
-            items = raw.get("devices") if isinstance(raw, dict) else raw
-            if items:
-                hwid = str((items[0] or {}).get("hwid") or "") or None
-    except Exception:  # noqa: BLE001
-        hwid = None
-    try:
-        return {"locations": xbm.preview(str(sub["short_uuid"]), hwid=hwid)}
-    except xbm.XbmError as e:
-        raise HTTPException(e.status, detail={"message": e.message})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(502, detail={"message": f"XBM недоступен: {type(exc).__name__}"})
-
-
 _HOST_RX = re.compile(r"^(?=.{4,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$")
 
 
@@ -8875,108 +8769,6 @@ def panel_mail_send_test(body: dict[str, Any] = Body(...), _: dict = Depends(req
     return {"ok": True}
 
 
-@app.get("/api/panel/xbm/setup")
-def panel_xbm_setup_info(_: dict = Depends(require_owner)) -> dict[str, Any]:
-    """мастер xbm: жив ли помощник, подсказки полей."""
-    from urllib.parse import urlsplit
-    sub = urlsplit(_env("REMWAVE_SUB_PUBLIC_URL") or "")
-    panel = (_env("REMWAVE_PANEL_URL") or "").rstrip("/") or "http://remnawave:3000"
-    return {"runner": xbm.runner_alive(), "xbm": xbm.health(),
-            "defaults": {"remnawave_url": panel, "sub_domain": sub.hostname or "",
-                         "conf": "/opt/remnawave/nginx/nginx.conf", "container": "remnawave-nginx",
-                         "network": "remnawave-network"}}
-
-
-@app.post("/api/panel/xbm/setup/{action}")
-def panel_xbm_setup_run(action: str, body: dict[str, Any] = Body(default={}), _: dict = Depends(require_owner)) -> dict[str, Any]:
-    params = {k: str(v)[:260] for k, v in (body or {}).items()
-              if k in ("remnawave_url", "sub_domain", "network", "conf", "container") and v not in (None, "")}
-    if action == "xbm_connect":
-        # чья-нибудь подписка: проверить nginx после правки
-        tok = xbm.sample_short_uuid() or ""
-        if re.fullmatch(r"[A-Za-z0-9_-]{4,128}", tok):
-            params["token"] = tok
-    try:
-        return {"job": xbm.submit_job(action, params)}
-    except xbm.XbmError as e:
-        raise HTTPException(e.status, detail={"message": e.message})
-
-
-@app.get("/api/panel/xbm/setup/jobs/{job_id}")
-def panel_xbm_setup_job(job_id: str, _: dict = Depends(require_owner)) -> dict[str, Any]:
-    try:
-        return xbm.job_result(job_id)
-    except xbm.XbmError as e:
-        raise HTTPException(e.status, detail={"message": e.message})
-
-
-@app.get("/api/panel/xbm/response-rules")
-def panel_xbm_rules(_: dict = Depends(require_owner)) -> dict[str, Any]:
-    return {"text": xbm.response_rules_text()}
-
-
-@app.post("/api/panel/xbm/check")
-def panel_xbm_check(_: dict = Depends(require_owner)) -> dict[str, Any]:
-    """проверка response rules: xbm отдаёт xray json (заглушка тоже ok)."""
-    if not xbm.health().get("running"):
-        raise HTTPException(409, detail={"message": "XBM не запущен"})
-    subs = xbm.sample_subscriptions(8)
-    if not subs:
-        raise HTTPException(409, detail={"message": "Нет ни одной активной подписки — проверьте позже"})
-
-    def _hwid_for(user_id: int) -> Optional[str]:
-        user = get_user(int(user_id))
-        try:
-            client, rw = _rw_find_user(user) if user else (None, None)
-            if not client or not rw:
-                return None
-            raw = unwrap_rw(client.get_user_hwid_devices(_rw_num_id(rw)))
-            items = raw.get("devices") if isinstance(raw, dict) else raw
-            if items:
-                return str((items[0] or {}).get("hwid") or "") or None
-        except Exception:  # noqa: BLE001
-            return None
-        return None
-
-    last_err: Optional[xbm.XbmError] = None
-    for sub in subs:
-        su = str(sub.get("short_uuid") or "")
-        hwid = _hwid_for(int(sub["user_id"])) if sub.get("user_id") is not None else None
-        try:
-            return xbm.check_xray_json(su, hwid=hwid)
-        except xbm.XbmError as e:
-            last_err = e
-            if e.status == 429:
-                raise HTTPException(429, detail={"message": e.message})
-            # не json / не xray — rules точно не те, дальше пробовать бессмысленно
-            if e.status == 502 and "не Xray JSON" in (e.message or ""):
-                raise HTTPException(502, detail={"message": e.message})
-            continue
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(502, detail={"message": f"XBM недоступен: {type(exc).__name__}"})
-    if last_err:
-        raise HTTPException(last_err.status, detail={"message": last_err.message})
-    raise HTTPException(502, detail={"message": "XBM недоступен"})
-
-
-def _xbm_sync_loop() -> None:
-    """раз в минуту: пересобрать panel.json для xbm."""
-    last_err = None
-    time.sleep(5)
-    while True:
-        try:
-            xbm.ensure_default_file()
-            if provisioning.is_configured():
-                _xbm_sync()
-                last_err = None
-        except Exception as exc:  # noqa: BLE001
-            err = f"{type(exc).__name__}: {getattr(exc, 'message', exc)}"
-            if err != last_err:  # не спамим одной ошибкой раз в минуту
-                print(f"[xbm] sync failed: {err}", flush=True)
-            last_err = err
-        time.sleep(60)
-
-
 @app.on_event("startup")
 def _clean_usernames() -> None:
     """разово чиним ники, попавшие до валидации."""
@@ -8987,11 +8779,6 @@ def _clean_usernames() -> None:
                 db.execute("UPDATE users SET username = ? WHERE id = ?", (ok, r["id"]))
     except Exception as exc:  # noqa: BLE001
         print(f"[names] cleanup failed: {exc}", flush=True)
-
-
-@app.on_event("startup")
-def _xbm_startup() -> None:
-    threading.Thread(target=_xbm_sync_loop, name="xbm-sync", daemon=True).start()
 
 
 @app.on_event("startup")

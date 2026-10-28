@@ -252,7 +252,7 @@ API_DOMAIN="${API_DOMAIN:-}"
 # порт вебхука (ЮKassa и др.) на 127.0.0.1 — WEBHOOK_PORT в .env, по умолчанию 5000
 WEBHOOK_PORT="${WEBHOOK_PORT:-5000}"
 # порты, занятые сервисами BatmanVPN на 127.0.0.1 (+80 для сертификатов/редиректа)
-RESERVED_PORTS="80 3000 4100 ${WEBHOOK_PORT} 8000 9741 9742"
+RESERVED_PORTS="80 3000 ${WEBHOOK_PORT} 8000 9741 9742"
 
 # https://host или https://host:порт
 pub_url() { if [[ "$HTTPS_PORT" == "443" ]]; then printf 'https://%s' "$1"; else printf 'https://%s:%s' "$1" "$HTTPS_PORT"; fi; }
@@ -357,7 +357,7 @@ load_webhook_port() {
         log_error "WEBHOOK_PORT=${p} в .env: нужен порт от 1024 до 65535."
         return 1
     fi
-    if [[ " 80 3000 4100 8000 9741 9742 ${HTTPS_PORT} " == *" ${p} "* ]]; then
+    if [[ " 80 3000 8000 9741 9742 ${HTTPS_PORT} " == *" ${p} "* ]]; then
         log_error "WEBHOOK_PORT=${p} в .env совпадает с портом другого сервиса BatmanVPN — выберите другой."
         return 1
     fi
@@ -372,7 +372,7 @@ load_webhook_port() {
         return 1
     fi
     WEBHOOK_PORT="$p"
-    RESERVED_PORTS="80 3000 4100 ${WEBHOOK_PORT} 8000 9741 9742"
+    RESERVED_PORTS="80 3000 ${WEBHOOK_PORT} 8000 9741 9742"
 }
 
 # спросить порт HTTPS; Enter — 443
@@ -1487,30 +1487,53 @@ replace_domains_flow() {
     fi
 }
 
-# host helper: задания панели (xbm и т.п.) через host_runner.py, без сетевых портов
-install_host_runner() {
-    local unit=/etc/systemd/system/blinvpn-host.service
-    command -v python3 >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends python3 >/dev/null
-    sudo tee "$unit" >/dev/null <<UNIT
-[Unit]
-Description=BatmanVPN host helper (задания панели)
-After=docker.service
-Wants=docker.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 "${PWD}/src/core/host_runner.py" --project "${PWD}"
-Restart=always
-RestartSec=5
-NoNewPrivileges=yes
-PrivateTmp=yes
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-    sudo systemctl daemon-reload
-    sudo systemctl enable blinvpn-host.service >/dev/null 2>&1 || true
-    sudo systemctl restart blinvpn-host.service || log_warn "Не удалось запустить помощник blinvpn-host — мастер XBM в панели будет недоступен."
+# XBM удалён из BatmanVPN: убрать его следы со старых установок (контейнер, помощник, правку nginx подписки)
+remove_legacy_xbm() {
+    if [[ -f /etc/systemd/system/blinvpn-host.service ]]; then
+        sudo systemctl disable --now blinvpn-host.service >/dev/null 2>&1 || true
+        sudo rm -f /etc/systemd/system/blinvpn-host.service
+        sudo systemctl daemon-reload || true
+    fi
+    sudo docker rm -f blinvpn-xbm >/dev/null 2>&1 || true
+    local prof conf ng
+    prof="$(get_env_var COMPOSE_PROFILES .env 2>/dev/null || true)"
+    if [[ ",${prof}," == *",xbm,"* ]]; then
+        prof="$(printf '%s' "$prof" | tr ',' '\n' | grep -vx 'xbm' | paste -sd, - || true)"
+        set_env_var COMPOSE_PROFILES "$prof"
+    fi
+    conf="$(get_env_var XBM_NGINX_CONF .env 2>/dev/null || true)"; conf="${conf:-/opt/remnawave/nginx/nginx.conf}"
+    ng="$(get_env_var XBM_NGINX_CONTAINER .env 2>/dev/null || true)"; ng="${ng:-remnawave-nginx}"
+    if sudo test -f "$conf" && sudo grep -q 'BLINVPN-XBM' "$conf"; then
+        log_info "Убираю XBM из nginx страницы подписки (${conf})…"
+        local bak="${conf}.blinvpn-noxbm-$(date +%Y%m%d-%H%M%S).bak"
+        sudo cp -p "$conf" "$bak"
+        if sudo python3 - "$conf" <<'PY'
+import re, sys
+p = sys.argv[1]; M = "BLINVPN-XBM"
+t = open(p, encoding="utf-8", newline="").read()
+o = re.sub(rf"(?ms)^# {M} begin-map[^\n]*\n.*?^# {M} end-map[^\n]*\n\r?\n", "", t, count=1)
+o = re.sub(rf"(?ms)^[ \t]*# {M} begin-fallback[^\n]*\n.*?^[ \t]*# {M} end-fallback[^\n]*\n", "", o, count=1)
+o = re.sub(rf"(?m)^[ \t]*[^#\n]*# {M}\r?\n", "", o)
+o = re.sub(rf"(?m)^([ \t]*)# {M} orig: ([^\n]*)\n", r"\1\2\n", o)
+if M in o:
+    sys.exit(1)
+with open(p, "r+", encoding="utf-8", newline="") as f:  # на месте: файл примонтирован в контейнер
+    f.seek(0); f.write(o); f.truncate()
+PY
+        then
+            if sudo docker exec "$ng" nginx -t >/dev/null 2>&1; then
+                sudo docker exec "$ng" nginx -s reload >/dev/null 2>&1 || true
+                log_success "✔ подписка снова идёт напрямую в Remnawave (копия: ${bak})."
+            else
+                sudo cp -p "$bak" "$conf"
+                log_warn "nginx -t не прошёл — вернул ${conf} как было. Уберите строки с BLINVPN-XBM вручную."
+            fi
+        else
+            log_warn "Не удалось убрать XBM из ${conf} — уберите строки с BLINVPN-XBM вручную (копия: ${bak})."
+        fi
+    fi
+    rm -rf ./data/xbm 2>/dev/null || sudo rm -rf ./data/xbm 2>/dev/null || true
+    return 0
 }
 
 # ═══════════════ панель на отдельном сервере ═══════════════
@@ -2152,6 +2175,7 @@ project_setup_flow() {
     printf "  • Настройки → Проект: токен бота, канал, ЮKassa (бот подключится сам, без перезапуска)\n"
     printf "  • Настройки → Цены: тарифы и пробный период (сейчас — копия основного проекта)\n"
     [[ -n "$dom" ]] && printf "  • @BotFather → Menu Button / Web App: ${CYAN}%s${NC}\n" "$(pub_url "$dom")"
+    return 0
 }
 
 REPO_URL="${BLINVPN_REPO_URL:-https://github.com/Blin4Dev/listvpn.git}"
@@ -2188,7 +2212,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
         dc up -d
         fix_container_data_permissions
         dc restart api webhook bot monitor 2>/dev/null || true
-        install_host_runner
+        remove_legacy_xbm
 
         _upd_mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || get_env_var WEBHOOK_DOMAIN .env 2>/dev/null || true)"
         _upd_panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
@@ -2413,7 +2437,7 @@ fi
 dc up -d
 fix_container_data_permissions
 dc restart api webhook bot monitor 2>/dev/null || true
-install_host_runner
+remove_legacy_xbm
 
 PANEL_DEPLOY_FAILED=0
 if [[ $PANEL_REMOTE -eq 1 ]]; then

@@ -1,7 +1,0 @@
-node_modules
-*.bak*
-*.log
-examples
-README.md
-.git
-.gitignore
