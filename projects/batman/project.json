@@ -1,6 +1,7 @@
 {
   "id": "batman",
   "name": "BatmanVPN",
+  "order": 2,
   "channel": {
     "id": "@BATMANNETWORK",
     "url": "https://t.me/BATMANNETWORK"

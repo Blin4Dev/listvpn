@@ -1957,8 +1957,12 @@ def active_discount_for_user(user_id: int) -> Optional[dict[str, Any]]:
             "promocode_id": row.get("promocode_id"),
         }
     global_disc = active_global_discount()
+    # компенсация из панели: разовая скидка на следующую покупку (тратится при оплате, если сработала она)
+    comp_row = services.active_compensation(user_id)
+    comp = {"percent": float(comp_row["discount_percent"]), "expires_at": None, "code": None,
+            "name": "Компенсация", "compensation_id": int(comp_row["id"])} if comp_row else None
 
-    candidates = [d for d in (personal, global_disc) if d and d["percent"] > 0]
+    candidates = [d for d in (personal, global_disc, comp) if d and d["percent"] > 0]
     if not candidates:
         return None
     return max(candidates, key=lambda d: d["percent"])
@@ -1990,6 +1994,9 @@ def effective_discount(user_id: int) -> dict[str, Any]:
         out["code"] = base_disc.get("code")
         out["name"] = base_disc.get("name")
         out["expires_at"] = base_disc.get("expires_at")
+        if base_disc.get("compensation_id"):
+            out["compensation_id"] = base_disc["compensation_id"]
+            out["one_time"] = True  # только на одну покупку
     return out
 
 
@@ -2002,7 +2009,11 @@ def apply_promo_to_user(user_id: int, code: str, *, by_admin: bool = False) -> d
 
 
 def remove_user_promo(user_id: int, code: Optional[str] = None) -> int:
-    """снимает скидку у юзера (админ); code=только этот промо."""
+    """снимает скидку у юзера (админ); code=только этот промо; @compensation — скидку компенсации."""
+    if code and code.strip().lower() == "@compensation":
+        cur = db.execute("UPDATE compensations SET used_at = ?, used_payment_id = 'removed' "
+                         "WHERE user_id = ? AND used_at IS NULL AND discount_percent > 0", (iso(), user_id))
+        return cur.rowcount if hasattr(cur, "rowcount") else 0
     if code:
         promo = db.fetchone("SELECT id FROM promocodes WHERE code = ? AND project_id = "
                             "(SELECT project_id FROM users WHERE id = ?)", (code.upper().strip(), user_id))
@@ -3104,6 +3115,20 @@ class ProjectConfigBody(BaseModel):
     winback_gift_days: Optional[int] = Field(None, ge=1, le=30)
     # семейная подписка: сколько человек вместе с владельцем
     family_max_members: Optional[int] = Field(None, ge=2, le=20)
+    # сайт проекта: установщики для компьютера ("" — очистить)
+    desktop_windows_url: Optional[str] = Field(None, max_length=500)
+    desktop_macos_url: Optional[str] = Field(None, max_length=500)
+    desktop_version: Optional[str] = Field(None, max_length=40)
+
+
+DESKTOP_KEYS = ("desktop_windows_url", "desktop_macos_url", "desktop_version")
+
+
+def _desktop_info(pid: Optional[str] = None) -> dict[str, str]:
+    """ссылки на приложения для компьютера (сайт проекта, Настройки → Проект)."""
+    vals = db.get_settings(list(DESKTOP_KEYS), project=pid)
+    return {"windows_url": vals.get("desktop_windows_url", ""), "macos_url": vals.get("desktop_macos_url", ""),
+            "version": vals.get("desktop_version", "")}
 
 
 # значения по умолчанию для фишек проекта
@@ -3144,6 +3169,7 @@ def _project_config_view(pid: str) -> dict[str, Any]:
         "features": {k: bool(v) for k, v in (p.cfg.get("features") or {}).items()},
         "growth": {k: int(float(db.get_setting(k, str(d), project=pid) or d)) for k, d in GROWTH_DEFAULTS.items()},
         "family_max_members": int(float(db.get_setting("family_max_members", "5", project=pid) or 5)),
+        "desktop": _desktop_info(pid),
     }
 
 
@@ -3222,6 +3248,15 @@ def panel_project_config_put(body: ProjectConfigBody, _: dict = Depends(require_
             db.set_setting(k, str(int(v)), project=pid)
     if body.family_max_members is not None:
         db.set_setting("family_max_members", str(int(body.family_max_members)), project=pid)
+    for key in ("desktop_windows_url", "desktop_macos_url"):
+        v = getattr(body, key)
+        if v is not None:
+            v = v.strip()
+            if v and not re.fullmatch(r"https://[^\s\"'<>]+", v):
+                raise HTTPException(400, detail={"message": "Ссылка на установщик должна начинаться с https://"})
+            db.set_setting(key, v, project=pid)
+    if body.desktop_version is not None:
+        db.set_setting("desktop_version", body.desktop_version.strip(), project=pid)
     return _project_config_view(pid)
 
 
@@ -4353,6 +4388,7 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "moderation": moderation.for_user(user_id),
         "aa_warning": _aa_warning(user_id),
         "discount": active_discount_for_user(user_id),
+        "compensations": services.compensations_for_user(user_id),
         "promo_activations": [
             {
                 "id": a["id"],
@@ -4406,7 +4442,7 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
         # внутреннего баланса нет, старые действия отключены
         raise HTTPException(400, detail={"message": "Внутреннего баланса нет — используйте реферальный баланс"})
     if action == "EXTEND_ALL":
-        # одной кнопкой: VPN + ключ обхода до той же даты (features.single_renew)
+        # одной кнопкой: VPN + ключ обхода до той же даты (во всех проектах)
         try:
             all_days = int(float(value or 0))
         except (TypeError, ValueError):
@@ -4415,9 +4451,12 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
             raise HTTPException(400, detail={"message": "Дней: от 1 до 1095"})
         grant_days_all(user_id, all_days, "panel")
     elif action == "EXTEND_SUB":
-        extend_user_sub(user_id, int(float(value or 0)), body.subscription_id)
+        days_sub = int(float(value or 0))
+        extend_user_sub(user_id, days_sub, body.subscription_id)
         _rw_sync_expiry(user)
-        fulfillment.sync_whitelist_to_vpn_bg([user_id], "panel")  # единая подписка: обход до той же даты
+        if days_sub > 0:
+            # единая подписка: ключ обхода продлевается (или выдаётся) до той же даты, что и VPN
+            _bypass_follow_vpn(user_id, "panel")
     elif action == "REDUCE_SUB":
         extend_user_sub(user_id, -int(float(value or 0)), body.subscription_id)
         _rw_sync_expiry(user)
@@ -4699,7 +4738,7 @@ def _delete_user_keep_history(user_id: int) -> None:
         with db.transaction() as tx:
             tx.execute("UPDATE users SET referred_by = NULL WHERE referred_by = ?", (user_id,))
             for table in ("subscriptions", "app_sessions", "promocode_activations", "onboarding_reminders",
-                          "trial_checks", "moderation_events"):
+                          "trial_checks", "moderation_events", "compensations"):
                 try:
                     tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 except Exception:  # noqa: BLE001 — таблицы может не быть в старой БД
@@ -4720,8 +4759,8 @@ def _delete_user_keep_history(user_id: int) -> None:
 
 def _action_notify_text(action: str, value: Any) -> str:
     a = action.upper()
-    if a == "EXTEND_SUB":
-        return f"✅ Ваша подписка VPN продлена на {int(float(value or 0))} дн."
+    if a in ("EXTEND_SUB", "EXTEND_ALL"):
+        return f"✅ Ваша подписка продлена на {int(float(value or 0))} дн."
     if a == "EXTEND_BYPASS":
         return f"✅ Ключ обхода продлён на {int(float(value or 0))} дн."
     if a == "REDUCE_SUB":
@@ -5134,6 +5173,8 @@ def merge_accounts(keep_id: int, drop_id: int) -> dict[str, Any]:
             final_sub_id = int(ds["id"])
         elif ks:
             final_sub_id = int(ks["id"])
+        # компенсации (и неиспользованная скидка) переходят на keep
+        db.execute("UPDATE compensations SET user_id = ? WHERE user_id = ?", (keep_id, drop_id))
         # переписку поддержки сливаем в один чат
         kc = db.fetchone("SELECT id FROM support_chats WHERE user_id = ?", (keep_id,))
         dc = db.fetchone("SELECT id FROM support_chats WHERE user_id = ?", (drop_id,))
@@ -5232,6 +5273,126 @@ def merge_accounts(keep_id: int, drop_id: int) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     return {"merged": True, **preview}
+
+
+# ── компенсация: +1 день к подписке (если есть, даже истёкшей) и разовая скидка 7% на следующую покупку ──
+# одному пользователю — любой сотрудник (и поддержка), всем — только админ и куратор
+COMPENSATION_COOLDOWN_SEC = 600  # защита от двойного нажатия
+_mass_comp_running: set[str] = set()  # проекты, где сейчас идёт компенсация всем
+_mass_comp_lock = threading.Lock()
+
+
+class CompensateBody(BaseModel):
+    notify: bool = True
+
+
+def _compensation_text(days_applied: bool) -> str:
+    pct = f"{services.COMPENSATION_PERCENT:g}%"
+    gift = (f"+{_days_ru(services.COMPENSATION_DAYS)} к подписке и скидку {pct} на следующую покупку" if days_applied
+            else f"скидку {pct} на следующую покупку")
+    return f"🎁 Компенсация от {P().name}: дарим {gift}. Спасибо, что остаётесь с нами!"
+
+
+def _compensate_user(user: dict[str, Any], p: dict[str, Any], *, mass: bool = False) -> dict[str, Any]:
+    """начислить компенсацию: дни — к последней подписке (истёкшая оживает на день), скидка — на одну покупку."""
+    uid = int(user["id"])
+    days = services.COMPENSATION_DAYS
+    sub = db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND status NOT IN ('Deleted', 'Banned') AND expires_at IS NOT NULL "
+        "ORDER BY expires_at DESC, id DESC LIMIT 1", (uid,))
+    until = None
+    if sub:
+        now = utcnow()
+        base = parse_iso(sub.get("expires_at")) or now
+        new_exp = max(base, now) + timedelta(days=days)
+        db.execute("UPDATE subscriptions SET expires_at = ?, status = 'Active' WHERE id = ?", (iso(new_exp), sub["id"]))
+        until = iso(new_exp)
+        sync_user_status_from_subs(uid)
+        _rw_sync_expiry(get_user(uid) or user)
+        # единая подписка: ключ обхода (если есть) — до той же даты
+        if mass:
+            try:
+                fulfillment.sync_whitelist_to_vpn(uid, "comp")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[whitelist] user {uid}: {exc}", flush=True)
+        else:
+            fulfillment.sync_whitelist_to_vpn_bg([uid], "comp")
+    cid = services.record_compensation(uid, days=days, days_applied=bool(sub), percent=services.COMPENSATION_PERCENT,
+                                       mass=mass, actor=p.get("actor"), actor_name=p.get("name"))
+    return {"id": cid, "days_applied": bool(sub), "days": days if sub else 0, "expires_at": until,
+            "discount_percent": services.COMPENSATION_PERCENT}
+
+
+@app.post("/api/panel/users/{user_id}/compensate")
+def panel_user_compensate(user_id: int, body: Optional[CompensateBody] = None,
+                          p: dict = Depends(require_panel)) -> dict[str, Any]:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    if user.get("is_banned"):
+        raise HTTPException(400, detail={"message": "Аккаунт заблокирован — компенсация не выдаётся"})
+    if services.recent_compensation(user_id, COMPENSATION_COOLDOWN_SEC):
+        raise HTTPException(409, detail={"message": "Компенсация этому пользователю уже выдана только что"})
+    res = _compensate_user(user, p)
+    delivery = _notify_user(get_user(user_id) or user, _compensation_text(res["days_applied"])) \
+        if (body is None or body.notify) else None
+    msg = (f"+{_days_ru(res['days'])} к подписке и скидка {res['discount_percent']:g}% на следующую покупку"
+           if res["days_applied"] else f"Подписки нет — выдана скидка {res['discount_percent']:g}% на следующую покупку")
+    return {"success": True, **res, "message": msg, "delivery": delivery}
+
+
+def _mass_compensate_worker(user_ids: list[int], p: dict[str, Any], notify: bool) -> None:
+    try:
+        _mass_compensate_run(user_ids, p, notify)
+    finally:
+        with _mass_comp_lock:
+            _mass_comp_running.discard(db.pid())
+
+
+def _mass_compensate_run(user_ids: list[int], p: dict[str, Any], notify: bool) -> None:
+    done = with_days = sent = failed = 0
+    for uid in user_ids:
+        try:
+            user = get_user(uid)
+            if not user or user.get("is_banned"):
+                continue
+            res = _compensate_user(user, p, mass=True)
+            done += 1
+            with_days += 1 if res["days_applied"] else 0
+            if notify and user.get("telegram_id"):
+                if _notify_user(get_user(uid) or user, _compensation_text(res["days_applied"])).get("telegram"):
+                    sent += 1
+                time.sleep(0.05)  # лимит Telegram ~30 сообщений/сек
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            print(f"[compensation] user {uid}: {type(exc).__name__}: {exc}", flush=True)
+    summary = (f"{P().name}: компенсация выдана {done} пользователям (дни — {with_days}), "
+               f"уведомлений {sent}{f', ошибок {failed}' if failed else ''}")
+    print(f"[compensation] {summary}", flush=True)
+    try:
+        forum.send("errors", f"🎁 {_esc_html(summary)} · {_esc_html(p.get('name') or '')}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@app.post("/api/panel/users/mass-compensate")
+def panel_mass_compensate(body: Optional[CompensateBody] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    if p.get("role") not in ("owner", "curator"):
+        raise HTTPException(403, detail={"message": "Компенсацию всем выдают только администратор и куратор"})
+    since = iso(utcnow() - timedelta(seconds=COMPENSATION_COOLDOWN_SEC))
+    busy = HTTPException(409, detail={"message": "Компенсация всем уже выдаётся — подождите несколько минут"})
+    with _mass_comp_lock:
+        if db.pid() in _mass_comp_running or db.fetchone(
+                "SELECT 1 FROM compensations WHERE mass = 1 AND project_id = ? AND created_at > ? LIMIT 1", (db.pid(), since)):
+            raise busy
+        _mass_comp_running.add(db.pid())
+    rows = db.fetchall("SELECT id FROM users WHERE project_id = ? AND COALESCE(is_banned, 0) = 0 ORDER BY id", (db.pid(),))
+    ids = [int(r["id"]) for r in rows]
+    notify = body is None or body.notify
+    threading.Thread(target=projects.bind(_mass_compensate_worker), args=(ids, dict(p), notify),
+                     name="mass-compensate", daemon=True).start()
+    return {"success": True, "affected": len(ids), "background": True,
+            "message": f"Компенсация {len(ids)} пользователям {P().name} — выполняется в фоне"}
 
 
 @app.post("/api/panel/users/mass-action")
@@ -6481,6 +6642,8 @@ def app_config(request: Request) -> dict[str, Any]:
         "payMethods": pay_methods(),
         "trafficResetPrice": float(db.get_setting("traffic_reset_price", "0") or 0),
         "captcha": captcha_mod.public_config(request.headers, ip),
+        # сайт проекта: кнопки «Скачать для Windows / macOS»
+        "desktop": _desktop_info(),
     }
 
 
@@ -7647,14 +7810,18 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     # скидка: промо/акция; reset трафика без скидки
     full_price = round(float(price), 2)
     percent = 0.0
+    compensation_id = None
     if purpose != "traffic_reset":
-        percent = float(effective_discount(int(user["id"]))["percent"])
+        eff = effective_discount(int(user["id"]))
+        percent = float(eff["percent"])
         if percent > 0:
             price = discounted(price, percent)
             stars = int(discounted(stars, percent))
+            compensation_id = eff.get("compensation_id")
 
     return {"price": round(float(price), 2), "stars": int(stars), "months": months,
             "extra": extra, "purpose": purpose, "full_price": full_price, "discount_percent": percent,
+            "compensation_id": compensation_id,
             "plan_devices": plan_devices, "whitelist": whitelist,
             "devices_total": plan_devices + extra + keep, "min_devices": min_devices,
             "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
@@ -7827,6 +7994,9 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
         whitelist=bool(q.get("whitelist")),
     )
     payment_id = payment["payment_id"]
+    if q.get("compensation_id"):
+        # скидка компенсации: спишется при оплате этого платежа
+        db.execute("UPDATE payments SET compensation_id = ? WHERE payment_id = ?", (int(q["compensation_id"]), payment_id))
     ret = str(body.return_to or "").strip()
     if ret.startswith("/") and not ret.startswith("//") and len(ret) <= 200:
         db.execute("UPDATE payments SET return_to = ? WHERE payment_id = ?", (ret, payment_id))
@@ -8584,20 +8754,24 @@ def _notify_support_forum(user: dict[str, Any], chat: dict[str, Any], msg: dict[
         base = forum.panel_url()
         who = forum.user_link(int(user["id"]))
         head = f"🆕 <b>Новое обращение №{t.get('number')}</b>" if first else f"💬 <b>Обращение №{t.get('number')}</b>"
+        # поддержка общая на сеть: помечаем, из какого проекта пишет человек
+        proj = f"[{projects.get(projects.of(fresh)).name}] " if len(projects.ids()) > 1 else ""
+        head = f"{_esc_html(proj)}{head}"
         text = _esc_html(msg.get("text") or "")[:600]
         files = msg.get("files") or []
         att = f"\n📎 {len(files)} влож." if files else ""
         link = f'\n<a href="{_esc_html(base)}/support/{int(chat["id"])}">Открыть чат</a>' if base else ""
         forum.send("support", f"{head} · {who} ({_esc_html(_user_label(user))})\n{text}{att}{link}")
         if first:
-            webpush.send("all", "🆕 Новое обращение", f"{_user_label(user)}: {(msg.get('text') or '📎 вложение')[:200]}",
+            webpush.send("all", f"🆕 {proj}Новое обращение", f"{_user_label(user)}: {(msg.get('text') or '📎 вложение')[:200]}",
                          url=f"/support/{int(chat['id'])}", tag=f"chat{int(chat['id'])}")
     except Exception:  # noqa: BLE001
         pass
 
 
+@projects.scoped(lambda user, *a, **kw: projects.of_user(user))
 def _notify_support_user(user: dict[str, Any], msg: dict[str, Any], chat: Optional[dict[str, Any]] = None) -> Optional[int]:
-    """ответ поддержки -> бот и почта."""
+    """ответ поддержки -> бот и почта проекта пользователя (поддержка общая, боты у проектов свои)."""
     email = (user.get("email") or "").strip()
     if email and chat is not None and mailer.is_configured():
         last = parse_iso(chat.get("last_email_at")) if chat.get("last_email_at") else None

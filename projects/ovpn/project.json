@@ -1,0 +1,17 @@
+{
+  "id": "ovpn",
+  "name": "O-VPN",
+  "order": 4,
+  "channel": {
+    "id": "",
+    "url": ""
+  },
+  "bot": {
+    "command_description": "Запустить O-VPN",
+    "welcome_title": "Добро пожаловать!",
+    "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
+    "open_app_text": "🚀 Открыть O-VPN"
+  },
+  "theme_color": "#05050A",
+  "features": {}
+}

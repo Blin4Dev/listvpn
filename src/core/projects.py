@@ -49,7 +49,7 @@ PROJECTS_DIR = _find_projects_dir()
 # (иначе FGN тихо ушёл бы в бота / магазин ЮKassa BatmanVPN)
 STRICT_ENV = frozenset({
     "TELEGRAM_BOT_TOKEN", "BOT_USERNAME", "VITE_BOT_USERNAME",
-    "MINIAPP_URL", "MINIAPP_DOMAIN", "SITE_URL", "TELEGRAM_MINIAPP_LINK", "SUPPORT_URL",
+    "MINIAPP_URL", "MINIAPP_DOMAIN", "SITE_DOMAIN", "SITE_URL", "TELEGRAM_MINIAPP_LINK", "SUPPORT_URL",
     "YOOKASSA_SHOP_ID", "YOOKASSA_SECRET_KEY", "YOOKASSA_RETURN_URL",
     "APP_LINK_NAME", "MAIL_FROM_NAME",
 })
@@ -69,6 +69,8 @@ PROJECT_SETTING_KEYS = frozenset({
     "squad_mapping_vpn", "squad_mapping_trial",
     # фишки проекта (features в project.json): напоминания и подарки
     "notconn_hours", "winback_after_days", "winback_gift_days",
+    # сайт проекта (features.site): приложения для компьютера
+    "desktop_windows_url", "desktop_macos_url", "desktop_version",
 })
 PROJECT_SETTING_PREFIXES = ("period_price_", "period_stars_", "whitelist_price_", "whitelist_stars_",
                             "whitelist_devices_")
@@ -259,9 +261,11 @@ class Project:
             h = (urlparse(url).hostname or "").lower() if url else ""
             if h:
                 out.add(h)
-        d = self.env("MINIAPP_DOMAIN").lower()
-        if d:
-            out.add(d)
+        # SITE_DOMAIN — сайт проекта в браузере (features.site), тот же контейнер мини-приложения
+        for key in ("MINIAPP_DOMAIN", "SITE_DOMAIN"):
+            d = self.env(key).lower()
+            if d:
+                out.add(d)
         return out
 
     def public(self) -> dict[str, Any]:
@@ -299,6 +303,13 @@ def _load_registry() -> dict[str, Project]:
             if cfg.get("enabled") is False:
                 continue
             reg[pid] = Project(pid, cfg)
+    # порядок в панели и списках — поле "order" в project.json, без него — в конце по алфавиту
+    def _order(pid: str) -> tuple:
+        try:
+            return (int(reg[pid].cfg.get("order")), pid)
+        except (TypeError, ValueError):
+            return (10**6, pid)
+    reg = {pid: reg[pid] for pid in sorted(reg, key=_order)}
     if not reg:  # без папки projects/ — один проект, как было до сети
         reg["batman"] = Project("batman", {"id": "batman", "name": "BatmanVPN",
                                            "channel": {"id": "@BATMANNETWORK", "url": "https://t.me/BATMANNETWORK"}})

@@ -1,4 +1,3 @@
-import { useProjects } from '../../lib/project';
 import React, { useState, useEffect } from 'react';
 import {
   Key, Gift, Percent, X, CheckCircle, CreditCard, ArrowUpRight, ArrowDownLeft, Hash, Ban, Clock, Edit2, Copy, Database, Wallet, Plus, Send, Trash2, Save, RefreshCw, Shield, ArrowLeft, ExternalLink,
@@ -27,7 +26,8 @@ export interface UserDetailData {
   trial_status?: Record<string, { available: boolean; reason: string | null; text: string }>;
   referrals: { id: number; telegram_id: number | null; username: string | null; email: string | null; full_name: string | null }[];
   subscription: any | null;
-  discount?: { percent: number; expires_at: string | null; code: string | null; name: string | null } | null;
+  discount?: { percent: number; expires_at: string | null; code: string | null; name: string | null; compensation_id?: number } | null;
+  compensations?: { id: number; days: number; days_applied: number; discount_percent: number; mass: number; actor_name: string | null; created_at: string; used_at: string | null; used_payment_id: string | null }[];
   promo_activations?: { id: number; code: string | null; name: string | null; discount_percent: number; expires_at: string | null; created_at: string | null; active: boolean }[];
 }
 
@@ -89,10 +89,7 @@ export const UserDetailPage: React.FC<{
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [action, setAction] = useState<string | null>(null);
-  // фишка проекта пользователя: VPN и ключ обхода продлеваются одной кнопкой
-  const { list: projList, current: curProject } = useProjects();
-  const userProject = projList.find((p) => p.id === ((detail as { project?: string } | null)?.project || curProject?.id));
-  const singleRenew = !!userProject?.features?.single_renew;
+  // VPN и ключ обхода продлеваются одной кнопкой во всех проектах (EXTEND_ALL)
   const [editTg, setEditTg] = useState(false);
   const [editEmail, setEditEmail] = useState(false);
   const [tgDraft, setTgDraft] = useState('');
@@ -141,6 +138,18 @@ export const UserDetailPage: React.FC<{
     finally { setBusy(false); }
   };
 
+  // компенсация: +1 день к подписке (если есть, даже истёкшей) и разовая скидка 7% — может выдать любой сотрудник
+  const compensate = async () => {
+    if (!window.confirm('Выдать компенсацию?\n\n+1 день к подписке (если она есть, даже истёкшая) и скидка 7% на следующую покупку. Пользователь получит сообщение.')) return;
+    setBusy(true);
+    try {
+      const r = await apiFetch(`/panel/users/${userId}/compensate`, { method: 'POST', body: JSON.stringify({ notify: true }) });
+      onToast('Компенсация выдана', r?.message || 'Готово', 'success');
+      await load(); await loadRw();
+    } catch (e) { onToast('Ошибка', parseErr(e), 'error'); }
+    finally { setBusy(false); }
+  };
+
   const unlinkDevice = async (hwid: string) => {
     if (!window.confirm('Отвязать это устройство?')) return;
     try { await apiFetch(`/panel/users/${userId}/hwid/unlink`, { method: 'POST', body: JSON.stringify({ hwid }) }); onToast('Готово', 'Устройство отвязано', 'success'); await loadRw(); }
@@ -176,6 +185,8 @@ export const UserDetailPage: React.FC<{
 
       <div className="flex items-center justify-between gap-3" style={{ flexWrap: 'wrap' }}>
         <button className="btn" onClick={onBack}><ArrowLeft size={16} /> К пользователям</button>
+        <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {!detail.is_banned && <button className="btn" disabled={busy} onClick={() => void compensate()} title="+1 день к подписке и скидка 7% на следующую покупку"><Gift size={15} /> Компенсация</button>}
         {canEdit && (
           <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             {detail.key_blocked
@@ -184,6 +195,7 @@ export const UserDetailPage: React.FC<{
             {owner && <button className="btn danger" disabled={busy} onClick={() => void doAction('DELETE_USER', null, false, 'Удалить аккаунт безвозвратно из базы и Remnawave?')}><Trash2 size={15} /> Удалить</button>}
           </div>
         )}
+        </div>
       </div>
 
       <div className="card" style={{ padding: 18 }}>
@@ -270,12 +282,7 @@ export const UserDetailPage: React.FC<{
             {detail.anti_key ? (
               <span className="mono" style={{ wordBreak: 'break-all' }}>{detail.anti_key} · до {fmtDateTime(detail.anti_expires_at ?? null)}</span>
             ) : <span className="mono">нет</span>}
-            {canEdit && !singleRenew && (
-              <button className="btn sm solid" onClick={() => setAction('EXTEND_BYPASS')}>
-                <Plus size={14} /> {detail.anti_key ? 'Продлить' : 'Выдать'}
-              </button>
-            )}
-            {singleRenew && <span className="faint" style={{ fontSize: 12 }}>продлевается вместе с подпиской</span>}
+            <span className="faint" style={{ fontSize: 12 }}>продлевается вместе с подпиской</span>
           </InfoRow>
           <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
           {detail.trial_status && (
@@ -333,9 +340,9 @@ export const UserDetailPage: React.FC<{
         {detail.discount ? (
           <InfoRow label="Активная скидка">
             <span style={{ fontWeight: 700, color: 'var(--accent, #F18726)' }}>{detail.discount.percent}%</span>
-            <span className="sub">{detail.discount.code}{detail.discount.name ? ` · ${detail.discount.name}` : ''}</span>
-            <span className="sub">до {fmtDateTime(detail.discount.expires_at)}</span>
-            {canEdit && <button className="btn sm danger" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', detail.discount?.code || null, false, 'Снять скидку у пользователя?')}>Снять</button>}
+            <span className="sub">{detail.discount.code}{detail.discount.name ? `${detail.discount.code ? ' · ' : ''}${detail.discount.name}` : ''}</span>
+            <span className="sub">{detail.discount.compensation_id ? 'на одну покупку' : `до ${fmtDateTime(detail.discount.expires_at)}`}</span>
+            {canEdit && <button className="btn sm danger" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', detail.discount?.compensation_id ? '@compensation' : (detail.discount?.code || null), false, 'Снять скидку у пользователя?')}>Снять</button>}
           </InfoRow>
         ) : (
           <div className="muted sm" style={{ marginBottom: 10 }}>Активной скидки нет.</div>
@@ -364,6 +371,21 @@ export const UserDetailPage: React.FC<{
             </div>
           </div>
         )}
+        {detail.compensations && detail.compensations.length > 0 && (
+          <div className="mt-3">
+            <div className="sub mb-2">Компенсации</div>
+            <div className="flex flex-col gap-1">
+              {detail.compensations.map((c) => (
+                <div key={c.id} className="inset flex items-center gap-2" style={{ padding: '8px 10px', flexWrap: 'wrap' }}>
+                  <span className="mono sub">{fmtDateTime(c.created_at)}</span>
+                  <span>{c.days_applied ? `+${c.days} дн.` : 'без дней'} · {c.discount_percent}%</span>
+                  <span className={`badge ${c.used_at ? 'line' : 'solid'}`}>{c.used_at ? (c.used_payment_id === 'removed' ? 'скидка снята' : 'скидка использована') : 'скидка ждёт покупки'}</span>
+                  <span className="sub">{c.mass ? 'всем' : ''}{c.actor_name ? `${c.mass ? ' · ' : ''}${c.actor_name}` : ''}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </DCard>
 
       {mergeAsk && (
@@ -382,7 +404,7 @@ export const UserDetailPage: React.FC<{
         {!sub ? (
           <div className="flex flex-col gap-3">
             <div className="muted sm">Активной подписки нет.</div>
-            {canEdit && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction(singleRenew ? 'EXTEND_ALL' : 'EXTEND_SUB')}><Plus size={14} /> {singleRenew ? 'Выдать подписку' : 'Выдать VPN'}</button>}
+            {canEdit && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Выдать подписку</button>}
           </div>
         ) : (
           <>
@@ -392,7 +414,7 @@ export const UserDetailPage: React.FC<{
             </InfoRow>
             <InfoRow label="Срок">
               {canEdit ? (<>
-                <button className="btn sm solid" onClick={() => setAction(singleRenew ? 'EXTEND_ALL' : 'EXTEND_SUB')}><Plus size={14} /> {singleRenew ? 'Продлить' : 'Продлить VPN'}</button>
+                <button className="btn sm solid" onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Продлить</button>
                 <button className="btn sm" onClick={() => setAction('REDUCE_SUB')}>Уменьшить</button>
               </>) : <span className="faint">—</span>}
             </InfoRow>

@@ -1,18 +1,27 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import Site from "./site/Site";
 import "./global.css";
-import { initTelegramViewport, initStageScale } from "./utils/telegram";
+import { initTelegramViewport, initStageScale, isTelegramClient } from "./utils/telegram";
 import { captureWebRef } from "./utils/api";
+import { hasFeature } from "./utils/brand";
 
-initStageScale();
-initTelegramViewport();
+// в Telegram — мини-приложение; в браузере у проекта с features.site — его сайт
+const SITE = hasFeature("site") && !isTelegramClient();
+
+if (SITE) {
+  document.documentElement.classList.add("blin-site");
+} else {
+  initStageScale();
+  initTelegramViewport();
+}
 // запомнить ?ref= до регистрации
 captureWebRef();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    {SITE ? <Site /> : <App />}
   </React.StrictMode>
 );
 

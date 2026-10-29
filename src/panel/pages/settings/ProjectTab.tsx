@@ -18,6 +18,7 @@ type Cfg = {
   features: Record<string, boolean>;
   growth: { notconn_hours: number; winback_after_days: number; winback_gift_days: number };
   family_max_members: number;
+  desktop?: { windows_url: string; macos_url: string; version: string };
 };
 
 const SourceNote: React.FC<{ source: string }> = ({ source }) =>
@@ -38,6 +39,7 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
   const [busy, setBusy] = useState('');
   const [growth, setGrowth] = useState({ notconn_hours: '3', winback_after_days: '14', winback_gift_days: '3' });
   const [familyMax, setFamilyMax] = useState('5');
+  const [desk, setDesk] = useState({ windows_url: '', macos_url: '', version: '' });
 
   const fill = (d: Cfg) => {
     setCfg(d); setToken(''); setSecret('');
@@ -45,6 +47,7 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
     if (d.growth) setGrowth({ notconn_hours: String(d.growth.notconn_hours), winback_after_days: String(d.growth.winback_after_days),
       winback_gift_days: String(d.growth.winback_gift_days) });
     if (d.family_max_members) setFamilyMax(String(d.family_max_members));
+    if (d.desktop) setDesk({ windows_url: d.desktop.windows_url || '', macos_url: d.desktop.macos_url || '', version: d.desktop.version || '' });
     setSupport(d.support_url || ''); setMlink(d.miniapp_link || ''); setVpnDom(d.vpn_sub_domain || ''); setWlDom(d.whitelist_sub_domain || '');
   };
   useEffect(() => {
@@ -159,6 +162,20 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
             {btn('growth', () => save('growth', Object.fromEntries(Object.entries(growth)
               .filter(([k]) => (k === 'notconn_hours' ? cfg.features?.notify_not_connected : cfg.features?.winback_gift))
               .map(([k, v]) => [k, Number(v)])), 'Сохранено'))}
+          </Section>
+        )}
+
+        {cfg.features?.site && (
+          <Section title="Сайт: приложения для компьютера" sub="Сайт проекта открывается вместо мини-приложения, когда домен открыт в браузере. Кнопки «Скачать для Windows / macOS» ведут сюда; пока ссылки нет — в Telegram-бота.">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div><label className="field-label">Установщик для Windows</label>
+                <input className="input mono" value={desk.windows_url} onChange={(e) => setDesk({ ...desk, windows_url: e.target.value.trim() })} placeholder="https://…/FGN-Setup.exe" /></div>
+              <div><label className="field-label">Установщик для macOS</label>
+                <input className="input mono" value={desk.macos_url} onChange={(e) => setDesk({ ...desk, macos_url: e.target.value.trim() })} placeholder="https://…/FGN.dmg" /></div>
+              <div><label className="field-label">Версия (подпись под кнопками)</label>
+                <input className="input mono" value={desk.version} onChange={(e) => setDesk({ ...desk, version: e.target.value.trim() })} placeholder="1.0" /></div>
+            </div>
+            {btn('desktop', () => save('desktop', { desktop_windows_url: desk.windows_url, desktop_macos_url: desk.macos_url, desktop_version: desk.version }, 'Сохранено'))}
           </Section>
         )}
 

@@ -226,7 +226,9 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
       {massActionType && (
         <UserActionModal type={massActionType} onClose={() => setMassActionType(null)} onConfirm={async (val, notify) => {
           try {
-            const r = await apiFetch('/panel/users/mass-action', { method: 'POST', body: JSON.stringify({ action: massActionType, value: val, notify }) });
+            const r = massActionType === 'MASS_COMPENSATE'
+              ? await apiFetch('/panel/users/mass-compensate', { method: 'POST', body: JSON.stringify({ notify }) })
+              : await apiFetch('/panel/users/mass-action', { method: 'POST', body: JSON.stringify({ action: massActionType, value: val, notify }) });
             addToast('Готово', r?.message || `Выполнено · затронуто: ${r?.affected ?? 0}`, 'success');
           } catch (e: any) { addToast('Ошибка', parseApiErr(e, 'Не удалось выполнить действие'), 'error'); }
           setMassActionType(null);

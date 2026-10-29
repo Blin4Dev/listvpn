@@ -1,0 +1,17 @@
+{
+  "id": "hustler",
+  "name": "Hustler",
+  "order": 3,
+  "channel": {
+    "id": "",
+    "url": ""
+  },
+  "bot": {
+    "command_description": "Запустить Hustler",
+    "welcome_title": "Добро пожаловать!",
+    "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
+    "open_app_text": "🚀 Открыть Hustler"
+  },
+  "theme_color": "#05050A",
+  "features": {}
+}

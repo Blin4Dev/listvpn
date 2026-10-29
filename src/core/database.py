@@ -918,6 +918,24 @@ CREATE TABLE IF NOT EXISTS day_gifts (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_day_gifts_user ON day_gifts(user_id, status);
+-- компенсации из панели: +дни к подписке и разовая скидка на следующую покупку
+--   used_at / used_payment_id — скидка использована (оплачен платёж с ней)
+CREATE TABLE IF NOT EXISTS compensations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    project_id TEXT,
+    days INTEGER NOT NULL DEFAULT 0,
+    days_applied INTEGER NOT NULL DEFAULT 0,  -- 1 — дни начислены (подписка была)
+    discount_percent REAL NOT NULL DEFAULT 0,
+    mass INTEGER NOT NULL DEFAULT 0,          -- 1 — выдана всем (массовое действие)
+    actor TEXT,
+    actor_name TEXT,
+    created_at TEXT NOT NULL,
+    used_at TEXT,
+    used_payment_id TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_compensations_user ON compensations(user_id, used_at);
 -- семейная подписка: участники семьи (см. src/core/family.py)
 --   member_id NULL — приглашение по логину/почте, аккаунт ещё не найден;
 --   status pending — приглашён, active — пользуется подпиской владельца
@@ -985,7 +1003,7 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
 # ── сеть проектов (listvpn) ──
 # таблицы, чьи строки принадлежат пользователю: project_id = проект пользователя
 PROJECT_USER_TABLES = ("subscriptions", "payments", "transactions", "purchases", "support_chats", "withdrawals",
-                       "day_gifts")
+                       "day_gifts", "compensations")
 # сущности проекта, которые создаёт панель: project_id = проект запроса (current_project())
 PROJECT_OWN_TABLES = ("promocodes", "promotions", "tracking_links", "mailings", "tasks")
 
@@ -1235,6 +1253,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "payments": {
             # опция «белые списки» в заказе
             "whitelist": "ALTER TABLE payments ADD COLUMN whitelist INTEGER NOT NULL DEFAULT 0",
+            # скидка компенсации в этом платеже: при оплате помечается использованной
+            "compensation_id": "ALTER TABLE payments ADD COLUMN compensation_id INTEGER",
             # реф. баланс, замороженный при создании
             "referral_applied": "ALTER TABLE payments ADD COLUMN referral_applied REAL NOT NULL DEFAULT 0",
             # возвраты (refund через провайдера)

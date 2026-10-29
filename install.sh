@@ -319,8 +319,19 @@ extra_projects() {
     return 0
 }
 project_domain() { get_env_var "$(project_env_prefix "$1")MINIAPP_DOMAIN" .env 2>/dev/null || true; }
-# домены дополнительных проектов (для сертификатов)
-extra_project_domains() { local id d; while read -r id; do [[ -n "$id" ]] || continue; d="$(project_domain "$id")"; [[ -n "$d" ]] && printf '%s\n' "$d"; done < <(extra_projects); return 0; }
+# сайт проекта в браузере (features.site): свой домен, тот же контейнер мини-приложения; без домена мини-аппа не работает
+project_site_domain() { [[ -n "$(project_domain "$1")" ]] || return 0; get_env_var "$(project_env_prefix "$1")SITE_DOMAIN" .env 2>/dev/null || true; }
+project_has_site() { grep -Eq '"site"[[:space:]]*:[[:space:]]*true' "projects/$1/project.json" 2>/dev/null; }
+# домены дополнительных проектов (для сертификатов): мини-приложения и сайты
+extra_project_domains() {
+    local id d
+    while read -r id; do
+        [[ -n "$id" ]] || continue
+        d="$(project_domain "$id")"; [[ -n "$d" ]] && printf '%s\n' "$d"
+        d="$(project_site_domain "$id")"; [[ -n "$d" ]] && printf '%s\n' "$d"
+    done < <(extra_projects)
+    return 0
+}
 
 # спросить домен вебхуков; Enter — текущий (по умолчанию как у мини-приложения).
 # ask_hook_domain <mini> <panel> [текущий]
@@ -720,15 +731,19 @@ $(_caddy_api_headers)
 EOF
     )
     # остальные проекты сети: свой домен → тот же API и контейнер мини-приложений с X-Project проекта
-    local _pid _pdom
+    local _pid _pdom _psite _paddr
     while read -r _pid; do
         [[ -n "$_pid" ]] || continue
         _pdom="$(project_domain "$_pid")"
         [[ -n "$_pdom" ]] || continue
+        # сайт проекта (браузер) — тот же блок: в Telegram мини-апп, в браузере сайт решает сам фронт
+        _paddr="$(site_addr "$_pdom")"
+        _psite="$(project_site_domain "$_pid")"
+        [[ -n "$_psite" && "$_psite" != "$_pdom" ]] && _paddr="${_paddr}, $(site_addr "$_psite")"
         cat >> "$tmp" <<EOF
 
 # проект сети: $(project_name "$_pid") (${_pid})
-$(site_addr "$_pdom") {
+${_paddr} {
 	import blin_sec
 ${tls_block}
 	request_body {
@@ -2149,13 +2164,32 @@ project_setup_flow() {
         return 1
     fi
     [[ -n "$dom" ]] && { set_env_var "${pre}MINIAPP_DOMAIN" "$dom"; set_env_var "${pre}MINIAPP_URL" "$(pub_url "$dom")"; }
+    local site cur_site
+    if [[ -n "$dom" ]] && project_has_site "$pid"; then
+        cur_site="$(get_env_var "${pre}SITE_DOMAIN" .env 2>/dev/null || true)"
+        hint "У $(project_name "$pid") есть сайт: в браузере вместо мини-приложения. Его можно открыть на отдельном домене."
+        prompt "Домен сайта [${cur_site:-нет}] (Enter = оставить, - = убрать): " site
+        if [[ "$site" == "-" ]]; then
+            set_env_var "${pre}SITE_DOMAIN" ""
+        else
+            site="$(sanitize_domain "${site:-$cur_site}")"
+            if [[ -n "$site" ]] && { ! _is_domain "$site" || [[ "$site" == "$dom" ]]; }; then
+                log_error "Некорректный домен сайта: ${site}"
+                return 1
+            fi
+            [[ -n "$site" ]] && set_env_var "${pre}SITE_DOMAIN" "$site"
+        fi
+    fi
     chmod 600 .env 2>/dev/null || true
 
     if [[ -n "$dom" ]]; then
-        local ip_dom ip_srv; ip_dom="$(resolve_domain_ip "$dom" || true)"; ip_srv="$(get_server_ip || true)"
-        if [[ -n "$ip_srv" && "$ip_dom" != "$ip_srv" ]]; then
-            log_warn "A-запись ${dom} → ${ip_dom:-нет}, а сервер — ${ip_srv}. Сертификат не выпустится, пока DNS не указывает сюда."
-        fi
+        local ip_dom ip_srv _d; ip_srv="$(get_server_ip || true)"
+        for _d in "$dom" $(project_site_domain "$pid"); do
+            ip_dom="$(resolve_domain_ip "$_d" || true)"
+            if [[ -n "$ip_srv" && "$ip_dom" != "$ip_srv" ]]; then
+                log_warn "A-запись ${_d} → ${ip_dom:-нет}, а сервер — ${ip_srv}. Сертификат не выпустится, пока DNS не указывает сюда."
+            fi
+        done
     fi
 
     log_info "\nПересборка и перезапуск (мини-приложения всех проектов, бот, API)..."

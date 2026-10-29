@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Mail, Percent, Settings, CheckCircle, ArrowDownLeft, Calendar, Ban, Clock, Edit2, Smartphone, Database, Wallet, Plus, Send, RefreshCw,
+  Gift, Mail, Percent, Settings, CheckCircle, ArrowDownLeft, Calendar, Ban, Clock, Edit2, Smartphone, Database, Wallet, Plus, Send, RefreshCw,
 } from 'lucide-react';
 import { Modal, Toggle } from './ui';
 
@@ -16,7 +16,7 @@ export type ActionConfig = { title: string; label: string; icon: React.ElementTy
 
 export const ACTION_MAP: Record<string, ActionConfig> = {
   EXTEND_ALL:         { title: 'Продлить подписку', label: 'Дней', icon: Clock, type: 'number', min: 1, max: 1095 },
-  EXTEND_SUB:         { title: 'Продлить VPN', label: 'Дней', icon: Clock, type: 'number' },
+  EXTEND_SUB:         { title: 'Продлить подписку', label: 'Дней', icon: Clock, type: 'number' },
   EXTEND_BYPASS:      { title: 'Продлить ключ обхода', label: 'Дней', icon: Clock, type: 'number', min: 1, max: 1095 },
   REDUCE_SUB:         { title: 'Уменьшить срок VPN', label: 'Дней', icon: Clock, type: 'number' },
   SET_TRAFFIC:        { title: 'Лимит трафика', label: 'Макс. трафик, ГБ', icon: Database, type: 'number' },
@@ -26,6 +26,7 @@ export const ACTION_MAP: Record<string, ActionConfig> = {
   MASS_ADD_DAYS:      { title: 'Добавить дни всем активным', label: 'Дней (только действующим подпискам)', icon: Calendar, type: 'number', min: 1, max: 365 },
   MASS_RESET_TRIAL:   { title: 'Сбросить пробный период', label: '', icon: RefreshCw, type: 'text' },
   MASS_RESET_TRAFFIC: { title: 'Сбросить трафик всем', label: '', icon: Database, type: 'text' },
+  MASS_COMPENSATE:    { title: 'Компенсация всем', label: '', icon: Gift, type: 'text' },
   SET_PARTNER_RATE:   { title: 'Процент реферала', label: 'Процент, %', icon: Percent, type: 'number', min: 0, max: 100 },
   SET_PARTNER_BALANCE:{ title: 'Реферальный баланс', label: 'Сумма, ₽', icon: Wallet, type: 'number' },
   ADD_PARTNER_BALANCE:{ title: 'Начислить на реф-баланс', label: 'Сумма, ₽', icon: Plus, type: 'number' },
@@ -112,7 +113,7 @@ export const UserActionModal: React.FC<{
         )}
         {type === 'EXTEND_SUB' && (
           <div className="sub" style={{ fontSize: 12 }}>
-            Продлевается только ключ VPN (база и Remnawave). Ключ обхода не трогается.
+            Продлевается VPN (база и Remnawave) и ключ обхода до той же даты.
           </div>
         )}
         {isNotify ? (
@@ -127,6 +128,19 @@ export const UserActionModal: React.FC<{
             {!canTelegram && !canEmail ? (
               <div className="sub" style={{ fontSize: 12, marginTop: 8 }}>Нет Telegram и почты — отправить некуда</div>
             ) : null}
+          </div>
+        ) : type === 'MASS_COMPENSATE' ? (
+          <div className="flex flex-col gap-3">
+            <div className="sub" style={{ fontSize: 12 }}>
+              Всем пользователям проекта (кроме заблокированных): +1 день к подписке, если она есть (даже истёкшая), и скидка 7% на следующую покупку. Выполняется в фоне.
+            </div>
+            <label className="inset flex items-center justify-between gap-3" style={{ padding: 12, cursor: 'pointer' }}>
+              <div>
+                <div style={{ fontWeight: 500 }}>Уведомить пользователей</div>
+                <div className="sub">Сообщение в бот каждому</div>
+              </div>
+              <Toggle on={notify} onChange={() => setNotify(!notify)} />
+            </label>
           </div>
         ) : type.startsWith('MASS_') ? (
           <div className="sub" style={{ fontSize: 12 }}>

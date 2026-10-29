@@ -1,6 +1,6 @@
 import { useProjects } from '../lib/project';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle, Clock, Users, Trash2, CornerUpLeft, Download, Edit2, ExternalLink, FileText, FileX, HelpCircle, Info, Lock, MessageCircle, Paperclip, Play, Save, Search, Send, ShieldAlert, Undo2, X, XCircle } from 'lucide-react';
+import { ArrowLeft, CheckCircle, Clock, Users, Trash2, CornerUpLeft, Download, Edit2, ExternalLink, FileText, FileX, Gift, HelpCircle, Info, Lock, MessageCircle, Paperclip, Play, Save, Search, Send, ShieldAlert, Undo2, X, XCircle } from 'lucide-react';
 import { DotsMenu, Modal, Spinner } from '../components/ui';
 import { RichText } from '../components/RichText';
 import { TEAM_CHAT_ID, TeamChat } from './TeamChat';
@@ -254,6 +254,17 @@ const UserInfo: React.FC<{ userId: number; onOpenUser: (id: number) => void; rel
       onToast('Ошибка', parseApiErr(e, 'Не удалось сохранить'), 'error'); return false;
     }
   };
+  // компенсация (+1 день и скидка 7%) — может выдать любой сотрудник, даже без обращения в работе
+  const [compBusy, setCompBusy] = useState(false);
+  const compensate = async () => {
+    if (!window.confirm('Выдать компенсацию?\n\n+1 день к подписке (если она есть, даже истёкшая) и скидка 7% на следующую покупку. Пользователь получит сообщение.')) return;
+    setCompBusy(true);
+    try {
+      const r = await apiFetch(`/panel/users/${userId}/compensate`, { method: 'POST', body: JSON.stringify({ notify: true }) });
+      onToast('Компенсация выдана', r?.message || 'Готово', 'success'); load();
+    } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось выдать компенсацию'), 'error'); }
+    finally { setCompBusy(false); }
+  };
   if (d && d.error) return (
     <div style={{ padding: 16 }}>
       <div style={{ fontWeight: 600 }}>{row.user_label}</div>
@@ -287,6 +298,7 @@ const UserInfo: React.FC<{ userId: number; onOpenUser: (id: number) => void; rel
       ))}
       {d.aa_warning && <div className="badge line" style={{ marginTop: 8, width: '100%', whiteSpace: 'normal', justifyContent: 'flex-start', color: '#fb923c', borderColor: 'rgba(251,146,60,.4)' }}>Предупреждение анти-абуза{d.aa_warning.reason ? `: ${d.aa_warning.reason}` : ''} · {fmtDateTime(d.aa_warning.at).slice(0, 16)}</div>}
       <button className="btn sm" style={{ marginTop: 12, width: '100%', justifyContent: 'center' }} onClick={() => onOpenUser(d.id)}><ExternalLink size={14} /> Открыть карточку</button>
+      {!d.is_banned && <button className="btn sm" style={{ marginTop: 8, width: '100%', justifyContent: 'center' }} disabled={compBusy} onClick={() => void compensate()} title="+1 день к подписке и скидка 7% на следующую покупку"><Gift size={14} /> Компенсация</button>}
       {!canManage && <div className="faint" style={{ fontSize: 11, marginTop: 8 }}>Менять данные можно, когда обращение у вас в работе</div>}
 
       <H>Профиль</H>
@@ -734,7 +746,11 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
           <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
             <button className="icon-btn lg:!hidden" onClick={() => setChatId(null)} title="К списку"><ArrowLeft size={16} /></button>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{chat?.user_label || '…'}</div>
+              <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{chat?.user_label || '…'}</span>
+                {/* поддержка общая на сеть: из какого проекта пишет человек (ответ уйдёт ботом этого проекта) */}
+                {projList.length > 1 && chat?.project_name && <span className="badge" style={{ fontSize: 10.5, padding: '1px 6px', flexShrink: 0 }}>{chat.project_name}</span>}
+              </div>
               <div className="sub" style={{ fontSize: 12 }}>
                 {chat?.ticket ? (chat.ticket.status === 'open'
                   ? (chat.ticket.assigned_name ? `Ведёт ${chat.ticket.assigned_name}` : chat.ticket.escalated ? 'Ожидает администратора' : 'Ожидает оператора')

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Settings, Search, Filter, Calendar, Database, Layers, ChevronDown, RefreshCw,
+  Settings, Search, Filter, Calendar, Database, Layers, ChevronDown, RefreshCw, Gift,
 } from 'lucide-react';
 import { PageHead, PaginationBar, Spinner, userStatusBadge } from '../components/ui';
 import { DEFAULT_REF_RATE, fmtMoney } from '../lib/format';
@@ -8,12 +8,14 @@ import { useOutside } from '../lib/hooks';
 import { mapApiUser } from '../lib/mappers';
 import { usePaginatedList } from '../lib/pagination';
 import type { User } from '../lib/types';
-import { isOwner, useMe } from '../lib/access';
+import { isFull, isOwner, useMe } from '../lib/access';
 
 export const MASS_ACTIONS = [
   { t: 'MASS_ADD_DAYS', icon: Calendar, label: 'Добавить дни всем' },
   { t: 'MASS_RESET_TRAFFIC', icon: Database, label: 'Сбросить трафик всем' },
   { t: 'MASS_RESET_TRIAL', icon: RefreshCw, label: 'Сбросить пробный период' },
+  // компенсация всем: админ и куратор
+  { t: 'MASS_COMPENSATE', icon: Gift, label: 'Компенсация всем', curator: true },
 ];
 
 export const UsersPage: React.FC<{
@@ -22,7 +24,10 @@ export const UsersPage: React.FC<{
   const [statusFilter, setStatusFilter] = useState<'all' | 'Active' | 'Trial' | 'Expired' | 'None' | 'Banned'>('all');
   const [showFilter, setShowFilter] = useState(false);
   const [showMass, setShowMass] = useState(false);
-  const canEdit = isOwner(useMe());  // массовые действия только owner
+  const me = useMe();
+  const owner = isOwner(me);  // массовые действия — owner; компенсация всем — ещё и куратор
+  const massList = MASS_ACTIONS.filter((a) => owner || (isFull(me) && (a as { curator?: boolean }).curator));
+  const canEdit = massList.length > 0;
   const massRef = useOutside<HTMLDivElement>(() => setShowMass(false));
   const filterRef = useOutside<HTMLDivElement>(() => setShowFilter(false));
 
@@ -42,7 +47,7 @@ export const UsersPage: React.FC<{
           <button className="btn solid" onClick={() => setShowMass(!showMass)}><Layers size={16} /> Массовые действия <ChevronDown size={15} style={{ transform: showMass ? 'rotate(180deg)' : 'none', transition: 'transform var(--t)' }} /></button>
           {showMass && (
             <div className="menu" style={{ right: 0 }}>
-              {MASS_ACTIONS.map((a) => (
+              {massList.map((a) => (
                 <button key={a.t} className="menu-item" onClick={() => { setMassActionType(a.t); setShowMass(false); }}><a.icon size={15} className="faint" /> {a.label}</button>
               ))}
             </div>

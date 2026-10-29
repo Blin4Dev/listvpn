@@ -43,6 +43,9 @@ ROUTES: list[tuple[set[str], re.Pattern, str]] = [
         (R, _USER_VIEW, "any"),
         (R, r"/users/(?P<uid>\d+)/exchange", "manage"),
         ("POST", r"/users/(?P<uid>\d+)/(?:action|exchange|hwid/unlink|referrals/\d+/unlink)", "manage"),
+        # компенсация: одному — любой сотрудник (и поддержка), всем — куратор (и владелец)
+        ("POST", r"/users/\d+/compensate", "any"),
+        ("POST", r"/users/mass-compensate", "curator"),
         (R, r"/users/\d+/transfer", "curator"),
         ("POST", r"/users/\d+/transfer", "curator"),
         (R, r"/users/(?P<uid>\d+)/can-manage", "any"),

@@ -1,0 +1,17 @@
+{
+  "id": "rvpn",
+  "name": "R-VPN",
+  "order": 6,
+  "channel": {
+    "id": "",
+    "url": ""
+  },
+  "bot": {
+    "command_description": "Запустить R-VPN",
+    "welcome_title": "Добро пожаловать!",
+    "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
+    "open_app_text": "🚀 Открыть R-VPN"
+  },
+  "theme_color": "#05050A",
+  "features": {}
+}

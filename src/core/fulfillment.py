@@ -1178,6 +1178,12 @@ def fulfill_payment(
         "UPDATE transactions SET status = 'completed' WHERE payment_id = ?",
         (payment_id,),
     )
+    if payment.get("compensation_id"):
+        # разовая скидка компенсации использована этой покупкой
+        try:
+            services.use_compensation(int(payment["compensation_id"]), payment_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[compensation] payment {payment_id}: {exc}", flush=True)
 
     _credit_referral(user, float(payment.get("amount") or 0), payment.get("currency") or "RUB", payment.get("payment_id"))
     # атрибуция выручки по трекинг-ссылке

@@ -92,6 +92,24 @@ input::placeholder, textarea::placeholder {
   height: 100%;
 }
 
+/* Сайт проекта в браузере (features.site): обычная прокручиваемая страница, без сцены 402px */
+html.blin-site, html.blin-site body {
+  height: auto;
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: auto;
+}
+html.blin-site #root {
+  transform: none;
+  width: auto;
+  height: auto;
+  overflow: visible;
+}
+html.blin-site #root > * {
+  height: auto;
+}
+
 /* Контентные оболочки учитывают TG fullscreen inset */
 .blin-tg-safe {
   padding-top: calc(var(--blin-tg-pad-top, 0px) / var(--blin-scale));

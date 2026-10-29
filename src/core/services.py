@@ -137,6 +137,49 @@ def release_day_gift(gift_id: int) -> None:
     db.execute("UPDATE day_gifts SET status = 'pending', claimed_at = NULL WHERE id = ?", (int(gift_id),))
 
 
+# ── компенсация (панель): +1 день к подписке и разовая скидка на следующую покупку ──
+COMPENSATION_DAYS = 1
+COMPENSATION_PERCENT = 7.0
+
+
+def record_compensation(user_id: int, *, days: int, days_applied: bool, percent: float, mass: bool = False,
+                        actor: Optional[str] = None, actor_name: Optional[str] = None) -> int:
+    db.execute(
+        "INSERT INTO compensations (user_id, days, days_applied, discount_percent, mass, actor, actor_name, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (int(user_id), int(days), 1 if days_applied else 0, float(percent), 1 if mass else 0,
+         actor, (actor_name or "")[:60] or None, db.utcnow_iso()),
+    )
+    return int(db.last_id())
+
+
+def recent_compensation(user_id: int, seconds: int) -> Optional[dict[str, Any]]:
+    """компенсация этому пользователю за последние seconds (защита от двойного нажатия)."""
+    since = (_utcnow() - timedelta(seconds=seconds)).isoformat()
+    return db.fetchone("SELECT * FROM compensations WHERE user_id = ? AND created_at > ? ORDER BY id DESC LIMIT 1",
+                       (int(user_id), since))
+
+
+def active_compensation(user_id: int) -> Optional[dict[str, Any]]:
+    """неиспользованная скидка компенсации (самая ранняя); скидки компенсаций не суммируются."""
+    return db.fetchone(
+        "SELECT * FROM compensations WHERE user_id = ? AND used_at IS NULL AND discount_percent > 0 "
+        "ORDER BY id LIMIT 1", (int(user_id),))
+
+
+def use_compensation(compensation_id: int, payment_id: str) -> bool:
+    """скидка компенсации использована: оплачен платёж с ней (один раз)."""
+    cur = db.execute("UPDATE compensations SET used_at = ?, used_payment_id = ? WHERE id = ? AND used_at IS NULL",
+                     (db.utcnow_iso(), str(payment_id), int(compensation_id)))
+    return bool(cur.rowcount)
+
+
+def compensations_for_user(user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    return db.fetchall("SELECT id, days, days_applied, discount_percent, mass, actor_name, created_at, used_at, "
+                       "used_payment_id FROM compensations WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                       (int(user_id), int(limit)))
+
+
 def grant_personal_discount(user_id: int, percent: float, hours: int, code: str = "DRIP10") -> bool:
     promo = db.fetchone("SELECT * FROM promocodes WHERE code = ?", (code,))
     if not promo:
