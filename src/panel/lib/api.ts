@@ -64,7 +64,18 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
 }
 
 export const parseApiErr = (e: any, fb: string) => {
-  try { const p = JSON.parse(e?.message || ''); return p?.detail?.message || p?.error || (typeof p?.detail === 'string' ? p.detail : '') || fb; } catch { return fb; }
+  try {
+    const p = JSON.parse(e?.message || '');
+    if (p?.detail?.message) return p.detail.message;
+    if (p?.error) return p.error;
+    if (typeof p?.detail === 'string') return p.detail;
+    if (Array.isArray(p?.detail) && p.detail[0]) {
+      const d = p.detail[0];
+      const loc = Array.isArray(d.loc) ? d.loc.filter((x: any) => x !== 'body').join('.') : '';
+      return [loc, d.msg].filter(Boolean).join(': ') || fb;
+    }
+    return fb;
+  } catch { return fb; }
 };
 
 export const copyToClipboard = async (text: string) => {

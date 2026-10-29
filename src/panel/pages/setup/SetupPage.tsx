@@ -326,9 +326,10 @@ function ProjectPane({ p, data, onInstall, onReload, onToast }: {
 
   const save = async () => {
     setSaving(true); setSaveErr('');
-    const body: any = { admins, squads_vpn: vpn, squads_trial: trial, pay_mode: pay, channel_id: channel.trim(), channel_required: chanReq };
+    const body: any = { admins, squads_vpn: vpn, squads_trial: trial, channel_id: String(channel || '').trim(), channel_required: !!chanReq };
+    if (pay === 'yk' || pay === 'stars') body.pay_mode = pay;
     if (token.trim()) body.bot_token = token.trim();
-    if (pay === 'yk') { body.yookassa_shop_id = shop.trim(); if (secret.trim()) body.yookassa_secret_key = secret.trim(); }
+    if (pay === 'yk') { body.yookassa_shop_id = String(shop || '').trim(); if (String(secret || '').trim()) body.yookassa_secret_key = String(secret).trim(); }
     try {
       await apiFetch(`/panel/setup/project/${p.id}`, { method: 'PUT', body: JSON.stringify(body) });
       setToken(''); setSecret(''); setDirty(false);
@@ -525,7 +526,7 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
       try {
         const r = await apiFetch('/panel/setup/dns', { method: 'POST', body: JSON.stringify({ domain: dom, ip: targetIp, project: p.id }) });
         setDns({ state: r?.ok ? 'ok' : 'bad', ips: r?.ips || [], error: r?.error || '' });
-      } catch { setDns({ state: 'bad', ips: [], error: '' }); }
+      } catch (e) { setDns({ state: 'bad', ips: [], error: parseApiErr(e, 'Не удалось проверить DNS') }); }
     }, 600);
     return () => window.clearTimeout(timer.current);
   }, [dom, targetIp, inst, p.id, recheck]);

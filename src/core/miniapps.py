@@ -530,19 +530,50 @@ def deliver(server_id: int, *, sender: str, to: str, ehlo: str, mx: list[str], m
 
 
 # ───────────────────────── DNS ─────────────────────────
+# публичные резолверы: в Docker /etc/resolv.conf часто ndots:5 + свой search —
+# локальный dnspython тогда не видит нормальную A-запись.
+
+_PUBLIC_NS = ("1.1.1.1", "8.8.8.8", "9.9.9.9", "77.88.8.8")
+
 
 def resolve_a(domain: str) -> list[str]:
+    q = (domain or "").strip().rstrip(".") + "."
+    if q == ".":
+        return []
+    ips: set[str] = set()
     try:
         import dns.resolver
-        r = dns.resolver.Resolver()
-        r.lifetime = 5
-        return sorted({str(a) for a in r.resolve(domain, "A")})
+        import dns.exception
+        nameservers: list[str] = list(_PUBLIC_NS)
+        try:
+            for n in dns.resolver.Resolver().nameservers:
+                if n and n not in nameservers:
+                    nameservers.append(n)
+        except Exception:  # noqa: BLE001
+            pass
+        for ns in nameservers:
+            r = dns.resolver.Resolver(configure=False)
+            r.nameservers = [ns]
+            r.lifetime = 4.0
+            r.timeout = 2.5
+            try:
+                ans = r.resolve(q, "A", search=False)
+                ips.update(str(a) for a in ans)
+                if ips:
+                    break
+            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers,
+                    dns.exception.Timeout, OSError):
+                continue
+            except Exception:  # noqa: BLE001
+                continue
     except Exception:  # noqa: BLE001
         pass
-    try:
-        return sorted({i[4][0] for i in socket.getaddrinfo(domain, 443, socket.AF_INET)})
-    except OSError:
-        return []
+    if not ips:
+        try:
+            ips.update(i[4][0] for i in socket.getaddrinfo(domain.strip().rstrip("."), 443, socket.AF_INET))
+        except OSError:
+            pass
+    return sorted(ips)
 
 
 # ───────────────────────── скрипт для сервера ─────────────────────────
@@ -611,7 +642,7 @@ exec python3 /opt/blin-agent/agent.py watch </dev/null
 def build_router(core: Any):
     from fastapi import APIRouter, Depends, Header, HTTPException, Request
     from fastapi.responses import PlainTextResponse, Response
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, field_validator
 
     r = APIRouter()
 
@@ -878,7 +909,11 @@ def build_router(core: Any):
             return {"ok": False, "error": f"Домен уже занят проектом {projects.get(owner).name}", "ips": []}
         ips = resolve_a(dom)
         ip = norm_ip(body.ip)
-        return {"ok": bool(ip and ip in ips), "ips": ips, "error": ""}
+        ok = bool(ip and ip in ips)
+        err = ""
+        if not ok and not ips:
+            err = "Публичный DNS не видит A-запись. Нужен хост без зоны (app, не app.домен.cc), DNS — у тех NS, что указаны у регистратора (часто Cloudflare). Подождите минуту и нажмите «проверить»."
+        return {"ok": ok, "ips": ips, "error": err}
 
     @r.get("/api/panel/setup/mail/{pid}")
     def setup_mail(pid: str, _: dict = Depends(core.require_owner)) -> dict[str, Any]:
@@ -899,20 +934,60 @@ def build_router(core: Any):
     class SetupProjectBody(BaseModel):
         active: Optional[bool] = None
         bot_token: Optional[str] = Field(None, max_length=200)
-        admins: Optional[list[str]] = Field(None, max_length=30)
-        squads_vpn: Optional[list[str]] = Field(None, max_length=30)
-        squads_trial: Optional[list[str]] = Field(None, max_length=30)
-        pay_mode: Optional[str] = Field(None, pattern=r"^(yk|stars)$")
+        admins: Optional[list[str]] = Field(None, max_length=80)
+        squads_vpn: Optional[list[str]] = Field(None, max_length=80)
+        squads_trial: Optional[list[str]] = Field(None, max_length=80)
+        pay_mode: Optional[str] = None
         yookassa_shop_id: Optional[str] = Field(None, max_length=50)
         yookassa_secret_key: Optional[str] = Field(None, max_length=200)
-        channel_id: Optional[str] = Field(None, max_length=100)
+        channel_id: Optional[str] = Field(None, max_length=200)
         channel_required: Optional[bool] = None
+
+        @field_validator("pay_mode", mode="before")
+        @classmethod
+        def _pay(cls, v: Any) -> Any:
+            if v in (None, ""):
+                return None
+            s = str(v).strip().lower()
+            return s if s in ("yk", "stars") else v
+
+        @field_validator("channel_id", "bot_token", "yookassa_shop_id", "yookassa_secret_key", mode="before")
+        @classmethod
+        def _txt(cls, v: Any) -> Any:
+            if v is None:
+                return None
+            return str(v).strip()
+
+        @field_validator("admins", "squads_vpn", "squads_trial", mode="before")
+        @classmethod
+        def _ids(cls, v: Any) -> Any:
+            if v is None:
+                return None
+            out: list[str] = []
+            for x in v if isinstance(v, list) else []:
+                if isinstance(x, dict):
+                    x = x.get("uuid") or x.get("id") or ""
+                s = str(x).strip()
+                if s:
+                    out.append(s)
+            return out
+
+        @field_validator("channel_required", "active", mode="before")
+        @classmethod
+        def _flag(cls, v: Any) -> Any:
+            if v in (1, "1", "true", "True", "yes"):
+                return True
+            if v in (0, "0", "false", "False", "no"):
+                return False
+            return v
 
     @r.put("/api/panel/setup/project/{pid}")
     def setup_project_put(pid: str, body: SetupProjectBody, p: dict = Depends(core.require_owner)) -> dict[str, Any]:
         pid = projects.normalize(pid) or ""
         if not pid:
             raise HTTPException(404, detail={"message": "Нет такого проекта"})
+        if body.pay_mode not in (None, "yk", "stars"):
+            raise HTTPException(400, detail={"message": "Оплата: ЮKassa или Stars"})
         with projects.use(pid):
             fields = {k: getattr(body, k) for k in ("bot_token", "yookassa_shop_id", "yookassa_secret_key", "channel_id")
                       if getattr(body, k) is not None}
@@ -920,7 +995,12 @@ def build_router(core: Any):
                 fields.pop("yookassa_shop_id", None)
                 fields.pop("yookassa_secret_key", None)
             if fields:
-                core.panel_project_config_put(core.ProjectConfigBody(**fields), p)
+                try:
+                    core.panel_project_config_put(core.ProjectConfigBody(**fields), p)
+                except HTTPException:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(400, detail={"message": str(exc) or "Не удалось сохранить настройки"}) from exc
             if body.admins is not None:
                 ids = [x.strip() for x in body.admins if x.strip().lstrip("-").isdigit()]
                 db.set_setting("forum_admin_ids", ", ".join(dict.fromkeys(ids)))

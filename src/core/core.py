@@ -139,6 +139,7 @@ except Exception:  # noqa: BLE001
 
 import subdomain  # type: ignore  # домены ссылок подписки из .env
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
@@ -3157,6 +3158,18 @@ def _mask(v: str) -> str:
     return (v[:6] + "…" + v[-4:]) if len(v) > 12 else ("•" * len(v))
 
 
+def _norm_channel_id(raw: str) -> str:
+    s = (raw or "").strip().replace("＠", "@")
+    if not s:
+        return ""
+    m = re.search(r"(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)", s, re.I)
+    if m:
+        return "@" + m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_]{4,32}", s):
+        return "@" + s
+    return s
+
+
 def _project_config_view(pid: str) -> dict[str, Any]:
     p = projects.get(pid)
     src = lambda n: projects.config_source(pid, n)  # noqa: E731
@@ -3219,7 +3232,7 @@ def panel_project_config_put(body: ProjectConfigBody, _: dict = Depends(require_
         else:
             upd.update(TELEGRAM_BOT_TOKEN="", BOT_USERNAME="", BOT_ID="")
     if body.channel_id is not None:
-        cid = body.channel_id.strip()
+        cid = _norm_channel_id(body.channel_id)
         if cid and not re.fullmatch(r"@[A-Za-z0-9_]{4,32}|-100[0-9]{5,15}", cid):
             raise HTTPException(400, detail={"message": "Канал: @username или числовой ID вида -100…"})
         upd["CHANNEL_ID"] = cid
@@ -8674,6 +8687,31 @@ def internal_payment_chargeback(
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True, "reported": True}
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    errs = exc.errors()
+    print(f"[valid] {request.method} {request.url.path}: {errs}", flush=True)
+    e = (errs or [{}])[0]
+    loc = [str(x) for x in (e.get("loc") or []) if x not in ("body", "query", "path")]
+    field = loc[-1] if loc else ""
+    names = {
+        "pay_mode": "оплата", "channel_id": "канал", "bot_token": "токен бота",
+        "admins": "админы", "squads_vpn": "сквады", "squads_trial": "сквады пробного",
+        "yookassa_shop_id": "shopId ЮKassa", "yookassa_secret_key": "ключ ЮKassa",
+        "domain": "домен", "ip": "IP",
+    }
+    name = names.get(field, field)
+    typ = e.get("type") or ""
+    if typ == "string_pattern_mismatch" and field == "pay_mode":
+        msg = "Оплата: выберите ЮKassa или Stars"
+    elif typ == "string_type":
+        msg = f"{name}: ожидается текст" if name else "Неверный тип поля"
+    else:
+        raw = e.get("msg") or "неверное значение"
+        msg = f"{name}: {raw}" if name else raw
+    return JSONResponse(status_code=400, content={"detail": {"message": msg}, "error": msg})
 
 
 @app.exception_handler(HTTPException)
