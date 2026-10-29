@@ -7,14 +7,12 @@ import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
 import { C, FgnDialog, FgnHeader, FgnIcon, FgnPage, fgnButton } from "../components/fgn";
 
-type BypassInfo = { enabled?: boolean; used_bytes?: number | null; limit_bytes?: number } | null;
 type SubResponse = {
   status?: string;
   until?: string | null;
   key?: { devices_limit?: number; no_renew?: boolean; type?: string } | null;
   expired_key?: { expiry_date?: string | null } | null;
   delete_at?: string | null;
-  bypass?: BypassInfo;
   // участник чужой семейной подписки (макет 67); бэкенд семей пока не отдаёт
   family?: { role?: string; owner_name?: string | null } | null;
 };
@@ -151,7 +149,6 @@ export default function ManageSubscription() {
   const [noRenew, setNoRenew] = useState(false);
   const [isTrial, setIsTrial] = useState(false);
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
-  const [bypass, setBypass] = useState<BypassInfo>(null);
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
   const [setup, setSetup] = useState(false);
@@ -189,7 +186,6 @@ export default function ManageSubscription() {
         setUntilIso(data.until);
         setNoRenew(!!data.key?.no_renew);
         setIsTrial(data.key?.type === "trial" || data.status === "trial");
-        setBypass(data.bypass ?? null);
         if (data.key?.devices_limit) setKeyLimit(Number(data.key.devices_limit));
         if (data.family?.role === "member") setFamily({ ownerName: String(data.family.owner_name || "") });
       } catch { /* нет данных */ } finally {
@@ -256,13 +252,6 @@ export default function ManageSubscription() {
   const canBuyDevices = !isTrial && (devices?.can_buy ?? true);
   const mainTraffic = traffic?.available ? trafficValue(traffic.used_bytes, traffic.limit_bytes) : "без лимита";
   const mainOver = !!(traffic?.available && traffic.limit_bytes && (traffic.used_bytes || 0) >= traffic.limit_bytes);
-  const bypassOn = !!bypass?.enabled;
-  const bypassValue = !bypassOn
-    ? "не подключены"
-    : bypass?.limit_bytes
-      ? bypass.used_bytes == null ? formatBytesRu(bypass.limit_bytes) : trafficValue(bypass.used_bytes, bypass.limit_bytes)
-      : "без лимита";
-  const bypassOver = !!(bypassOn && bypass?.limit_bytes && (bypass.used_bytes || 0) >= bypass.limit_bytes);
 
   // макет 50: все места заняты — вместо листа «Куда добавить» диалог с докупкой
   const addSubscription = () => {
@@ -301,8 +290,7 @@ export default function ManageSubscription() {
 
         <Section top={25.25}>Трафик</Section>
         <div style={card}>
-          <Line left="Основной" right={mainTraffic} warn={mainOver} />
-          <Line left="Белые списки" right={bypassValue} warn={bypassOver} />
+          <Line left="VPN" right={mainTraffic} warn={mainOver} />
         </div>
 
         <div style={{ marginTop: 17, display: "flex", flexDirection: "column", gap: 10 }}>

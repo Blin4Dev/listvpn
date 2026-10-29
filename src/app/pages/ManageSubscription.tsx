@@ -17,21 +17,12 @@ import { copyText } from "../components/SubLinkBox";
 import { MSIcon } from "../components/ui";
 import { N, NoirBack, NoirButton, NoirCard, NoirRow, NoirScreen, NoirSection, NoirSheet } from "../components/noir";
 
-/**
- * Обходы (белые списки и т.п.) — отдельный тариф «Основная + обходы».
- * Бэкенд отдаёт в /api/app/subscription необязательное поле:
- *   bypass: { enabled: boolean; used_bytes?: number | null; limit_bytes?: number }
- * Нет поля / enabled=false → «не подключены».
- */
-type BypassInfo = { enabled?: boolean; until?: string | null; key?: string | null; used_bytes?: number | null; limit_bytes?: number } | null;
-
 type SubResponse = {
   status?: string;
   until?: string | null;
   key?: { devices_limit?: number; days_left?: number | null; no_renew?: boolean; type?: string } | null;
   expired_key?: { expiry_date?: string | null } | null;
   delete_at?: string | null;
-  bypass?: BypassInfo;
 };
 
 type DevicesResponse = { used?: number; limit?: number; can_buy?: boolean };
@@ -94,7 +85,6 @@ export default function ManageSubscription() {
   // пробная: доп. устройства не купить
   const [isTrial, setIsTrial] = useState(false);
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
-  const [bypass, setBypass] = useState<BypassInfo>(null);
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
 
@@ -139,7 +129,6 @@ export default function ManageSubscription() {
         setUntilIso(data.until);
         setNoRenew(!!data.key?.no_renew);
         setIsTrial(data.key?.type === "trial" || data.status === "trial");
-        setBypass(data.bypass ?? null);
         if (data.key?.devices_limit) setKeyLimit(Number(data.key.devices_limit));
       } catch { /* placeholder */ } finally {
         setLoaded(true);
@@ -213,16 +202,6 @@ export default function ManageSubscription() {
   const canBuyDevices = !isTrial && (devices?.can_buy ?? true);
   const mainTraffic = traffic?.available ? trafficValue(traffic.used_bytes, traffic.limit_bytes) : "без лимита";
   const mainOver = !!(traffic?.available && traffic.limit_bytes && (traffic.used_bytes || 0) >= traffic.limit_bytes);
-  const bypassOn = !!bypass?.enabled;
-  // единая подписка: срок один (вверху), здесь — только трафик обходов
-  const bypassValue = !bypassOn
-    ? "не подключены"
-    : bypass?.limit_bytes
-      ? bypass.used_bytes == null
-        ? `${formatBytesRu(bypass.limit_bytes)}`
-        : trafficValue(bypass.used_bytes, bypass.limit_bytes)
-      : "без лимита";
-  const bypassOver = !!(bypassOn && bypass?.limit_bytes && (bypass.used_bytes || 0) >= bypass.limit_bytes);
 
   // плавное появление блоков
   const rise = (i: number): React.CSSProperties => ({
@@ -283,8 +262,7 @@ export default function ManageSubscription() {
       <div style={rise(2)}>
         <NoirSection>Трафик</NoirSection>
         <NoirCard style={{ padding: "4px 18px" }}>
-          <TrafficRow label="Основной" value={mainTraffic} warn={mainOver} />
-          <TrafficRow label="Обходы" value={bypassValue} warn={bypassOver} last />
+          <TrafficRow label="VPN" value={mainTraffic} warn={mainOver} last />
         </NoirCard>
         <div style={{ marginTop: 12 }}>
           <NoirRow title="Сбросить трафик" onClick={requestTrafficReset} />

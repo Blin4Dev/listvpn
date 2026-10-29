@@ -7,7 +7,7 @@ import { copyText } from "../components/SubLinkBox";
 import { btnReset } from "../components/ui";
 import { N, NoirBack, NoirButton, NoirScreen } from "../components/noir";
 
-type Gift = { code: string; kind: string; status: string; months: number; whitelist?: number; created_at: string; redeemed_at?: string | null };
+type Gift = { code: string; kind: string; status: string; months: number; created_at: string; redeemed_at?: string | null };
 
 function periodTitle(m: number) {
   if (m === 12) return "1 год";
@@ -64,7 +64,6 @@ export default function MyGifts() {
               >
                 <div style={{ fontSize: 17.5, color: used ? N.muted : N.text }}>
                   Подарок, {periodTitle(Number(g.months || 1))}
-                  {g.whitelist ? <span style={{ color: N.dim }}> · с белыми списками</span> : null}
                 </div>
                 <div style={{ marginTop: 6, fontSize: 15, letterSpacing: "0.02em", color: N.dim, userSelect: "all", WebkitUserSelect: "all" }}>
                   {g.code}

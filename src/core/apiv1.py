@@ -205,24 +205,6 @@ def build_router(core: Any) -> APIRouter:
             store.enqueue_provisioning(int(fresh["id"]), int(sub["id"]), "resync")
         return JSONResponse(status_code=202, content=store.subscription_payload(fresh))
 
-    # ── 1a. серверный: ключ обхода (белые списки) по Telegram ID ──
-
-    @r.get("/service/bypass")
-    def service_bypass(tg_id: int = Query(..., ge=1, le=2 ** 62), _: None = Depends(service_dep)) -> dict[str, Any]:
-        """{"bypass": {enabled, available, until, key, used_bytes?, limit_bytes?}} — тот же объект,
-        что мини-приложение получает в /api/app/subscription. Нет пользователя — 404 user_not_found.
-        Без активной подписки обход считается выключенным (enabled=false, key=null)."""
-        # проект — по заголовку X-Project / домену (по умолчанию — основной проект сети)
-        row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND project_id = ?", (int(tg_id), db.pid()))
-        user = core.get_user(int(row["id"])) if row else None
-        if not user:
-            raise _err(404, "Пользователь не найден", "user_not_found")
-        user = core.family_owner_for(user) or user  # участник семьи — обход владельца
-        if user.get("is_banned") or core.subscription_status_for_user(user) not in ("active", "trial"):
-            return {"bypass": {"enabled": False, "available": core.fulfillment.whitelist_available(),
-                               "until": None, "key": None}}
-        return {"bypass": core._bypass_info(int(user["id"]))}
-
     # ── 2. тарифы ──
 
     @r.get("/tariffs")

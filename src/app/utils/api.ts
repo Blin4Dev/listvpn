@@ -204,24 +204,17 @@ export type CreatePaymentRequest = {
   use_referral_balance?: boolean;
   // экран для возврата после оплаты (если закрыли приложение во время платежа)
   return_to?: string;
-  // опция «белые списки»
-  whitelist?: boolean;
 };
 
 // тарифы по периодам
-// whitelist_price — полная цена тарифа с белыми списками (ВПН + анти-ключ), 0 = на этот срок нельзя
-export type TariffPeriod = {
-  months: number; days: number; price: number; whitelist_price: number;
-  stars?: number; whitelist_stars?: number; whitelist_devices?: number;
-};
-export type TariffsResponse = { devices: number; periods: TariffPeriod[]; whitelist_available: boolean };
+export type TariffPeriod = { months: number; days: number; price: number; stars?: number };
+export type TariffsResponse = { devices: number; periods: TariffPeriod[] };
 
 export async function fetchTariffs(): Promise<TariffsResponse> {
   const d = await appFetch<Partial<TariffsResponse>>("/plans");
   return {
     devices: Number(d?.devices ?? 3),
     periods: Array.isArray(d?.periods) ? d!.periods! : [],
-    whitelist_available: !!d?.whitelist_available,
   };
 }
 
@@ -256,7 +249,6 @@ export type PaymentStatusResponse = {
   // для экрана итога оплаты
   months?: number;
   days?: number | null;
-  whitelist?: boolean;
   stars?: number | null;
   referral_applied?: number;
   extra_devices?: number;
@@ -331,7 +323,6 @@ export type PaymentQuote = {
   base_price?: number | null;
   devices_price?: number;
   device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
-  whitelist?: boolean; // единый тариф: в заказ входят белые списки
 };
 
 export type PayMethodInfo = { id: PaymentMethod; title: string; enabled: boolean };

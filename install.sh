@@ -1062,11 +1062,6 @@ create_env_file() {
     prompt_valid "  ${BOLD}API Token${NC}  (из панели Remnawave): " REMWAVE_API_KEY \
         '^[!-~]{10,}$' "Токен — латинские символы без пробелов (Remnawave → API Tokens)"
 
-    section "Белые списки · FurkVPN"
-    hint "Ключ партнёра из @VPNpartenrsbot (карточка приложения). Пусто — белые списки будут скрыты, ключ можно добавить в .env позже."
-    prompt_valid "  ${BOLD}FURK API-ключ${NC} (Enter — пропустить): " FURK_API_KEY \
-        '^[!-~]{10,}$' "Ключ — латинские символы без пробелов" 1
-
     TELEGRAM_WEBHOOK_SECRET="$(gen_secret_hex)"
     MINIAPP_GATEWAY_SECRET="$(get_env_var MINIAPP_GATEWAY_SECRET .env 2>/dev/null || true)"
     MINIAPP_GATEWAY_SECRET="${MINIAPP_GATEWAY_SECRET:-$(gen_secret_hex)}"
@@ -1089,10 +1084,6 @@ REMWAVE_PANEL_URL=${REMWAVE_PANEL_URL}
 REMWAVE_API_KEY=${REMWAVE_API_KEY}
 
 # домены ссылок подписки — в панели (Настройки → Проект), у каждого проекта свои
-
-# белые списки: FurkVPN Partner API v2 (https://api.furkvpn.com/docs/v2)
-FURK_API_KEY=${FURK_API_KEY}
-FURK_BASE_URL=https://api.furkvpn.com/api/v2
 
 # платежи: ЮKassa (shopId и ключ — в панели, Настройки → Проект) / telegram stars
 # чеки 54-ФЗ через ЮKassa: 1 — отправлять чек (нужна почта покупателя или YOOKASSA_RECEIPT_EMAIL)
@@ -1307,7 +1298,7 @@ fix_container_data_permissions() {
 migrate_security_update() {
     local file="${1:-.env}"
     if [[ -f "$file" ]]; then
-        grep -q '^VPN_SUB_DOMAIN=' "$file" || printf '\n# домены ссылок подписки (пусто — без замены): путь из Remnawave/FurkVPN, домен отсюда\nVPN_SUB_DOMAIN=\nWHITELIST_SUB_DOMAIN=\n' >> "$file"
+        grep -q '^VPN_SUB_DOMAIN=' "$file" || printf '\n# домены ссылок подписки (пусто — без замены): путь из Remnawave, домен отсюда\nVPN_SUB_DOMAIN=\n' >> "$file"
     fi
     if [[ ! -f "$file" ]]; then
         log_warn "Файл ${file} не найден — миграция пропущена."

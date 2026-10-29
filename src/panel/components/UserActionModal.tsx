@@ -17,7 +17,6 @@ export type ActionConfig = { title: string; label: string; icon: React.ElementTy
 export const ACTION_MAP: Record<string, ActionConfig> = {
   EXTEND_ALL:         { title: 'Продлить подписку', label: 'Дней', icon: Clock, type: 'number', min: 1, max: 1095 },
   EXTEND_SUB:         { title: 'Продлить подписку', label: 'Дней', icon: Clock, type: 'number' },
-  EXTEND_BYPASS:      { title: 'Продлить ключ обхода', label: 'Дней', icon: Clock, type: 'number', min: 1, max: 1095 },
   REDUCE_SUB:         { title: 'Уменьшить срок VPN', label: 'Дней', icon: Clock, type: 'number' },
   SET_TRAFFIC:        { title: 'Лимит трафика', label: 'Макс. трафик, ГБ', icon: Database, type: 'number' },
   SET_DEVICES:        { title: 'Лимит устройств', label: 'Устройств (1–20)', icon: Smartphone, type: 'number', min: 1, max: 20, presets: DEVICE_LIMIT_PRESETS },
@@ -101,19 +100,14 @@ export const UserActionModal: React.FC<{
             )}
           </div>
         )}
-        {type === 'EXTEND_BYPASS' && (
-          <div className="sub" style={{ fontSize: 12 }}>
-            Списывается с баланса FurkVPN. Ключ VPN и срок подписки в Remnawave не меняются. Если ключа обхода ещё нет — он будет выдан.
-          </div>
-        )}
         {type === 'EXTEND_ALL' && (
           <div className="sub" style={{ fontSize: 12 }}>
-            Продлевается всё сразу: VPN (база и Remnawave) и ключ обхода до той же даты. Нет подписки — будет выдана.
+            Продлевается подписка: VPN в базе и в Remnawave. Нет подписки — будет выдана.
           </div>
         )}
         {type === 'EXTEND_SUB' && (
           <div className="sub" style={{ fontSize: 12 }}>
-            Продлевается VPN (база и Remnawave) и ключ обхода до той же даты.
+            Продлевается VPN в базе и в Remnawave.
           </div>
         )}
         {isNotify ? (

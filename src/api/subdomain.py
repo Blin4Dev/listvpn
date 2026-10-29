@@ -1,6 +1,5 @@
 # домены ссылок подписки из .env:
 #   VPN_SUB_DOMAIN       — домен обычного VPN (вместо домена из Remnawave)
-#   WHITELIST_SUB_DOMAIN — домен белых списков (вместо домена из FurkVPN)
 # Путь ссылки остаётся как есть: https://domain1.com/hIeb + VPN_SUB_DOMAIN=domain2.com → https://domain2.com/hIeb
 # Пусто — ссылка отдаётся без изменений.
 # Сеть проектов: у проекта может быть свой домен — FGN__VPN_SUB_DOMAIN (иначе общий VPN_SUB_DOMAIN).
@@ -40,7 +39,3 @@ def swap(url: Optional[str], domain: str) -> Optional[str]:
 
 def vpn(url: Optional[str]) -> Optional[str]:
     return swap(url, _domain("VPN_SUB_DOMAIN"))
-
-
-def whitelist(url: Optional[str]) -> Optional[str]:
-    return swap(url, _domain("WHITELIST_SUB_DOMAIN"))

@@ -1,6 +1,6 @@
 // FGN: «Выбор тарифа» (переопределение src/app/pages/Tariffs.tsx).
 // Макет: шапка, карточка «Устройства» со степпером (−/N/+, подпись «N в тарифе · следующее +X ₽/мес»),
-// подпись «Выберите период · ВПН + белые списки», 4 карточки периодов («30 дней, 2 устройства», цена справа).
+// подпись «Выберите период», 4 карточки периодов («30 дней, 2 устройства», цена справа).
 import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
@@ -8,10 +8,10 @@ import { applyDiscount, fetchDiscount, fetchQuote, fetchTariffs, type TariffPeri
 import { C, FgnCard, FgnHeader, FgnIcon, FgnPage } from "../components/fgn";
 
 const FALLBACK: TariffPeriod[] = [
-  { months: 1, days: 30, price: 200, whitelist_price: 0 },
-  { months: 3, days: 90, price: 580, whitelist_price: 0 },
-  { months: 6, days: 180, price: 1100, whitelist_price: 0 },
-  { months: 12, days: 365, price: 2200, whitelist_price: 0 },
+  { months: 1, days: 30, price: 200 },
+  { months: 3, days: 90, price: 580 },
+  { months: 6, days: 180, price: 1100 },
+  { months: 12, days: 365, price: 2200 },
 ];
 
 function plural(n: number, one: string, few: string, many: string) {
@@ -72,7 +72,6 @@ export default function Tariffs() {
 
   const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
   const [devices, setDevices] = useState(2);
-  const [wlAvailable, setWlAvailable] = useState(true);
   const [discount, setDiscount] = useState(0);
   // устройства: сколько всего (минимум — тариф или то, что уже есть в подписке), цена доп. устройства в месяц
   const [devTotal, setDevTotal] = useState<number | null>(null);
@@ -87,7 +86,6 @@ export default function Tariffs() {
         const t = await fetchTariffs();
         if (t.periods.length) setPeriods(t.periods);
         setDevices(t.devices);
-        setWlAvailable(t.whitelist_available);
       } catch { /* запасные цены */ }
       try {
         const d = await fetchDiscount();
@@ -96,7 +94,7 @@ export default function Tariffs() {
       try {
         // минимум устройств и цену доп. устройства считает сервер (учитывает текущую подписку)
         const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
-          subscription_id: null, use_referral_balance: false, whitelist: false });
+          subscription_id: null, use_referral_balance: false });
         if (!q) throw new Error("no quote");
         const min = Number(q.min_devices || q.plan_devices || 2);
         setDevMin(min);
@@ -163,7 +161,7 @@ export default function Tariffs() {
       ) : null}
 
       <div style={{ marginTop: showDevices ? 21.5 : 20, fontSize: 14.5, lineHeight: "18px", color: MUTED }}>
-        Выберите период{wlAvailable ? " · ВПН + белые списки" : ""}
+        Выберите период
       </div>
 
       <div style={{ marginTop: 13.5, display: "flex", flexDirection: "column", gap: 8 }}>

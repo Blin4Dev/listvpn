@@ -60,7 +60,7 @@ PROJECT_SETTING_KEYS = frozenset({
     "offer_text", "privacy_text",
     "base_price", "extra_device_price", "extra_device_stars", "tariff_devices", "device_prices", "device_stars",
     "trial_enabled", "trial_miniapp_enabled", "trial_web_enabled", "trial_days", "trial_traffic_gb",
-    "trial_devices", "trial_bypass", "trial_hwid_enabled", "trial_hwid_max",
+    "trial_devices", "trial_hwid_enabled", "trial_hwid_max",
     "paid_traffic_gb", "traffic_reset_price", "channel_required", "pay_methods",
     "apiv1_tasks_seeded",
     # семейная подписка: сколько человек в семье вместе с владельцем
@@ -72,8 +72,7 @@ PROJECT_SETTING_KEYS = frozenset({
     # сайт проекта (features.site): приложения для компьютера
     "desktop_windows_url", "desktop_macos_url", "desktop_version",
 })
-PROJECT_SETTING_PREFIXES = ("period_price_", "period_stars_", "whitelist_price_", "whitelist_stars_",
-                            "whitelist_devices_")
+PROJECT_SETTING_PREFIXES = ("period_price_", "period_stars_")
 
 
 def is_project_setting(key: str) -> bool:
@@ -87,7 +86,7 @@ PANEL_CONFIG: dict[str, bool] = {
     "YOOKASSA_SHOP_ID": False, "YOOKASSA_SECRET_KEY": True,
     "CHANNEL_ID": False, "CHANNEL_URL": False,
     "SUPPORT_URL": False, "TELEGRAM_MINIAPP_LINK": False,
-    "VPN_SUB_DOMAIN": False, "WHITELIST_SUB_DOMAIN": False,
+    "VPN_SUB_DOMAIN": False,
     # мини-приложение проекта на своём сервере (ставится из панели, см. miniapps.py)
     "MINIAPP_DOMAIN": False, "MINIAPP_URL": False, "SITE_DOMAIN": False, "MINIAPP_SERVER": False,
     # проект включён в панели: "1" / "0"; не задано — работает, если бот подключён (старые установки)

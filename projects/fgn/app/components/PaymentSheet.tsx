@@ -38,7 +38,6 @@ const CARD_BORDER = "rgba(42, 42, 48, 1)";
 type Details = {
   months: number;
   days: number | null;
-  whitelist: boolean;
   amount: number | null;
   currency: string;
   stars: number | null;
@@ -107,7 +106,6 @@ export default function PaymentSheet({
       setInfo({
         months: Number(s.months || 0),
         days: s.days != null ? Number(s.days) : null,
-        whitelist: !!s.whitelist,
         amount: s.amount != null ? Number(s.amount) : null,
         currency: String(s.currency || "RUB"),
         stars: s.stars != null ? Number(s.stars) : null,
@@ -235,7 +233,6 @@ export default function PaymentSheet({
       details.push("Трафик сброшен");
     } else {
       if (info?.days) details.push(`+${info.days} ${plural(info.days, "день", "дня", "дней")}`);
-      if (info?.whitelist) details.push("Белые списки включены");
       if (setupNext) details.push("Осталось добавить подписку в приложение");
     }
     if (info && !isStars && info.refApplied > 0 && paidRub != null) {

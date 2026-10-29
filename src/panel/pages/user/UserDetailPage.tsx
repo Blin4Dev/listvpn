@@ -15,7 +15,7 @@ import { PaymentActions } from '../../components/PaymentActions';
 export interface UserDetailData {
   id: number; telegram_id: number | null; username: string | null;
   first_name: string | null; last_name: string | null; email: string | null;
-  registration_date: string | null; anti_key?: string | null; anti_expires_at?: string | null; status: string; is_banned: boolean; key_blocked?: boolean; ban_reason?: string | null; blacklist_reason?: string | null; blacklist_ignored?: boolean;
+  registration_date: string | null; status: string; is_banned: boolean; key_blocked?: boolean; ban_reason?: string | null; blacklist_reason?: string | null; blacklist_ignored?: boolean;
   family?: { role: 'member'; owner_id: number; owner_name: string; active: boolean } | { role: 'owner'; max_members: number; members: { id: number; name: string; status: string; user_id?: number | null }[] } | null;
   subscriptions_history?: { id: number; status: string; type?: string; expiry_date?: string | null; created_at?: string | null; deleted_at?: string | null; devices_limit?: number; ban_reason?: string | null; banned_at?: string | null }[];
   banned_at?: string | null;
@@ -89,7 +89,6 @@ export const UserDetailPage: React.FC<{
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [action, setAction] = useState<string | null>(null);
-  // VPN и ключ обхода продлеваются одной кнопкой во всех проектах (EXTEND_ALL)
   const [editTg, setEditTg] = useState(false);
   const [editEmail, setEditEmail] = useState(false);
   const [tgDraft, setTgDraft] = useState('');
@@ -278,12 +277,6 @@ export const UserDetailPage: React.FC<{
             )}
           </InfoRow>
           <InfoRow label="Регистрация"><span className="mono">{fmtDateTime(detail.registration_date)}</span></InfoRow>
-          <InfoRow label="Ключ обхода">
-            {detail.anti_key ? (
-              <span className="mono" style={{ wordBreak: 'break-all' }}>{detail.anti_key} · до {fmtDateTime(detail.anti_expires_at ?? null)}</span>
-            ) : <span className="mono">нет</span>}
-            <span className="faint" style={{ fontSize: 12 }}>продлевается вместе с подпиской</span>
-          </InfoRow>
           <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
           {detail.trial_status && (
             <InfoRow label="Пробный">

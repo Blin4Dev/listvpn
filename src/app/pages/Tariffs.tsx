@@ -30,10 +30,10 @@ function devicesWord(n: number) {
 }
 
 const FALLBACK: TariffPeriod[] = [
-  { months: 1, days: 30, price: 180, whitelist_price: 0 },
-  { months: 3, days: 90, price: 470, whitelist_price: 0 },
-  { months: 6, days: 180, price: 900, whitelist_price: 0 },
-  { months: 12, days: 365, price: 1600, whitelist_price: 0 },
+  { months: 1, days: 30, price: 180 },
+  { months: 3, days: 90, price: 470 },
+  { months: 6, days: 180, price: 900 },
+  { months: 12, days: 365, price: 1600 },
 ];
 
 function StepBtn({ icon, disabled, onClick, label }: { icon: string; disabled: boolean; onClick: () => void; label: string }) {
@@ -74,7 +74,6 @@ export default function Tariffs() {
   const [loaded, setLoaded] = useState(false);
   const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
   const [devices, setDevices] = useState(2);
-  const [wlAvailable, setWlAvailable] = useState(false);
   const [discount, setDiscount] = useState(0);
   // устройства: сколько всего (минимум — тариф или то, что уже есть в подписке), цена доп. устройства в месяц
   const [devTotal, setDevTotal] = useState<number | null>(null);
@@ -89,7 +88,6 @@ export default function Tariffs() {
         const t = await fetchTariffs();
         if (t.periods.length) setPeriods(t.periods);
         setDevices(t.devices);
-        setWlAvailable(t.whitelist_available);
       } catch { /* запасные цены */ }
       try {
         const d = await fetchDiscount();
@@ -98,7 +96,7 @@ export default function Tariffs() {
       try {
         // минимум устройств и цену доп. устройства считает сервер (учитывает текущую подписку)
         const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
-          subscription_id: null, use_referral_balance: false, whitelist: false });
+          subscription_id: null, use_referral_balance: false });
         if (!q) throw new Error("no quote");
         const min = Number(q.min_devices || q.plan_devices || 2);
         setDevMin(min);
@@ -119,7 +117,6 @@ export default function Tariffs() {
     navigate(`/payment?${q.toString()}`);
   };
 
-  // единый тариф: ВПН + белые списки на тот же срок, одна цена
   const shown = periods;
   const devNow = devTotal ?? devices;
   const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
@@ -167,7 +164,7 @@ export default function Tariffs() {
       ) : null}
 
       <div style={{ margin: "22px 0 10px", fontSize: 14.5, color: N.muted }}>
-        Выберите период{wlAvailable ? " · ВПН + белые списки" : ""}
+        Выберите период
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

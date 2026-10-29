@@ -168,9 +168,6 @@ export default function Payment() {
   const monthsParam = parseInt(searchParams.get("months") || "0", 10);
   const hasPeriod = [1, 3, 6, 12].includes(monthsParam);
   const months = hasPeriod && flowType !== "traffic_reset" ? monthsParam : 1;
-  // белые списки (отдельный тариф с анти-ключом): подписка или подарок
-  // единый тариф: белые списки включаются сервером автоматически (подписка/продление/подарок)
-  const whitelist = false;
   const subParam = searchParams.get("sub");
   const isDevicesFlow = flowType === "devices";
   const isTrafficReset = flowType === "traffic_reset";
@@ -244,7 +241,6 @@ export default function Payment() {
         purpose,
         subscription_id: subParam ? Number(subParam) : null,
         use_referral_balance: useRefBal && !isStars,
-        whitelist,
       });
       if (!alive) return;
       setQuote(q);
@@ -252,7 +248,7 @@ export default function Payment() {
 
     })();
     return () => { alive = false; };
-  }, [planDevices, method, extraDevices, useRefBal, purpose, subParam, months, whitelist, methodsReady, isStars, promoTick]);
+  }, [planDevices, method, extraDevices, useRefBal, purpose, subParam, months, methodsReady, isStars, promoTick]);
 
   // суммы
   const price = quote ? quote.price : 0;
@@ -297,7 +293,6 @@ export default function Payment() {
         subscription_id: subParam ? Number(subParam) : null,
         use_referral_balance: canUseRef && useRefBal,
         return_to: returnTo || "/subscription",
-        whitelist,
       });
       const goWaiting = (extra: Partial<PendingPayment> = {}) =>
         setPending({
@@ -337,12 +332,12 @@ export default function Payment() {
   }
 
   const what = isGift
-    ? `Подарок другу: ${periodLabel(months)} · ${planDevices} ${deviceWord(planDevices)}${quote?.whitelist ? " · белые списки" : ""}`
+    ? `Подарок другу: ${periodLabel(months)} · ${planDevices} ${deviceWord(planDevices)}`
     : isTrafficReset
     ? `Досрочный сброс трафика${trafficNow?.available && trafficNow.used_bytes != null ? ` · потрачено ${formatBytesRu(trafficNow.used_bytes)}${trafficNow.limit_bytes ? ` из ${formatBytesRu(trafficNow.limit_bytes)}` : ""}` : ""}`
     : isDevicesFlow
       ? `Доп. устройства: +${extraDevices} на ${periodLabel(months)}`
-      : `${periodLabel(months)} · ${devNow} ${deviceWord(devNow)}${quote?.whitelist ? " · белые списки" : ""}`;
+      : `${periodLabel(months)} · ${devNow} ${deviceWord(devNow)}`;
 
   const v = (n: number) => (quoteReady ? fmt(n) : "…");
 

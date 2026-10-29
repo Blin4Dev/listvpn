@@ -16,7 +16,6 @@ type HistoryItem = {
   created_at?: string;
   purpose?: string | null;
   months?: number | null;
-  whitelist?: boolean;
 };
 
 const GREEN = "#2FD39A";
@@ -50,7 +49,7 @@ function formatWhen(iso?: string): string {
 function titleFor(item: HistoryItem): string {
   const m = Number(item.months || 0);
   if ((item.purpose === "subscription" || item.purpose === "extend") && m > 0) {
-    return periodTitle(m) + (item.whitelist ? " + обходы" : "");
+    return periodTitle(m);
   }
   if (item.purpose === "gift" && m > 0) return `Подарок, ${periodTitle(m)}`;
   if (item.title) return item.title;

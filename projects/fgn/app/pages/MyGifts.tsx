@@ -7,7 +7,7 @@ import { formatDateRu } from "../utils/date";
 import { copyText } from "../components/SubLinkBox";
 import { C, FgnCard, FgnHeader, FgnPage } from "../components/fgn";
 
-type Gift = { code: string; kind: string; status: string; months: number; days?: number; whitelist?: number; created_at: string; redeemed_at?: string | null };
+type Gift = { code: string; kind: string; status: string; months: number; days?: number; created_at: string; redeemed_at?: string | null };
 
 function periodTitle(m: number) {
   if (m === 12) return "1 год";

@@ -1667,12 +1667,6 @@ def get_plans_meta() -> dict[str, Any]:
         "device_stars": {str(k): v for k, v in sorted(fulfillment.device_stars_overrides().items())},
         "period_prices": {str(m): fulfillment.period_price(m) for m in fulfillment.SUB_PERIODS},
         "period_stars": {str(m): fulfillment.period_stars(m) for m in fulfillment.SUB_PERIODS},
-        # белые списки — отдельные тарифы с анти-ключом FURK (полная цена, 0 = период недоступен)
-        "whitelist_prices": {str(m): fulfillment.whitelist_price(m) for m in fulfillment.SUB_PERIODS},
-        "whitelist_stars": {str(m): fulfillment.whitelist_stars(m) for m in fulfillment.SUB_PERIODS},
-        "whitelist_devices": {str(m): fulfillment.whitelist_devices(m) for m in fulfillment.SUB_PERIODS},
-        "whitelist_configured": fulfillment.whitelist_available(),
-        "whitelist_error": (fulfillment.furk.last_error() if fulfillment.furk is not None else "furk.py не найден"),
         "pay_methods": pay_methods(),
     }
 
@@ -2357,7 +2351,6 @@ class CreatePaymentBody(BaseModel):
     subscription_id: Optional[int] = None
     use_referral_balance: bool = False  # частично оплатить реф. балансом
     return_to: Optional[str] = None  # экран мини-приложения после оплаты
-    whitelist: bool = False  # опция «белые списки» (отдельный сквад)
 
 
 # минимум суммы, которую отправляем в ЮKassa (руб); остальное можно покрыть реф. балансом
@@ -2438,12 +2431,9 @@ class PlansUpdateBody(BaseModel):
     aa_warn_days: Optional[int] = Field(None, ge=1, le=60)
     trial_hwid_enabled: Optional[bool] = None
     trial_hwid_max: Optional[int] = Field(None, ge=1, le=10)
-    # тарифы по периодам: {"1": 180, "3": 470, ...}; белые списки — полная цена тарифа с анти-ключом
+    # тарифы по периодам: {"1": 180, "3": 470, ...}
     period_prices: Optional[dict[str, float]] = None
     period_stars: Optional[dict[str, float]] = None
-    whitelist_prices: Optional[dict[str, float]] = None
-    whitelist_stars: Optional[dict[str, float]] = None
-    whitelist_devices: Optional[dict[str, float]] = None
     tariff_devices: Optional[int] = Field(None, ge=1, le=20)
     # цены доп. устройств по номеру, ₽/мес: {"4": 40, "5": 35}; пусто/null — как у предыдущего
     device_prices: Optional[dict[str, Optional[float]]] = None
@@ -3120,7 +3110,6 @@ class ProjectConfigBody(BaseModel):
     support_url: Optional[str] = Field(None, max_length=300)
     miniapp_link: Optional[str] = Field(None, max_length=300)
     vpn_sub_domain: Optional[str] = Field(None, max_length=200)
-    whitelist_sub_domain: Optional[str] = Field(None, max_length=200)
     # фишки проекта (features в project.json)
     notconn_hours: Optional[int] = Field(None, ge=1, le=168)
     winback_after_days: Optional[int] = Field(None, ge=1, le=365)
@@ -3187,7 +3176,6 @@ def _project_config_view(pid: str) -> dict[str, Any]:
         "support_url": p.env("SUPPORT_URL"),
         "miniapp_link": p.env("TELEGRAM_MINIAPP_LINK"),
         "vpn_sub_domain": p.env("VPN_SUB_DOMAIN"),
-        "whitelist_sub_domain": p.env("WHITELIST_SUB_DOMAIN"),
         # домен мини-приложения — инфраструктура (Caddy + сертификат): install.sh
         "miniapp_url": p.miniapp_url,
         "features": {k: bool(v) for k, v in (p.cfg.get("features") or {}).items()},
@@ -3257,7 +3245,7 @@ def panel_project_config_put(body: ProjectConfigBody, _: dict = Depends(require_
             if v and not v.startswith("https://"):
                 raise HTTPException(400, detail={"message": "Ссылка должна начинаться с https://"})
             upd[name] = v
-    for field, name in (("vpn_sub_domain", "VPN_SUB_DOMAIN"), ("whitelist_sub_domain", "WHITELIST_SUB_DOMAIN")):
+    for field, name in (("vpn_sub_domain", "VPN_SUB_DOMAIN"),):
         v = getattr(body, field)
         if v is not None:
             v = re.sub(r"^[a-z]+://", "", v.strip(), flags=re.I).split("/", 1)[0]
@@ -3980,24 +3968,8 @@ def _revoke_subscription_for_payment(payment: dict[str, Any]) -> None:
                 else:
                     db.execute("UPDATE subscriptions SET expires_at = ?, devices_limit = ? WHERE id = ?",
                                (iso(new_exp), new_dev, sub["id"]))
-                # белые списки этого платежа (анти-ключ FURK): вернуть прежний срок в базе,
-                # сам ключ у провайдера урезать нельзя — алерт админу
-                wl_squads: Optional[list[str]] = None
-                if plan.get("whitelist") and "anti_key" in plan and not later and not to_trial:
-                    db.execute("UPDATE users SET anti_key = ?, anti_key_id = ?, anti_expires_at = ? WHERE id = ?",
-                               (plan.get("prev_anti_key") or plan.get("anti_key"),
-                                plan.get("prev_anti_key_id") or plan.get("anti_key_id"),
-                                plan.get("prev_anti_until"), int(user["id"])))
-                    try:
-                        forum.report_error("Возврат платежа с белыми списками",
-                                           f"{payment.get('payment_id')}: анти-ключ {plan.get('anti_key')} продлён у FURK — "
-                                           f"при необходимости отключите/сократите его вручную")
-                    except Exception:  # noqa: BLE001
-                        pass
                 if client and rw:
                     patch: dict[str, Any] = {"id": _rw_num_id(rw), "expire_at": new_exp, "hwid_device_limit": new_dev}
-                    if wl_squads is not None:
-                        patch["active_internal_squads"] = wl_squads
                     if to_trial:
                         patch["active_internal_squads"] = db.loads(squads, []) or fulfillment.trial_squads()
                         patch["traffic_limit_bytes"] = int(tr_limit) * fulfillment.GB
@@ -4369,10 +4341,6 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "last_name": user.get("last_name"),
         "email": user.get("email"),
         "registration_date": user.get("created_at"),
-        # белые списки: анти-ключ FURK («Ключ обхода» в старом боте)
-        "anti_key": subdomain.whitelist(user.get("anti_key")),
-        "anti_expires_at": user.get("anti_expires_at"),
-        "anti_key_id": user.get("anti_key_id"),
         "status": subscription_status_for_user(user),  # trial|active|expired|lapsed|never|banned
         "is_banned": bool(user.get("is_banned")),
         "balance": user.get("balance", 0),
@@ -4466,7 +4434,7 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
         # внутреннего баланса нет, старые действия отключены
         raise HTTPException(400, detail={"message": "Внутреннего баланса нет — используйте реферальный баланс"})
     if action == "EXTEND_ALL":
-        # одной кнопкой: VPN + ключ обхода до той же даты (во всех проектах)
+        # одной кнопкой: +дни ко всей подписке (VPN + Remnawave)
         try:
             all_days = int(float(value or 0))
         except (TypeError, ValueError):
@@ -4478,32 +4446,9 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
         days_sub = int(float(value or 0))
         extend_user_sub(user_id, days_sub, body.subscription_id)
         _rw_sync_expiry(user)
-        if days_sub > 0:
-            # единая подписка: ключ обхода продлевается (или выдаётся) до той же даты, что и VPN
-            _bypass_follow_vpn(user_id, "panel")
     elif action == "REDUCE_SUB":
         extend_user_sub(user_id, -int(float(value or 0)), body.subscription_id)
         _rw_sync_expiry(user)
-    elif action == "EXTEND_BYPASS":
-        try:
-            bypass_days = int(float(value or 0))
-        except (TypeError, ValueError):
-            raise HTTPException(400, detail={"message": "Укажите число дней"})
-        if not 1 <= bypass_days <= 1095:
-            raise HTTPException(400, detail={"message": "Дней ключа обхода: от 1 до 1095"})
-        if not fulfillment.whitelist_available():
-            raise HTTPException(400, detail={"message": "FurkVPN API не подключён — ключ обхода продлить нельзя"})
-        wl = fulfillment.grant_whitelist(
-            user, idem=f"panel-{user_id}-bypass-{secrets.token_hex(8)}", days=bypass_days)
-        if not wl.get("ok"):
-            code = wl.get("error_code")
-            if code == "INSUFFICIENT_FUNDS":
-                msg = "Недостаточно средств на балансе FurkVPN"
-            elif wl.get("error") == "furk_not_configured":
-                msg = "FurkVPN API не подключён"
-            else:
-                msg = str(wl.get("error") or "Не удалось продлить ключ обхода")
-            raise HTTPException(502, detail={"message": msg})
     elif action == "SET_TRAFFIC":
         gb = int(float(value or 0))
         if body.subscription_id:
@@ -4785,8 +4730,6 @@ def _action_notify_text(action: str, value: Any) -> str:
     a = action.upper()
     if a in ("EXTEND_SUB", "EXTEND_ALL"):
         return f"✅ Ваша подписка продлена на {int(float(value or 0))} дн."
-    if a == "EXTEND_BYPASS":
-        return f"✅ Ключ обхода продлён на {int(float(value or 0))} дн."
     if a == "REDUCE_SUB":
         return f"ℹ️ Срок вашей подписки уменьшен на {int(float(value or 0))} дн."
     if a in ("ADD_TRAFFIC", "SET_TRAFFIC"):
@@ -4823,12 +4766,6 @@ def _mass_add_days_worker(sub_ids: list[int], days: int) -> None:
             if user:
                 _rw_sync_expiry(user)
     print(f"[mass] +{days} дн.: продлено подписок {len(sub_ids)}, пользователей {len(done_users)}", flush=True)
-    if days > 0:
-        for uid in done_users:  # единая подписка: обход до той же даты (уже в фоновом потоке)
-            try:
-                fulfillment.sync_whitelist_to_vpn(uid, "mass")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[whitelist] user {uid}: синхронизация не удалась — {exc}", flush=True)
 
 
 def _mass_reset_traffic_worker() -> None:
@@ -5333,14 +5270,6 @@ def _compensate_user(user: dict[str, Any], p: dict[str, Any], *, mass: bool = Fa
         until = iso(new_exp)
         sync_user_status_from_subs(uid)
         _rw_sync_expiry(get_user(uid) or user)
-        # единая подписка: ключ обхода (если есть) — до той же даты
-        if mass:
-            try:
-                fulfillment.sync_whitelist_to_vpn(uid, "comp")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[whitelist] user {uid}: {exc}", flush=True)
-        else:
-            fulfillment.sync_whitelist_to_vpn_bg([uid], "comp")
     cid = services.record_compensation(uid, days=days, days_applied=bool(sub), percent=services.COMPENSATION_PERCENT,
                                        mass=mass, actor=p.get("actor"), actor_name=p.get("name"))
     return {"id": cid, "days_applied": bool(sub), "days": days if sub else 0, "expires_at": until,
@@ -6054,7 +5983,6 @@ def panel_tracking_delete(link_id: int, _: dict = Depends(require_panel)) -> dic
 class AdminGiftBody(BaseModel):
     count: int = Field(1, ge=1, le=500)
     months: int = 1
-    whitelist: bool = False
     note: Optional[str] = Field(None, max_length=200)
     valid_days: Optional[int] = Field(None, ge=1, le=3650)
     one_per_user: bool = True
@@ -6077,15 +6005,13 @@ def panel_gifts(status: str = Query("", max_length=16), q: str = Query("", max_l
     for it in data["items"]:
         it["link"] = _gift_link(it["code"])
     data["periods"] = list(fulfillment.SUB_PERIODS)
-    data["whitelist_available"] = bool(fulfillment.whitelist_available())
     return data
 
 
 @app.post("/api/panel/gifts")
 def panel_gifts_create(body: AdminGiftBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
-    # единый тариф: подарок всегда с белыми списками (выдаются при активации, если FURK настроен)
     try:
-        r = reflevels.create_admin_gifts(body.count, body.months, True, body.note or "", body.valid_days,
+        r = reflevels.create_admin_gifts(body.count, body.months, body.note or "", body.valid_days,
                                          body.one_per_user)
     except reflevels.RewardError as e:
         raise HTTPException(e.status, detail={"message": e.message})
@@ -6102,21 +6028,6 @@ def panel_gifts_revoke(body: AdminGiftRevokeBody, _: dict = Depends(require_owne
 def panel_remnawave_squads(_: dict = Depends(require_owner)) -> list[dict[str, Any]]:
     rows = db.fetchall("SELECT squad_uuid, squad_name FROM squads WHERE is_active = 1")
     return [{"uuid": r["squad_uuid"], "name": r["squad_name"]} for r in rows]
-
-
-@app.get("/api/panel/furk/status")
-def panel_furk_status(_: dict = Depends(require_owner)) -> dict[str, Any]:
-    """белые списки (FurkVPN): подключён ли API и баланс партнёра."""
-    furk = fulfillment.furk
-    if not fulfillment.furk_enabled():
-        return {"configured": False, "disabled": True,
-                "error": f"в проекте {P().name} FurkVPN выключен — обходы настраиваются в Remnawave"}
-    if furk is None or not furk.is_configured():
-        return {"configured": False, "error": "нет FURK_API_KEY в .env"}
-    try:
-        return {"configured": True, "ok": True, **furk.balance()}
-    except Exception as exc:  # noqa: BLE001
-        return {"configured": True, "ok": False, "error": str(getattr(exc, "code", "") or type(exc).__name__)}
 
 
 @app.get("/api/panel/squads")
@@ -6595,9 +6506,7 @@ def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> 
             db.set_setting(k, str(int(v)))
     if body.trial_hwid_enabled is not None:
         db.set_setting("trial_hwid_enabled", "1" if body.trial_hwid_enabled else "0")
-    for key, prefix, lo in (("period_prices", "period_price_", 1), ("period_stars", "period_stars_", 1),
-                            ("whitelist_prices", "whitelist_price_", 0), ("whitelist_stars", "whitelist_stars_", 0),
-                            ("whitelist_devices", "whitelist_devices_", 1)):
+    for key, prefix, lo in (("period_prices", "period_price_", 1), ("period_stars", "period_stars_", 1)):
         vals = getattr(body, key)
         if not vals:
             continue
@@ -7359,34 +7268,11 @@ def _trial_available_for(user_id: int, source: Optional[str] = None) -> bool:
     return _trial_blocks(user_id) is None
 
 
-def _bypass_info(user_id: int) -> dict[str, Any]:
-    """белые списки: анти-ключ FURK (ссылка, срок, трафик) — как «Ключ обхода» в старом боте."""
-    # проект — по самому пользователю, а не по домену запроса: иначе запрос Batman,
-    # пришедший с «чужого» домена/без X-Project, считался FGN и ключ обхода пропадал
-    pid = projects.of_user(int(user_id)) or projects.current_id()
-    if not fulfillment.furk_enabled(pid):
-        # в проекте FurkVPN выключен (FGN): обходы в Remnawave, старый анти-ключ не показываем
-        return {"enabled": False, "until": None, "key": None, "available": False}
-    wl = fulfillment.user_whitelist({"id": user_id})
-    on = bool(wl["active"])
-    avail = fulfillment.whitelist_available(pid)
-    out: dict[str, Any] = {"enabled": on, "until": wl["until"] if on else None,
-                           "key": wl["key"] if on else None,
-                           "available": avail}
-    if on and wl["key_id"] and avail:
-        out.update(fulfillment.furk.traffic(str(wl["key_id"])))
-    if on and not out.get("limit_bytes") and not out.get("unlimited"):
-        # трафик у FURK не узнали — показываем лимит ключа (500 ГБ), а не дату
-        out.setdefault("used_bytes", None)
-        out["limit_bytes"] = int(getattr(fulfillment.furk, "ANTI_TRAFFIC_GB", 500)) * 1024 ** 3
-    return out
-
-
 @app.get("/api/app/subscription")
 def app_subscription(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    # участник семьи пользуется подпиской владельца: ключ, трафик, обходы — его
+    # участник семьи пользуется подпиской владельца: ключ и трафик — его
     owner = family_owner_for(fresh)
     view = owner or fresh
     keys = db.fetchall(
@@ -7412,8 +7298,6 @@ def app_subscription(request: Request, user: dict = Depends(_app_user_from_init)
         "expired_key": expired_key,
         "delete_at": delete_at,
         "keys": [k for k in serialized if k.get("status") != "Deleted"],
-        # белые списки (отдельный сквад) — «Обходы» в мини-приложении
-        "bypass": _bypass_info(int(view["id"])) if status in ("active", "trial") else None,
         "trial_enabled": trial_enabled_for(app_source(request)),
         # в семье пробный не нужен: подписка уже действует
         "trial_available": False if owner is not None else _trial_available_for(int(fresh["id"]), app_source(request)),
@@ -7751,9 +7635,6 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     months = req_months if purpose != "traffic_reset" else 1
     if purpose not in ("subscription", "extend", "devices", "traffic_reset", "gift"):
         raise HTTPException(400, detail={"message": "Неизвестный тип платежа"})
-    # единый тариф: подписка/продление/подарок всегда идут с белыми списками (анти-ключ FURK на тот же срок),
-    # цена — обычная цена периода из панели; флаг клиента больше не нужен
-    whitelist = purpose in ("subscription", "extend", "gift") and fulfillment.whitelist_available()
     plan_devices = fulfillment.tariff_devices() if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
     extra = min(50, max(0, int(body.extra_devices or 0)))
     extra_price = float(meta["extra_device_price"])
@@ -7772,7 +7653,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         price = tr_price
         stars = int(round(tr_price))
     elif purpose == "gift":
-        # подарок другу: единый тариф на период (ВПН + белые списки)
+        # подарок другу: тариф на период
         extra = 0
         price = float(fulfillment.period_price(months))
         stars = int(fulfillment.period_stars(months))
@@ -7812,7 +7693,6 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         if target and target.get("no_renew"):
             raise HTTPException(400, detail={"message": "Продление этой подписки недоступно"})
         # тариф = период (фикс. число устройств); устройства сверх тарифа, что уже есть, — по цене доп.
-        # единый тариф: ВПН + белые списки по одной цене периода
         base = fulfillment.period_price(months)
         base_stars = fulfillment.period_stars(months)
         total_devices = plan_devices + extra
@@ -7846,7 +7726,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     return {"price": round(float(price), 2), "stars": int(stars), "months": months,
             "extra": extra, "purpose": purpose, "full_price": full_price, "discount_percent": percent,
             "compensation_id": compensation_id,
-            "plan_devices": plan_devices, "whitelist": whitelist,
+            "plan_devices": plan_devices,
             "devices_total": plan_devices + extra + keep, "min_devices": min_devices,
             "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
             "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
@@ -7897,7 +7777,6 @@ def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_fr
         # устройства (подписка/продление): сколько будет, минимум, разбивка цены до скидки
         "plan_devices": q.get("plan_devices"),
         "devices_total": q.get("devices_total"),
-        "whitelist": bool(q.get("whitelist")),
         "min_devices": q.get("min_devices"),
         "max_devices": q.get("max_devices"),
         "extra_device_price": q.get("extra_device_price"),
@@ -8015,7 +7894,6 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
         extra_devices=extra,
         subscription_id=body.subscription_id,
         referral_applied=referral_applied,
-        whitelist=bool(q.get("whitelist")),
     )
     payment_id = payment["payment_id"]
     if q.get("compensation_id"):
@@ -8195,10 +8073,9 @@ def app_payment_status(
         "invoice_link": payment.get("invoice_link"),
         "purpose": payment.get("purpose"),
         "method": payment.get("method"),
-        # для экрана «Оплачено»: срок, белые списки, списано с баланса
+        # для экрана «Оплачено»: срок, списано с баланса
         "months": int(payment.get("months") or 0),
         "days": fulfillment.period_days(int(payment.get("months") or 1)) if payment.get("purpose") in ("subscription", "gift") else None,
-        "whitelist": bool(payment.get("whitelist")),
         "stars": payment.get("stars"),
         "referral_applied": float(payment.get("referral_applied") or 0),
         "extra_devices": int(payment.get("extra_devices") or 0),
@@ -8215,7 +8092,7 @@ def app_promo_redeem(body: RedeemPromoBody, user: dict = Depends(require_channel
     allowed, retry = ratelimit.rate_limit(f"promo:{user['id']}", 10, 600)
     if not allowed:
         raise HTTPException(429, detail={"message": f"Слишком много попыток. Повторите через {retry} сек."})
-    # подарок от друга (GIFT-…): месяц подписки + белые списки
+    # подарок от друга (GIFT-…): месяц подписки
     if reflevels.is_gift_code(body.code):
         fresh = get_user(int(user["id"])) or user
         if subscription_status_for_user(fresh) in ("blocked", "banned"):
@@ -8244,35 +8121,12 @@ def _days_ru(n: int) -> str:
     return f"{n} {w}"
 
 
-def _bypass_follow_vpn(user_id: int, reason: str) -> None:
-    """единая подписка: ключ обхода до конца ВПН (продлить или выдать). FURK медленный — в фоне."""
-    def run() -> None:
-        try:
-            if not fulfillment.whitelist_available():
-                return
-            user = get_user(int(user_id))
-            if not user:
-                return
-            if fulfillment.user_whitelist(user).get("key_id"):
-                fulfillment.sync_whitelist_to_vpn(int(user_id), reason)
-                return
-            row = db.fetchone("SELECT expires_at FROM subscriptions WHERE user_id = ? AND status = 'Active' "
-                              "AND expires_at IS NOT NULL ORDER BY expires_at DESC LIMIT 1", (int(user_id),))
-            end = parse_iso((row or {}).get("expires_at"))
-            if end and end > utcnow():
-                fulfillment._grant_whitelist_safe(user, 1, f"{reason}-{int(user_id)}-{int(end.timestamp())}", until=end)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[whitelist] user {user_id}: {exc}", flush=True)
-    threading.Thread(target=projects.bind(run), daemon=True).start()
-
-
 def grant_days_all(user_id: int, days: int, reason: str) -> Optional[str]:
-    """+дни ко всей подписке: VPN (база + Remnawave) и ключ обхода до той же даты. Нет подписки — выдаётся новая."""
+    """+дни ко всей подписке: VPN (база + Remnawave). Нет подписки — выдаётся новая."""
     extend_user_sub(int(user_id), int(days))
     user = get_user(int(user_id))
     if user:
         _rw_sync_expiry(user)
-    _bypass_follow_vpn(int(user_id), reason)
     return paid_until_for_user(int(user_id))
 
 
@@ -8438,7 +8292,7 @@ def app_history(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         # только проведённые и возвраты
         "SELECT t.*, p.purpose AS p_purpose, p.method AS p_method, p.provider AS p_provider, "
         "p.stars AS p_stars, p.amount AS p_amount, p.extra_devices AS p_extra, p.grant_info AS p_grant, "
-        "p.id AS p_id, p.months AS p_months, p.whitelist AS p_whitelist FROM transactions t "
+        "p.id AS p_id, p.months AS p_months FROM transactions t "
         "LEFT JOIN payments p ON p.payment_id = t.payment_id AND p.user_id = t.user_id "
         "WHERE t.user_id = ? AND t.status IN ('completed', 'refunded') "
         "ORDER BY t.created_at DESC, t.id DESC",
@@ -8514,7 +8368,6 @@ def _history_item(tx: dict[str, Any], first_sub_payment_id: Any = None) -> dict[
         "created_at": tx.get("created_at"),
         "purpose": tx.get("p_purpose") or None,
         "months": int(tx["p_months"]) if tx.get("p_purpose") and tx.get("p_months") else None,
-        "whitelist": bool(tx.get("p_whitelist")) if tx.get("p_purpose") else False,
         # старые поля для кэшированной старой версии мини-приложения
         "payment_method": tx.get("payment_method"),
         "description": title,
@@ -8532,14 +8385,9 @@ def app_plans() -> dict[str, Any]:
         "devices": fulfillment.tariff_devices(),
         "periods": [
             {"months": m, "days": fulfillment.period_days(m), "price": fulfillment.period_price(m),
-             "stars": fulfillment.period_stars(m),
-             # белые списки: полная цена тарифа (ВПН + анти-ключ); 0 = на этот срок нельзя
-             "whitelist_price": fulfillment.whitelist_price(m),
-             "whitelist_stars": fulfillment.whitelist_stars(m),
-             "whitelist_devices": fulfillment.whitelist_devices(m)}
+             "stars": fulfillment.period_stars(m)}
             for m in fulfillment.SUB_PERIODS
         ],
-        "whitelist_available": fulfillment.whitelist_available(),
     }
 
 

@@ -350,10 +350,10 @@ function FreeSheet({ data, onClose, onClaimed, onOpenSub }: { data: ReferralData
   };
 
   let text: string;
-  if (done !== null) text = `Готово! Подписка с белыми списками продлена${done ? ` до ${formatDateRu(done)}` : ""}.`;
-  else if (!st?.eligible) text = `Нужно ${st?.need_active || 5} активных друзей — сейчас ${active}. Пригласите ещё ${Math.max(0, (st?.need_active || 5) - active)}, и месяц подписки (ВПН + обход) будет бесплатным.`;
+  if (done !== null) text = `Готово! Подписка продлена${done ? ` до ${formatDateRu(done)}` : ""}.`;
+  else if (!st?.eligible) text = `Нужно ${st?.need_active || 5} активных друзей — сейчас ${active}. Пригласите ещё ${Math.max(0, (st?.need_active || 5) - active)}, и месяц подписки будет бесплатным.`;
   else if (!st.available) text = `В этом месяце бесплатную подписку уже получали. Следующая — ${st.next_at ? formatDateRu(st.next_at) : "через месяц"}.`;
-  else text = "У вас достаточно активных друзей. Получите месяц подписки (ВПН + обход) бесплатно — она добавится к текущей.";
+  else text = "У вас достаточно активных друзей. Получите месяц подписки бесплатно — она добавится к текущей.";
 
   return (
     <NoirSheet title="Подписка бесплатно" onClose={onClose}>
@@ -392,14 +392,14 @@ function GiftSheet({ data, onClose, onCreated, onBuy }: { data: ReferralData; on
       setBusy(false);
     }
   };
-  const giftText = (c: string) => `Дарю тебе месяц ${BRAND_NAME} (ВПН + обход)! Открой ${bot || "бота"} → «Подарки» и введи код ${c}`;
+  const giftText = (c: string) => `Дарю тебе месяц ${BRAND_NAME}! Открой ${bot || "бота"} → «Подарки» и введи код ${c}`;
   const send = (c: string) => openTgLink(`https://t.me/share/url?url=${encodeURIComponent(bot)}&text=${encodeURIComponent(giftText(c))}`);
 
   if (code) {
     return (
       <NoirSheet title="Подарок готов" onClose={onClose}>
         <div style={{ fontSize: 15, lineHeight: 1.5, color: N.muted, marginBottom: 14 }}>
-          Отправьте код другу — он введёт его в разделе «Подарки» и получит месяц подписки с белыми списками.
+          Отправьте код другу — он введёт его в разделе «Подарки» и получит месяц подписки.
         </div>
         <div style={{ textAlign: "center", fontSize: 26, fontWeight: 600, letterSpacing: "0.08em", color: N.text, padding: "16px 0", borderRadius: 18, background: "rgba(255,255,255,0.05)", border: `1px solid ${N.cardBorder}`, userSelect: "all", WebkitUserSelect: "all", marginBottom: 14 }}>
           {code}
@@ -421,7 +421,7 @@ function GiftSheet({ data, onClose, onCreated, onBuy }: { data: ReferralData; on
         {!g || g.per_month <= 0
           ? `Подарки открываются с уровня Spreader — нужно 30 активных друзей, у вас ${Number(data.active_count || 0)}.`
           : g.left > 0
-            ? `Можно подарить другу месяц подписки (ВПН + обход). Осталось в этом месяце: ${g.left} из ${g.per_month}.`
+            ? `Можно подарить другу месяц подписки. Осталось в этом месяце: ${g.left} из ${g.per_month}.`
             : `Подарки на этот месяц закончились. Новые — ${g.next_at ? formatDateRu(g.next_at) : "через месяц"}.`}
       </div>
       {err ? <div style={{ fontSize: 13.5, color: "#FF6B6B", marginBottom: 12 }}>{err}</div> : null}

@@ -25,22 +25,16 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
   const [channelRequired, setChannelRequired] = useState(false);
   const [channelUrl, setChannelUrl] = useState('');
   const [trialWeb, setTrialWeb] = useState(true);
-  // тарифы по периодам (₽ и ⭐) и отдельные тарифы с белыми списками (анти-ключ FURK, как в старом боте)
+  // тарифы по периодам (₽ и ⭐)
   const PERIODS = ['1', '3', '6', '12'] as const;
   const PERIOD_TITLE: Record<string, string> = { '1': '1 месяц', '3': '3 месяца', '6': '6 месяцев', '12': '1 год' };
   const [periodPrices, setPeriodPrices] = useState<Record<string, string>>({ '1': '180', '3': '470', '6': '900', '12': '1600' });
   const [periodStars, setPeriodStars] = useState<Record<string, string>>({ '1': '200', '3': '540', '6': '1000', '12': '2000' });
-  const [wlPrices, setWlPrices] = useState<Record<string, string>>({ '1': '399', '3': '1488', '6': '2222', '12': '0' });
-  const [wlStars, setWlStars] = useState<Record<string, string>>({ '1': '600', '3': '1800', '6': '2500', '12': '0' });
-  const [wlDevices, setWlDevices] = useState<Record<string, string>>({ '1': '2', '3': '5', '6': '5', '12': '5' });
   const [tariffDevices, setTariffDevices] = useState('2');
   // своя цена для каждого доп. устройства (по номеру), ₽/мес; пусто — как у предыдущего
   const [devPrices, setDevPrices] = useState<Record<string, string>>({});
   const [devStars, setDevStars] = useState<Record<string, string>>({});
   const [extraStars, setExtraStars] = useState('40');
-  const [wlConfigured, setWlConfigured] = useState(false);
-  const [wlError, setWlError] = useState('');
-  const [furk, setFurk] = useState<{ configured?: boolean; ok?: boolean; balance?: number; credit?: number; error?: string; disabled?: boolean } | null>(null);
   // способы оплаты: вкл/выкл и комиссия
   const [payMethods, setPayMethods] = useState<{ id: string; title: string; enabled: boolean }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,16 +60,10 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           Object.fromEntries(PERIODS.map((k) => [k, o && o[k] != null ? String(o[k]) : fb[k]]));
         setPeriodPrices((p) => toStr(m.period_prices, p));
         setPeriodStars((p) => toStr(m.period_stars, p));
-        setWlPrices((p) => toStr(m.whitelist_prices, p));
-        setWlStars((p) => toStr(m.whitelist_stars, p));
-        setWlDevices((p) => toStr(m.whitelist_devices, p));
         setTariffDevices(String(m.tariff_devices ?? 2));
         setDevPrices(Object.fromEntries(Object.entries(m.device_prices || {}).map(([k, v]) => [k, String(v)])));
         setDevStars(Object.fromEntries(Object.entries(m.device_stars || {}).map(([k, v]) => [k, String(v)])));
         setExtraStars(String(m.extra_device_stars ?? m.extra_device_price ?? 40));
-        setWlConfigured(!!m.whitelist_configured);
-        setWlError(String(m.whitelist_error || ''));
-        try { setFurk(await apiFetch('/panel/furk/status')); } catch { setFurk(null); }
         if (Array.isArray(m.pay_methods)) {
           setPayMethods(m.pay_methods.map((x: any) => ({ id: x.id, title: x.title, enabled: !!x.enabled })));
         }
@@ -99,9 +87,6 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           trial_traffic_gb: Number(f.trialGb), trial_devices: Number(f.trialDevices),
           period_prices: Object.fromEntries(PERIODS.map((k) => [k, Number(periodPrices[k])])),
           period_stars: Object.fromEntries(PERIODS.map((k) => [k, Number(periodStars[k])])),
-          whitelist_prices: Object.fromEntries(PERIODS.map((k) => [k, Number(wlPrices[k])])),
-          whitelist_stars: Object.fromEntries(PERIODS.map((k) => [k, Number(wlStars[k])])),
-          whitelist_devices: Object.fromEntries(PERIODS.map((k) => [k, Number(wlDevices[k])])),
           tariff_devices: Number(tariffDevices),
           device_prices: Object.fromEntries(
             Object.entries(devPrices).filter(([, v]) => String(v).trim() !== '').map(([k, v]) => [k, Number(v)])),
@@ -181,21 +166,6 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
               }
               return <div className="flex flex-col gap-2">{rows}</div>;
             })()}
-          </Section>
-
-          <Section
-            title="Белые списки"
-            sub="Единый тариф: каждая покупка, продление и подарок — ВПН + анти-ключ FURK (500 ГБ) на тот же срок, по цене периода выше. Отдельных цен для белых списков больше нет."
-          >
-            <div className="inset" style={{ padding: '10px 14px', fontSize: 13.5 }}>
-              {furk?.disabled
-                ? (furk.error || 'FurkVPN в этом проекте выключен — обходы настраиваются в Remnawave.')
-                : !wlConfigured
-                ? `FurkVPN API не подключён — подписки выдаются без белых списков. Добавьте FURK_API_KEY в .env (ключ из @VPNpartenrsbot).${wlError ? ` (${wlError})` : ''}`
-                : furk && furk.ok === false
-                  ? `FurkVPN API не отвечает или ключ неверный (${furk.error || 'ошибка'}).`
-                  : `FurkVPN API подключён${furk?.balance != null ? ` · баланс ${furk.balance} ₽${furk.credit ? ` (+ кредит ${furk.credit} ₽)` : ''}` : ''}. При нулевом балансе ключи не выдаются — админу придёт алерт.`}
-            </div>
           </Section>
 
           <Section title="Способы оплаты" sub="Без комиссии. Выключенный способ виден в мини-приложении как «пока недоступно».">

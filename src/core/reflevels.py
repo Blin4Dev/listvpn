@@ -241,8 +241,8 @@ class RewardError(Exception):
         self.status = status
 
 
-def _grant_month(user: dict[str, Any], months: int = REWARD_MONTHS, whitelist: bool = True) -> dict[str, Any]:
-    """тариф на months (+ белые списки, если настроены и положены)."""
+def _grant_month(user: dict[str, Any], months: int = REWARD_MONTHS) -> dict[str, Any]:
+    """тариф на months."""
     try:
         from . import fulfillment  # type: ignore
     except ImportError:
@@ -254,12 +254,11 @@ def _grant_month(user: dict[str, Any], months: int = REWARD_MONTHS, whitelist: b
         months=int(months or 1),
         extra_devices=0,
         subscription_id=None,
-        whitelist=bool(whitelist) and fulfillment.whitelist_available(),
     )
 
 
-def create_bought_gift(user_id: int, months: int, payment_id: Optional[str], whitelist: bool = False) -> str:
-    """подарок, купленный за деньги: код на тариф months (с белыми списками — если купили анти-тариф)."""
+def create_bought_gift(user_id: int, months: int, payment_id: Optional[str]) -> str:
+    """подарок, купленный за деньги: код на тариф months."""
     _ensure_schema()
     if payment_id:
         old = db.fetchone("SELECT code FROM referral_rewards WHERE payment_id = ? AND kind = 'bought'", (payment_id,))
@@ -267,9 +266,9 @@ def create_bought_gift(user_id: int, months: int, payment_id: Optional[str], whi
             return str(old["code"])
     code = GIFT_PREFIX + secrets.token_hex(4).upper()
     db.execute(
-        "INSERT INTO referral_rewards (user_id, kind, code, status, created_at, months, whitelist, payment_id) "
-        "VALUES (?, 'bought', ?, 'issued', ?, ?, ?, ?)",
-        (int(user_id), code, _iso(_now()), int(months or 1), 1 if whitelist else 0, payment_id),
+        "INSERT INTO referral_rewards (user_id, kind, code, status, created_at, months, payment_id) "
+        "VALUES (?, 'bought', ?, 'issued', ?, ?, ?)",
+        (int(user_id), code, _iso(_now()), int(months or 1), payment_id),
     )
     return code
 
@@ -287,7 +286,7 @@ def my_gifts(user_id: int) -> list[dict[str, Any]]:
     """все подарки пользователя: купленные и полученные за уровень."""
     _ensure_schema()
     return [dict(r) for r in db.fetchall(
-        "SELECT code, kind, status, months, whitelist, created_at, redeemed_at FROM referral_rewards "
+        "SELECT code, kind, status, months, created_at, redeemed_at FROM referral_rewards "
         "WHERE user_id = ? AND kind IN ('bought', 'gift') AND status IN ('issued', 'redeemed') "
         "ORDER BY CASE status WHEN 'issued' THEN 0 ELSE 1 END, id DESC LIMIT 50",
         (int(user_id),),
@@ -307,7 +306,7 @@ def revoke_bought_gift(payment_id: str) -> Optional[str]:
 
 
 def claim_self(user: dict[str, Any]) -> dict[str, Any]:
-    """бесплатная личная подписка на месяц (ВПН + обход), раз в 30 дней."""
+    """бесплатная личная подписка на месяц, раз в 30 дней."""
     _ensure_schema()
     uid = int(user["id"])
     st = rewards_state(user)["self"]
@@ -359,7 +358,7 @@ def is_gift_code(code: str) -> bool:
 
 
 def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
-    """активировать подарок: месяц тарифа + белые списки получателю."""
+    """активировать подарок: тариф на months получателю."""
     _ensure_schema()
     code = str(code or "").strip().upper()
     row = db.fetchone("SELECT * FROM referral_rewards WHERE code = ? AND kind IN ('gift', 'bought', 'admin')", (code,))
@@ -388,15 +387,13 @@ def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
         if claim.rowcount == 0:
             raise RewardError("Этот подарок уже активирован")
     months = int(row.get("months") or REWARD_MONTHS)
-    # единый тариф: любой подарок — ВПН + белые списки (если FURK настроен), даже выпущенный раньше без них
-    whitelist = True
     try:
-        grant = _grant_month(user, months=months, whitelist=whitelist)
+        grant = _grant_month(user, months=months)
     except Exception as exc:  # noqa: BLE001
         db.execute("UPDATE referral_rewards SET status = 'issued', redeemed_by = NULL, redeemed_at = NULL WHERE id = ?",
                    (row["id"],))
         raise RewardError(f"Не удалось активировать подарок: {exc}", 502)
-    return {"expires_at": grant.get("expires_at"), "months": months, "whitelist": whitelist}
+    return {"expires_at": grant.get("expires_at"), "months": months}
 
 
 def _parse_dt(v: Any) -> Optional[datetime]:
@@ -413,7 +410,7 @@ def _parse_dt(v: Any) -> Optional[datetime]:
 ADMIN_MAX_BATCH = 500
 
 
-def create_admin_gifts(count: int, months: int, whitelist: bool, note: str = "", valid_days: Optional[int] = None,
+def create_admin_gifts(count: int, months: int, note: str = "", valid_days: Optional[int] = None,
                        one_per_user: bool = True) -> dict[str, Any]:
     """пачка одноразовых кодов GIFT-… на тариф months; активируются как обычный подарок."""
     _ensure_schema()
@@ -437,12 +434,12 @@ def create_admin_gifts(count: int, months: int, whitelist: bool, note: str = "",
         while len(codes) < count:
             code = GIFT_PREFIX + secrets.token_hex(5).upper()  # 10 символов — перебором не подобрать
             cur = tx.execute(
-                "INSERT OR IGNORE INTO referral_rewards (user_id, kind, code, status, created_at, months, whitelist, "
-                "batch, note, expires_at, one_per_user) VALUES (0, 'admin', ?, 'issued', ?, ?, ?, ?, ?, ?, ?)",
-                (code, _iso(now), months, 1 if whitelist else 0, batch, note or None, expires, 1 if one_per_user else 0))
+                "INSERT OR IGNORE INTO referral_rewards (user_id, kind, code, status, created_at, months, "
+                "batch, note, expires_at, one_per_user) VALUES (0, 'admin', ?, 'issued', ?, ?, ?, ?, ?, ?)",
+                (code, _iso(now), months, batch, note or None, expires, 1 if one_per_user else 0))
             if cur.rowcount == 1:
                 codes.append(code)
-    return {"batch": batch, "codes": codes, "months": months, "whitelist": bool(whitelist), "expires_at": expires}
+    return {"batch": batch, "codes": codes, "months": months, "expires_at": expires}
 
 
 def _admin_status(r: dict[str, Any]) -> str:
@@ -486,7 +483,7 @@ def list_admin_gifts(status: str = "", q: str = "", limit: int = 100, offset: in
     return {
         "total": int(total["c"]) if total else 0, "stats": stats,
         "items": [{"id": r["id"], "code": r["code"], "status": _admin_status(r), "months": int(r.get("months") or 1),
-                   "whitelist": bool(r.get("whitelist")), "note": r.get("note") or "", "batch": r.get("batch") or "",
+                   "note": r.get("note") or "", "batch": r.get("batch") or "",
                    "one_per_user": bool(r.get("one_per_user")), "created_at": r["created_at"],
                    "expires_at": r.get("expires_at"), "redeemed_at": r.get("redeemed_at"),
                    "redeemed_by": r.get("redeemed_by"), "redeemed_username": r.get("r_username"),
@@ -509,12 +506,12 @@ def revoke_admin_gifts(ids: list[int]) -> int:
 def gift_preview(code: str) -> Optional[dict[str, Any]]:
     """для бота: что за подарок по коду (без активации)."""
     _ensure_schema()
-    row = db.fetchone("SELECT kind, status, months, whitelist, expires_at FROM referral_rewards "
+    row = db.fetchone("SELECT kind, status, months, expires_at FROM referral_rewards "
                       "WHERE code = ? AND kind IN ('gift', 'bought', 'admin') AND project_id = ?",
                       (str(code or "").strip().upper(), db.pid()))
     if not row:
         return None
-    return {"status": _admin_status(row), "months": int(row.get("months") or 1), "whitelist": bool(row.get("whitelist"))}
+    return {"status": _admin_status(row), "months": int(row.get("months") or 1)}
 
 
 def levels_public() -> list[dict[str, Any]]:

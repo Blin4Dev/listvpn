@@ -8,12 +8,12 @@ import type { ToastType } from '../lib/types';
 type Toast = (t: string, m: string, ty: ToastType) => void;
 type Status = 'issued' | 'redeemed' | 'expired' | 'revoked';
 type Item = {
-  id: number; code: string; link: string; status: Status; months: number; whitelist: boolean; note: string; batch: string;
+  id: number; code: string; link: string; status: Status; months: number; note: string; batch: string;
   one_per_user: boolean; created_at: string; expires_at: string | null; redeemed_at: string | null;
   redeemed_by: number | null; redeemed_username: string | null; redeemed_tg: number | null;
 };
-type Data = { total: number; stats: Record<Status, number>; items: Item[]; periods: number[]; whitelist_available: boolean };
-type Created = { batch: string; months: number; whitelist: boolean; expires_at: string | null; items: { code: string; link: string }[] };
+type Data = { total: number; stats: Record<Status, number>; items: Item[]; periods: number[] };
+type Created = { batch: string; months: number; expires_at: string | null; items: { code: string; link: string }[] };
 
 const STATUS_RU: Record<Status, string> = { issued: 'Не активирован', redeemed: 'Активирован', expired: 'Истёк', revoked: 'Отменён' };
 const STATUS_CLS: Record<Status, string> = { issued: 'mute', redeemed: 'solid', expired: 'line', revoked: 'danger' };
@@ -29,7 +29,6 @@ const download = (name: string, text: string) => {
 const CreateModal: React.FC<{ data: Data; onClose: () => void; onCreated: (c: Created) => void; onToast: Toast }> = ({ data, onClose, onCreated, onToast }) => {
   const [count, setCount] = useState('1');
   const [months, setMonths] = useState(data.periods[0] || 1);
-  const whitelist = true; // единый тариф: подарок всегда с белыми списками
   const [note, setNote] = useState('');
   const [limited, setLimited] = useState(false);
   const [days, setDays] = useState('30');
@@ -42,7 +41,7 @@ const CreateModal: React.FC<{ data: Data; onClose: () => void; onCreated: (c: Cr
     setBusy(true);
     try {
       const r = await apiFetch('/panel/gifts', { method: 'POST', body: JSON.stringify({
-        count: n, months, whitelist, note: note.trim() || null, valid_days: limited ? Math.floor(Number(days)) : null, one_per_user: onePer,
+        count: n, months, note: note.trim() || null, valid_days: limited ? Math.floor(Number(days)) : null, one_per_user: onePer,
       }) });
       onCreated(r);
     } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось создать'), 'error'); } finally { setBusy(false); }
@@ -108,7 +107,7 @@ const CreatedModal: React.FC<{ c: Created; onClose: () => void; onToast: Toast }
         <button className="btn solid" onClick={() => void copy(codes, 'Коды')}><Copy size={15} /> Коды</button></>
     }>
       <div className="sub" style={{ fontSize: 13, marginBottom: 10 }}>
-        {monthsRu(c.months)}{c.whitelist ? ' + белые списки' : ''}{c.expires_at ? ` · действует до ${fmtDateTime(c.expires_at).slice(0, 16)}` : ''}
+        {monthsRu(c.months)}{c.expires_at ? ` · действует до ${fmtDateTime(c.expires_at).slice(0, 16)}` : ''}
       </div>
       <div className="mono" style={{ maxHeight: 320, overflow: 'auto', fontSize: 13, lineHeight: 1.7, padding: 12, borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)' }}>
         {c.items.map((i) => (
@@ -189,7 +188,7 @@ export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => v
               {data.items.map((it) => (
                 <tr key={it.id} style={{ opacity: it.status === 'revoked' || it.status === 'expired' ? 0.55 : 1 }}>
                   <td className="mono" style={{ whiteSpace: 'nowrap' }}>{it.code}</td>
-                  <td style={{ whiteSpace: 'nowrap' }}>{monthsRu(it.months)}{it.whitelist && <span className="badge mute" style={{ marginLeft: 6 }}>+ БС</span>}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{monthsRu(it.months)}</td>
                   <td><span className={`badge ${STATUS_CLS[it.status]}`}>{STATUS_RU[it.status]}</span>
                     {it.status === 'issued' && it.expires_at && <div className="faint" style={{ fontSize: 11, marginTop: 2 }}>до {fmtDateTime(it.expires_at).slice(0, 10)}</div>}</td>
                   <td>{it.redeemed_by ? (

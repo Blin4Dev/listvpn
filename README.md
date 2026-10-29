@@ -53,8 +53,8 @@ Telegram webhook — только на 443/80/88/8443, поэтому, если 
 
 ## Домены ссылок подписки
 
-В `.env`: `VPN_SUB_DOMAIN` — домен обычного VPN, `WHITELIST_SUB_DOMAIN` — домен белых списков.
-Бот берёт ссылку из Remnawave / FurkVPN и меняет в ней только домен: `https://domain1.com/hIeb` + `VPN_SUB_DOMAIN=domain2.com` → `https://domain2.com/hIeb`.
+В `.env`: `VPN_SUB_DOMAIN` — домен ссылок подписки VPN.
+Бот берёт ссылку из Remnawave и меняет в ней только домен: `https://domain1.com/hIeb` + `VPN_SUB_DOMAIN=domain2.com` → `https://domain2.com/hIeb`.
 Пусто — ссылка без изменений. Действует сразу для всех ссылок, в том числе уже выданных (после `docker compose up -d`).
 
 

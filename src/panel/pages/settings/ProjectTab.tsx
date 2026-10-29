@@ -13,7 +13,7 @@ type Cfg = {
   bot: { token_set: boolean; token_hint: string; id: string; username: string; source: string };
   channel: { id: string; url: string; source: string };
   yookassa: { shop_id: string; secret_set: boolean; source: string; webhook_url: string };
-  support_url: string; miniapp_link: string; vpn_sub_domain: string; whitelist_sub_domain: string;
+  support_url: string; miniapp_link: string; vpn_sub_domain: string;
   miniapp_url: string;
   features: Record<string, boolean>;
   growth: { notconn_hours: number; winback_after_days: number; winback_gift_days: number };
@@ -35,7 +35,6 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
   const [support, setSupport] = useState('');
   const [mlink, setMlink] = useState('');
   const [vpnDom, setVpnDom] = useState('');
-  const [wlDom, setWlDom] = useState('');
   const [busy, setBusy] = useState('');
   const [growth, setGrowth] = useState({ notconn_hours: '3', winback_after_days: '14', winback_gift_days: '3' });
   const [familyMax, setFamilyMax] = useState('5');
@@ -48,7 +47,7 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
       winback_gift_days: String(d.growth.winback_gift_days) });
     if (d.family_max_members) setFamilyMax(String(d.family_max_members));
     if (d.desktop) setDesk({ windows_url: d.desktop.windows_url || '', macos_url: d.desktop.macos_url || '', version: d.desktop.version || '' });
-    setSupport(d.support_url || ''); setMlink(d.miniapp_link || ''); setVpnDom(d.vpn_sub_domain || ''); setWlDom(d.whitelist_sub_domain || '');
+    setSupport(d.support_url || ''); setMlink(d.miniapp_link || ''); setVpnDom(d.vpn_sub_domain || '');
   };
   useEffect(() => {
     apiFetch('/panel/project/config').then(fill).catch((e) => onToast('Ошибка', parseApiErr(e, 'Не удалось загрузить настройки проекта'), 'error'));
@@ -136,10 +135,8 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
               <input className="input mono" value={mlink} onChange={(e) => setMlink(e.target.value.trim())} placeholder="https://t.me/bot/app" /></div>
             <div><label className="field-label">Домен подписки VPN</label>
               <input className="input mono" value={vpnDom} onChange={(e) => setVpnDom(e.target.value.trim())} placeholder="sub.example.com" /></div>
-            <div><label className="field-label">Домен белых списков</label>
-              <input className="input mono" value={wlDom} onChange={(e) => setWlDom(e.target.value.trim())} placeholder="wl.example.com" /></div>
           </div>
-          {btn('links', () => save('links', { support_url: support, miniapp_link: mlink, vpn_sub_domain: vpnDom, whitelist_sub_domain: wlDom }, 'Сохранено'))}
+          {btn('links', () => save('links', { support_url: support, miniapp_link: mlink, vpn_sub_domain: vpnDom }, 'Сохранено'))}
         </Section>
 
         {(cfg.features?.notify_not_connected || cfg.features?.winback_gift) && (

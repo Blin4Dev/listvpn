@@ -1,5 +1,5 @@
 // FGN: «Купить подарок» (переопределение src/app/pages/GiftBuy.tsx).
-// Макет: шапка «назад» + заголовок, 4 карточки тарифов (срок, «N дней + белые списки», цена справа).
+// Макет: шапка «назад» + заголовок, 4 карточки тарифов (срок, «N дней», цена справа).
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
@@ -7,10 +7,10 @@ import { applyDiscount, fetchDiscount, fetchTariffs, type TariffPeriod } from ".
 import { C, FgnCard, FgnHeader, FgnPage } from "../components/fgn";
 
 const FALLBACK: TariffPeriod[] = [
-  { months: 1, days: 30, price: 200, whitelist_price: 0 },
-  { months: 3, days: 90, price: 580, whitelist_price: 0 },
-  { months: 6, days: 180, price: 1100, whitelist_price: 0 },
-  { months: 12, days: 365, price: 2200, whitelist_price: 0 },
+  { months: 1, days: 30, price: 200 },
+  { months: 3, days: 90, price: 580 },
+  { months: 6, days: 180, price: 1100 },
+  { months: 12, days: 365, price: 2200 },
 ];
 
 function periodTitle(m: number) {
@@ -34,14 +34,12 @@ export default function GiftBuy() {
   const goBack = useSmartBack("/");
   const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
   const [discount, setDiscount] = useState(0);
-  const [wlAvailable, setWlAvailable] = useState(true);
 
   useEffect(() => {
     void (async () => {
       try {
         const t = await fetchTariffs();
         if (t.periods.length) setPeriods(t.periods);
-        setWlAvailable(t.whitelist_available);
       } catch { /* запасные цены */ }
       try {
         const d = await fetchDiscount();
@@ -66,7 +64,7 @@ export default function GiftBuy() {
               onClick={() => choose(p.months)}
               style={{ animation: `fgnFade 0.35s ease ${0.04 * i}s both` }}
               title={periodTitle(p.months)}
-              subtitle={`${p.days} ${daysWord(p.days)}${wlAvailable ? " + белые списки" : ""}`}
+              subtitle={`${p.days} ${daysWord(p.days)}$`}
               right={
                 <span style={{ display: "flex", alignItems: "baseline", gap: 8, flexShrink: 0 }}>
                   {final < full ? (

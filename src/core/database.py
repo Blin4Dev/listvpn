@@ -1159,11 +1159,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         },
         "users": {
             "tracking_code": "ALTER TABLE users ADD COLUMN tracking_code TEXT",
-            # белые списки (анти-ключ FURK, как в старом боте): ссылка и срок
+            # устарело (FURK вырезан): анти-ключ, колонки оставлены для совместимости старых баз
             "anti_key": "ALTER TABLE users ADD COLUMN anti_key TEXT",
             "anti_expires_at": "ALTER TABLE users ADD COLUMN anti_expires_at TEXT",
             "anti_key_id": "ALTER TABLE users ADD COLUMN anti_key_id TEXT",
-            # платёж, по которому анти-ключ уже выдан (повторная обработка не спишет у FURK второй раз)
             "anti_last_idem": "ALTER TABLE users ADD COLUMN anti_last_idem TEXT",
             # админ сбросил пробный: можно взять снова, даже если раньше была платная подписка
             "trial_reset": "ALTER TABLE users ADD COLUMN trial_reset INTEGER NOT NULL DEFAULT 0",
@@ -1251,7 +1250,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "allow_reboot": "ALTER TABLE mon_nodes ADD COLUMN allow_reboot INTEGER",
         },
         "payments": {
-            # опция «белые списки» в заказе
+            # устарело: флаг «белые списки» в заказе (FURK вырезан)
             "whitelist": "ALTER TABLE payments ADD COLUMN whitelist INTEGER NOT NULL DEFAULT 0",
             # скидка компенсации в этом платеже: при оплате помечается использованной
             "compensation_id": "ALTER TABLE payments ADD COLUMN compensation_id INTEGER",
@@ -1282,7 +1281,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         },
         "subscriptions": {
             # до какого момента подключены белые списки (отдельный сквад)
-            # устарело: белые списки теперь анти-ключом FURK (users.anti_key), колонка оставлена для совместимости
+            # устарело, колонка оставлена для совместимости
             "whitelist_until": "ALTER TABLE subscriptions ADD COLUMN whitelist_until TEXT",
             # заморозка (пауза отсчёта дней)
             "frozen_at": "ALTER TABLE subscriptions ADD COLUMN frozen_at TEXT",

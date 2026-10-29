@@ -11,10 +11,10 @@ import { BRAND_NAME } from "../utils/brand";
 type BoughtGift = { code: string; status: string; months: number; created_at: string; redeemed_at?: string | null };
 
 const FALLBACK: TariffPeriod[] = [
-  { months: 1, days: 30, price: 180, whitelist_price: 0 },
-  { months: 3, days: 90, price: 470, whitelist_price: 0 },
-  { months: 6, days: 180, price: 900, whitelist_price: 0 },
-  { months: 12, days: 365, price: 1600, whitelist_price: 0 },
+  { months: 1, days: 30, price: 180 },
+  { months: 3, days: 90, price: 470 },
+  { months: 6, days: 180, price: 900 },
+  { months: 12, days: 365, price: 1600 },
 ];
 
 function periodTitle(m: number) {
@@ -38,15 +38,12 @@ export default function GiftBuy() {
   const [botLink, setBotLink] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  // единый тариф: подарок всегда с белыми списками (если FURK настроен)
-  const [wlAvailable, setWlAvailable] = useState(false);
 
   useEffect(() => {
     void (async () => {
       try {
         const t = await fetchTariffs();
         if (t.periods.length) setPeriods(t.periods);
-        setWlAvailable(t.whitelist_available);
       } catch { /* запасные цены */ }
       try {
         const d = await fetchDiscount();
@@ -116,7 +113,7 @@ export default function GiftBuy() {
             >
               <span style={{ flex: 1 }}>
                 <span style={{ display: "block", fontSize: 17.5, fontWeight: 500 }}>{periodTitle(p.months)}</span>
-                <span style={{ display: "block", marginTop: 5, fontSize: 14.5, color: N.muted }}>{p.days} {daysWord(p.days)}{wlAvailable ? " + белые списки" : ""}</span>
+                <span style={{ display: "block", marginTop: 5, fontSize: 14.5, color: N.muted }}>{p.days} {daysWord(p.days)}</span>
               </span>
               <span style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 {final < full ? <span style={{ fontSize: 14, color: N.dim, textDecoration: "line-through" }}>{full} ₽</span> : null}

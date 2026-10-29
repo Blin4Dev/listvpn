@@ -38,13 +38,13 @@ function condition(lv: Level, i: number): string {
 }
 
 function bonus(lv: Level): string {
-  const self = "своя подписка бесплатно, вместе с белыми списками";
+  const self = "своя подписка бесплатно";
   if (lv.self_free_from && !lv.gifts) {
     return `С ${lv.self_free_from === 5 ? "пяти" : lv.self_free_from} активных друзей ${self}.`;
   }
   const gifts = lv.gifts === 1
-    ? "Раз в месяц можно подарить другу месяц подписки с белыми списками"
-    : `Каждый месяц ${lv.gifts} ${plural(lv.gifts, "подарок", "подарка", "подарков")} друзьям — месяц подписки с белыми списками`;
+    ? "Раз в месяц можно подарить другу месяц подписки"
+    : `Каждый месяц ${lv.gifts} ${plural(lv.gifts, "подарок", "подарка", "подарков")} друзьям — месяц подписки`;
   return `${gifts}. И ${self}.`;
 }
 
