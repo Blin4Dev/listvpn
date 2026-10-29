@@ -464,11 +464,7 @@ def admin_ids() -> list[str]:
 
 
 def project_ready(p: Any, pay_methods: Any = None) -> tuple[bool, list[str]]:
-    """проект работает: мини-приложение стоит, проект включён, бот, админы, сквад, оплата. → (готов, чего не хватает)."""
-    try:
-        import fulfillment  # type: ignore
-    except ImportError:  # pragma: no cover
-        from . import fulfillment  # type: ignore
+    """проект работает: мини-приложение стоит, проект включён, бот, админы, оплата (сквады — нет). → (готов, чего не хватает)."""
     missing: list[str] = []
     cfg = projects.panel_config(p.id)
     installed = bool(cfg.get("MINIAPP_DOMAIN")) or bool(p.miniapp_url)
@@ -476,8 +472,7 @@ def project_ready(p: Any, pay_methods: Any = None) -> tuple[bool, list[str]]:
         missing.append("бот")
     if not admin_ids():
         missing.append("админы")
-    if not fulfillment.squad_setting("squad_mapping_vpn", project_id=p.id):
-        missing.append("сквад")
+    # сквады необязательны: не выбраны — действуют общие сети
     if pay_methods is not None:
         pm = {m["id"]: m["enabled"] for m in pay_methods}
         if (pm.get("card", True) or pm.get("sbp", True)) and not p.payments_configured:

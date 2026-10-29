@@ -307,8 +307,8 @@ function ProjectPane({ p, data, onInstall, onReload, onToast }: {
   const tokenOk = p.bot.token_set || /^\d{5,}:[A-Za-z0-9_-]{30,}$/.test(token.trim());
   const shopOk = /^\d{3,}$/.test(shop.trim());
   const secretOk = p.yookassa.secret_set || /^(live|test)_.{6,}/.test(secret.trim());
-  const s = { bot: tokenOk, admins: admins.length > 0, squads: vpn.length > 0, pay: pay === 'stars' || (shopOk && secretOk) };
-  const labels: Record<string, string> = { bot: 'бот', admins: 'админы', squads: 'сквад', pay: 'оплата' };
+  const s = { bot: tokenOk, admins: admins.length > 0, pay: pay === 'stars' || (shopOk && secretOk) };
+  const labels: Record<string, string> = { bot: 'бот', admins: 'админы', pay: 'оплата' };
   const missing = Object.entries(s).filter(([, v]) => !v).map(([k]) => labels[k]);
   const complete = missing.length === 0;
   const url = `https://${p.domain}`;
@@ -353,7 +353,7 @@ function ProjectPane({ p, data, onInstall, onReload, onToast }: {
     <div className="su-form">
       <div className="su-fhead">
         <div><div className="title">{p.name}</div><div className="f sm mono">{url}</div></div>
-        <span className="f sm">{Object.values(s).filter(Boolean).length} из 4</span>
+        <span className="f sm">{Object.values(s).filter(Boolean).length} из {Object.keys(s).length}</span>
       </div>
 
       <div className="su-sec"><span className="su-mark ok" /><div>
@@ -388,9 +388,9 @@ function ProjectPane({ p, data, onInstall, onReload, onToast }: {
         <div className="su-note">{adminNote}</div>
       </div></div>
 
-      <div className="su-sec"><span className={`su-mark ${s.squads ? 'ok' : ''}`} /><div>
-        <div className="su-sname">Сквады Remnawave</div>
-        <div className="su-desc">Какие ноды получает пользователь. {data.squads.length ? 'Список загружен из Remnawave.' : 'Список пуст — загрузите его из Remnawave.'}
+      <div className="su-sec"><span className={`su-mark ${vpn.length ? 'ok' : 'dash'}`} /><div>
+        <div className="su-sname">Сквады Remnawave <span className="f sm">— необязательно</span></div>
+        <div className="su-desc">Какие ноды получает пользователь. Не выберете — будут общие сети. {data.squads.length ? 'Список загружен из Remnawave.' : 'Список пуст — загрузите его из Remnawave.'}
           {' '}<button className="su-link" onClick={syncSquads} disabled={syncing}>{syncing ? 'загружаем…' : 'обновить'}</button></div>
         <label>Платная подписка</label>
         <div className="su-chips">{allSquads.map((u) => <button key={u} className={`chip ${vpn.includes(u) ? 'on' : ''}`} onClick={() => flip(vpn, setVpn, u)}>{squadName(u)}</button>)}</div>
