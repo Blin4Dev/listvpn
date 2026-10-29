@@ -529,53 +529,6 @@ def deliver(server_id: int, *, sender: str, to: str, ehlo: str, mx: list[str], m
     return False, "Сервер мини-приложения не ответил вовремя"
 
 
-# ───────────────────────── DNS ─────────────────────────
-# публичные резолверы: в Docker /etc/resolv.conf часто ndots:5 + свой search —
-# локальный dnspython тогда не видит нормальную A-запись.
-
-_PUBLIC_NS = ("1.1.1.1", "8.8.8.8", "9.9.9.9", "77.88.8.8")
-
-
-def resolve_a(domain: str) -> list[str]:
-    q = (domain or "").strip().rstrip(".") + "."
-    if q == ".":
-        return []
-    ips: set[str] = set()
-    try:
-        import dns.resolver
-        import dns.exception
-        nameservers: list[str] = list(_PUBLIC_NS)
-        try:
-            for n in dns.resolver.Resolver().nameservers:
-                if n and n not in nameservers:
-                    nameservers.append(n)
-        except Exception:  # noqa: BLE001
-            pass
-        for ns in nameservers:
-            r = dns.resolver.Resolver(configure=False)
-            r.nameservers = [ns]
-            r.lifetime = 4.0
-            r.timeout = 2.5
-            try:
-                ans = r.resolve(q, "A", search=False)
-                ips.update(str(a) for a in ans)
-                if ips:
-                    break
-            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers,
-                    dns.exception.Timeout, OSError):
-                continue
-            except Exception:  # noqa: BLE001
-                continue
-    except Exception:  # noqa: BLE001
-        pass
-    if not ips:
-        try:
-            ips.update(i[4][0] for i in socket.getaddrinfo(domain.strip().rstrip("."), 443, socket.AF_INET))
-        except OSError:
-            pass
-    return sorted(ips)
-
-
 # ───────────────────────── скрипт для сервера ─────────────────────────
 
 def install_script(code: str) -> str:
@@ -891,29 +844,6 @@ def build_router(core: Any):
             raise HTTPException(400, detail={"message": "Сервер не на связи — проверьте службу blin-agent"})
         _start_install_task(pid)
         return {"install": install_view(pid)}
-
-    class DnsBody(BaseModel):
-        domain: str = Field(..., max_length=253)
-        ip: str = Field("", max_length=45)
-        project: str = Field("", max_length=24)
-
-    @r.post("/api/panel/setup/dns")
-    def setup_dns(body: DnsBody, _: dict = Depends(core.require_owner)) -> dict[str, Any]:
-        dom = norm_domain(body.domain)
-        if not dom:
-            return {"ok": False, "error": "Похоже на опечатку в домене", "ips": []}
-        owner = domain_owner(dom, body.project)
-        if owner == "panel":
-            return {"ok": False, "error": "Это домен панели — мини-приложению нужен свой", "ips": []}
-        if owner:
-            return {"ok": False, "error": f"Домен уже занят проектом {projects.get(owner).name}", "ips": []}
-        ips = resolve_a(dom)
-        ip = norm_ip(body.ip)
-        ok = bool(ip and ip in ips)
-        err = ""
-        if not ok and not ips:
-            err = "Публичный DNS не видит A-запись. Нужен хост без зоны (app, не app.домен.cc), DNS — у тех NS, что указаны у регистратора (часто Cloudflare). Подождите минуту и нажмите «проверить»."
-        return {"ok": ok, "ips": ips, "error": err}
 
     @r.get("/api/panel/setup/mail/{pid}")
     def setup_mail(pid: str, _: dict = Depends(core.require_owner)) -> dict[str, Any]:

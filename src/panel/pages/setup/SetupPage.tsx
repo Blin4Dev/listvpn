@@ -1,7 +1,7 @@
 // Начальное меню «Проекты»: install.sh ставит только панель, мини-приложения проектов ставятся отсюда —
 // каждое на свой сервер и домен (бэкенд: src/core/miniapps.py, агент: src/core/miniapp_agent.py).
 // Монохром; оранжевый — только у переключателей, цвет — только у статусов круга установки.
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Spinner, Toggle } from '../../components/ui';
 import { apiFetch, copyToClipboard, parseApiErr } from '../../lib/api';
@@ -506,30 +506,11 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
   const [srv, setSrv] = useState<number | null>(otherServers[0]?.id ?? null);
   const [domain, setDomain] = useState(moving ? p.domain : '');
   const [site, setSite] = useState(p.site_domain || '');
-  const [dns, setDns] = useState<{ state: '' | 'checking' | 'ok' | 'bad'; ips: string[]; error: string }>({ state: '', ips: [], error: '' });
   const [busy, setBusy] = useState(false);
   const [formErr, setFormErr] = useState('');
-  const [recheck, setRecheck] = useState(0);
-  const timer = useRef<number | undefined>(undefined);
 
-  const targetIp = mode === 'new' ? ip.trim() : (data.servers.find((s) => s.id === srv)?.ip || '');
   const dom = normDomain(domain);
   const siteDom = normDomain(site);
-
-  // DNS: A-запись домена → IP сервера
-  useEffect(() => {
-    if (inst) return;
-    window.clearTimeout(timer.current);
-    if (!isDomain(dom) || !isIp(targetIp)) { setDns({ state: '', ips: [], error: '' }); return; }
-    setDns({ state: 'checking', ips: [], error: '' });
-    timer.current = window.setTimeout(async () => {
-      try {
-        const r = await apiFetch('/panel/setup/dns', { method: 'POST', body: JSON.stringify({ domain: dom, ip: targetIp, project: p.id }) });
-        setDns({ state: r?.ok ? 'ok' : 'bad', ips: r?.ips || [], error: r?.error || '' });
-      } catch (e) { setDns({ state: 'bad', ips: [], error: parseApiErr(e, 'Не удалось проверить DNS') }); }
-    }, 600);
-    return () => window.clearTimeout(timer.current);
-  }, [dom, targetIp, inst, p.id, recheck]);
 
   // ход установки
   useEffect(() => {
@@ -545,7 +526,7 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
 
   const ipBusy = mode === 'new' && data.servers.some((s) => s.ip === ip.trim());
   const siteBad = !!site.trim() && (!isDomain(siteDom) || siteDom === dom);
-  const valid = isDomain(dom) && dns.state === 'ok' && !siteBad && (mode === 'new' ? isIp(ip.trim()) && !ipBusy : !!srv);
+  const valid = isDomain(dom) && !siteBad && (mode === 'new' ? isIp(ip.trim()) && !ipBusy : !!srv);
 
   const go = async () => {
     if (!valid || busy) return;
@@ -624,14 +605,8 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
               <label>Домен мини-приложения</label>
               <input className="input mono" style={{ width: '100%' }} placeholder={`app.${p.id}.ru`} value={domain} autoCapitalize="off" spellCheck={false}
                 onChange={(e) => setDomain(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && go()} />
-              <div className="su-note">{dom && !isDomain(dom) ? 'Похоже на опечатку в домене'
-                : dns.error ? dns.error
-                  : dns.state === 'checking' ? <><span className="su-spin" />Проверяем DNS…</>
-                    : dns.state === 'ok' ? <><span style={{ color: '#4ade80' }}>✓</span> A-запись <span className="mono">{dom}</span> указывает на <span className="mono">{targetIp}</span></>
-                      : dns.state === 'bad' ? <>A-запись <span className="mono">{dom}</span> → {dns.ips.length ? <span className="mono">{dns.ips.join(', ')}</span> : 'нет'}, а нужен <span className="mono">{targetIp}</span>. Исправьте DNS — проверим снова.
-                        {' '}<button className="su-link" onClick={() => setRecheck((n) => n + 1)}>проверить</button></>
-                        : 'Создайте A-запись домена на IP сервера до установки — иначе сертификат не выпустится.'}</div>
-              <div className="su-hint">С этого домена бот открывает мини-приложение, а пользователям приходят письма.</div>
+              {dom && !isDomain(dom) && <div className="su-note">Похоже на опечатку в домене</div>}
+              <div className="su-hint">С этого домена бот открывает мини-приложение, а пользователям приходят письма. A-запись должна указывать на IP сервера — иначе сертификат не выпустится.</div>
             </div>
             {p.has_site && <div className="su-field" style={{ marginBottom: 0 }}>
               <label>Домен сайта <span className="f">— необязательно: сайт в браузере вместо мини-приложения</span></label>
