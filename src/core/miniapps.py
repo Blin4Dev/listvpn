@@ -27,6 +27,8 @@ import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from pydantic import BaseModel, Field, field_validator
+
 try:
     from . import database as db  # type: ignore
     from . import projects  # type: ignore
@@ -590,12 +592,97 @@ exec python3 /opt/blin-agent/agent.py watch </dev/null
 """
 
 
+class RegisterBody(BaseModel):
+    code: str = Field(..., max_length=32)
+    hostname: str = Field("", max_length=120)
+    os: str = Field("", max_length=120)
+    version: str = Field("", max_length=20)
+
+
+class PollBody(BaseModel):
+    version: str = Field("", max_length=20)
+    caddy: str = Field("", max_length=60)
+    hostname: str = Field("", max_length=120)
+    bundles: dict[str, str] = Field(default_factory=dict)
+
+
+class ProgressBody(BaseModel):
+    task: int
+    step: str = Field(..., max_length=20)
+    label: str = Field("", max_length=200)
+
+
+class ResultBody(BaseModel):
+    task: int
+    ok: bool
+    error: str = Field("", max_length=2000)
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class InstallBody(BaseModel):
+    project: str = Field(..., max_length=24)
+    ip: str = Field("", max_length=45)
+    server_id: Optional[int] = None
+    domain: str = Field(..., max_length=253)
+    site_domain: str = Field("", max_length=253)
+
+
+class SetupProjectBody(BaseModel):
+    active: Optional[bool] = None
+    bot_token: Optional[str] = Field(None, max_length=200)
+    admins: Optional[list[str]] = Field(None, max_length=80)
+    squads_vpn: Optional[list[str]] = Field(None, max_length=80)
+    squads_trial: Optional[list[str]] = Field(None, max_length=80)
+    pay_mode: Optional[str] = None
+    yookassa_shop_id: Optional[str] = Field(None, max_length=50)
+    yookassa_secret_key: Optional[str] = Field(None, max_length=200)
+    channel_id: Optional[str] = Field(None, max_length=200)
+    channel_required: Optional[bool] = None
+
+    @field_validator("pay_mode", mode="before")
+    @classmethod
+    def _pay(cls, v: Any) -> Any:
+        if v in (None, ""):
+            return None
+        s = str(v).strip().lower()
+        return s if s in ("yk", "stars") else v
+
+    @field_validator("channel_id", "bot_token", "yookassa_shop_id", "yookassa_secret_key", mode="before")
+    @classmethod
+    def _txt(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        return str(v).strip()
+
+    @field_validator("admins", "squads_vpn", "squads_trial", mode="before")
+    @classmethod
+    def _ids(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        out: list[str] = []
+        for x in v if isinstance(v, list) else []:
+            if isinstance(x, dict):
+                x = x.get("uuid") or x.get("id") or ""
+            s = str(x).strip()
+            if s:
+                out.append(s)
+        return out
+
+    @field_validator("channel_required", "active", mode="before")
+    @classmethod
+    def _flag(cls, v: Any) -> Any:
+        if v in (1, "1", "true", "True", "yes"):
+            return True
+        if v in (0, "0", "false", "False", "no"):
+            return False
+        return v
+
+
 # ───────────────────────── роутер ─────────────────────────
 
 def build_router(core: Any):
-    from fastapi import APIRouter, Depends, Header, HTTPException, Request
+    from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
     from fastapi.responses import PlainTextResponse, Response
-    from pydantic import BaseModel, Field, field_validator
 
     r = APIRouter()
 
@@ -622,14 +709,8 @@ def build_router(core: Any):
         with open(AGENT_FILE, encoding="utf-8") as fh:
             return PlainTextResponse(fh.read(), headers={"Cache-Control": "no-store"})
 
-    class RegisterBody(BaseModel):
-        code: str = Field(..., max_length=32)
-        hostname: str = Field("", max_length=120)
-        os: str = Field("", max_length=120)
-        version: str = Field("", max_length=20)
-
     @r.post("/api/agent/register")
-    def agent_register(body: RegisterBody, request: Request) -> dict[str, Any]:
+    def agent_register(request: Request, body: RegisterBody = Body(...)) -> dict[str, Any]:
         ensure()
         code = body.code.strip().lower()
         s = db.fetchone("SELECT * FROM miniapp_servers WHERE code_hash = ? AND code_expires > ?", (_sha(code), _now())) \
@@ -649,14 +730,8 @@ def build_router(core: Any):
             _start_install_task(row["project_id"])
         return {"token": token, "server_id": s["id"], "ip": s["ip"], "panel_url": panel_url()}
 
-    class PollBody(BaseModel):
-        version: str = Field("", max_length=20)
-        caddy: str = Field("", max_length=60)
-        hostname: str = Field("", max_length=120)
-        bundles: dict[str, str] = Field(default_factory=dict)
-
     @r.post("/api/agent/poll")
-    async def agent_poll(body: PollBody, authorization: Optional[str] = Header(None)) -> dict[str, Any]:
+    async def agent_poll(body: PollBody = Body(...), authorization: Optional[str] = Header(None)) -> dict[str, Any]:
         s = _agent(authorization)
         sid = int(s["id"])
         db.execute("UPDATE miniapp_servers SET last_seen = ?, agent_version = ?, caddy = ?, hostname = COALESCE(NULLIF(?, ''), hostname) "
@@ -686,13 +761,8 @@ def build_router(core: Any):
                 want[pid] = h
         return {"tasks": tasks, "want": want, "gateway": gateway_secret(), "panel_host": panel_host()}
 
-    class ProgressBody(BaseModel):
-        task: int
-        step: str = Field(..., max_length=20)
-        label: str = Field("", max_length=200)
-
     @r.post("/api/agent/progress")
-    def agent_progress(body: ProgressBody, authorization: Optional[str] = Header(None)) -> dict[str, Any]:
+    def agent_progress(body: ProgressBody = Body(...), authorization: Optional[str] = Header(None)) -> dict[str, Any]:
         s = _agent(authorization)
         t = _task(body.task)
         if not t or int(t["server_id"]) != int(s["id"]) or t["kind"] != "install":
@@ -716,14 +786,8 @@ def build_router(core: Any):
         _install_update(pid, step=body.step, label=body.label[:200], state="installing")
         return {"ok": True, **extra}
 
-    class ResultBody(BaseModel):
-        task: int
-        ok: bool
-        error: str = Field("", max_length=2000)
-        result: dict[str, Any] = Field(default_factory=dict)
-
     @r.post("/api/agent/result")
-    def agent_result(body: ResultBody, authorization: Optional[str] = Header(None)) -> dict[str, Any]:
+    def agent_result(body: ResultBody = Body(...), authorization: Optional[str] = Header(None)) -> dict[str, Any]:
         s = _agent(authorization)
         t = _task(body.task)
         if not t or int(t["server_id"]) != int(s["id"]):
@@ -809,15 +873,8 @@ def build_router(core: Any):
     def setup_install_get(pid: str, _: dict = Depends(core.require_owner)) -> dict[str, Any]:
         return {"install": install_view(pid), "servers": _servers_view()}
 
-    class InstallBody(BaseModel):
-        project: str = Field(..., max_length=24)
-        ip: str = Field("", max_length=45)
-        server_id: Optional[int] = None
-        domain: str = Field(..., max_length=253)
-        site_domain: str = Field("", max_length=253)
-
     @r.post("/api/panel/setup/install")
-    def setup_install(body: InstallBody, p: dict = Depends(core.require_owner)) -> dict[str, Any]:
+    def setup_install(body: InstallBody = Body(...), p: dict = Depends(core.require_owner)) -> dict[str, Any]:
         try:
             out = start_install(body.project, ip=body.ip, server_id=body.server_id, domain=body.domain,
                                 site_domain=body.site_domain)
@@ -861,58 +918,8 @@ def build_router(core: Any):
         return {"records": [{**x, "name": route["domain"] if x["host"] == "@" else f"{x['host']}.{route['domain']}"} for x in recs],
                 "from": f"no-reply@{route['domain']}"}
 
-    class SetupProjectBody(BaseModel):
-        active: Optional[bool] = None
-        bot_token: Optional[str] = Field(None, max_length=200)
-        admins: Optional[list[str]] = Field(None, max_length=80)
-        squads_vpn: Optional[list[str]] = Field(None, max_length=80)
-        squads_trial: Optional[list[str]] = Field(None, max_length=80)
-        pay_mode: Optional[str] = None
-        yookassa_shop_id: Optional[str] = Field(None, max_length=50)
-        yookassa_secret_key: Optional[str] = Field(None, max_length=200)
-        channel_id: Optional[str] = Field(None, max_length=200)
-        channel_required: Optional[bool] = None
-
-        @field_validator("pay_mode", mode="before")
-        @classmethod
-        def _pay(cls, v: Any) -> Any:
-            if v in (None, ""):
-                return None
-            s = str(v).strip().lower()
-            return s if s in ("yk", "stars") else v
-
-        @field_validator("channel_id", "bot_token", "yookassa_shop_id", "yookassa_secret_key", mode="before")
-        @classmethod
-        def _txt(cls, v: Any) -> Any:
-            if v is None:
-                return None
-            return str(v).strip()
-
-        @field_validator("admins", "squads_vpn", "squads_trial", mode="before")
-        @classmethod
-        def _ids(cls, v: Any) -> Any:
-            if v is None:
-                return None
-            out: list[str] = []
-            for x in v if isinstance(v, list) else []:
-                if isinstance(x, dict):
-                    x = x.get("uuid") or x.get("id") or ""
-                s = str(x).strip()
-                if s:
-                    out.append(s)
-            return out
-
-        @field_validator("channel_required", "active", mode="before")
-        @classmethod
-        def _flag(cls, v: Any) -> Any:
-            if v in (1, "1", "true", "True", "yes"):
-                return True
-            if v in (0, "0", "false", "False", "no"):
-                return False
-            return v
-
     @r.put("/api/panel/setup/project/{pid}")
-    def setup_project_put(pid: str, body: SetupProjectBody, p: dict = Depends(core.require_owner)) -> dict[str, Any]:
+    def setup_project_put(pid: str, body: SetupProjectBody = Body(...), p: dict = Depends(core.require_owner)) -> dict[str, Any]:
         pid = projects.normalize(pid) or ""
         if not pid:
             raise HTTPException(404, detail={"message": "Нет такого проекта"})
