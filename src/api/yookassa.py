@@ -10,6 +10,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 import uuid
@@ -61,11 +62,32 @@ def _money(value: float) -> str:
     return f"{round(float(value), 2):.2f}"
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}$")
+
+
+def _customer_email(*candidates: Optional[str]) -> str:
+    """ЮKassa принимает только чистый email, не «Имя <addr>» и не MAIL_FROM без @."""
+    for raw in candidates:
+        s = (raw or "").strip().strip("'\"")
+        m = re.search(r"<([^<>]+@[^<>]+)>", s)
+        if m:
+            s = m.group(1).strip()
+        s = s.split()[-1] if s and " " in s and "@" in s.split()[-1] else s
+        if s and _EMAIL_RE.fullmatch(s) and ".." not in s:
+            return s
+    return ""
+
+
 class YooKassaError(Exception):
     def __init__(self, message: str, *, status: Optional[int] = None, payload: Any = None):
         super().__init__(message)
         self.status = status
         self.payload = payload
+
+
+def _is_receipt_error(exc: YooKassaError) -> bool:
+    blob = f"{exc} {exc.payload or ''}".lower()
+    return "receipt" in blob or "чек" in blob
 
 
 class YooKassaClient:
@@ -170,7 +192,8 @@ class YooKassaClient:
         receipt = self._receipt(amount, receipt_email, receipt_item or description)
         if receipt:
             body["receipt"] = receipt
-        resp = self._request("POST", "/payments", body, idempotence_key=f"pay-{payment_id}")
+        resp = self._send_with_receipt_fallback("POST", "/payments", body, f"pay-{payment_id}",
+                                                amount, receipt_email, receipt_item or description)
         if not isinstance(resp, dict) or not resp.get("id"):
             raise YooKassaError("Некорректный ответ ЮKassa при создании платежа", payload=resp)
         return resp
@@ -192,7 +215,9 @@ class YooKassaClient:
         receipt = self._receipt(amount, receipt_email, receipt_item)
         if receipt:
             body["receipt"] = receipt
-        resp = self._request("POST", "/refunds", body, idempotence_key=key or f"refund-{yk_payment_id}-{uuid.uuid4().hex[:8]}")
+        ik = key or f"refund-{yk_payment_id}-{uuid.uuid4().hex[:8]}"
+        resp = self._send_with_receipt_fallback("POST", "/refunds", body, ik,
+                                                amount, receipt_email, receipt_item)
         if not isinstance(resp, dict):
             raise YooKassaError("Некорректный ответ ЮKassa при возврате", payload=resp)
         return resp
@@ -204,27 +229,45 @@ class YooKassaClient:
         # выкл. только явно: магазину с 54-ФЗ чек обязателен при каждом платеже
         return _env("YOOKASSA_RECEIPT", default="1").lower() not in ("0", "false", "no", "off")
 
+    def _send_with_receipt_fallback(self, method: str, path: str, body: dict[str, Any], key: str,
+                                    amount: float, receipt_email: Optional[str],
+                                    receipt_item: Optional[str]) -> Any:
+        """магазин без 54-ФЗ отвергает чек; с 54-ФЗ — требует. один повтор с другим Idempotence-Key."""
+        try:
+            return self._request(method, path, body, idempotence_key=key)
+        except YooKassaError as exc:
+            if not _is_receipt_error(exc):
+                raise
+            if body.get("receipt"):
+                body = {k: v for k, v in body.items() if k != "receipt"}
+                return self._request(method, path, body, idempotence_key=f"{key}-nr")
+            extra = self._receipt(amount, receipt_email, receipt_item)
+            if not extra:
+                raise
+            body = {**body, "receipt": extra}
+            return self._request(method, path, body, idempotence_key=f"{key}-r")
+
     def _receipt(self, amount: float, email: Optional[str], item: Optional[str]) -> Optional[dict[str, Any]]:
         if not self.receipts_enabled():
             return None
-        contact = (email or "").strip() or _env("YOOKASSA_RECEIPT_EMAIL") or _env("MAIL_FROM")
-        if "@" not in contact:
+        contact = _customer_email(email, _env("YOOKASSA_RECEIPT_EMAIL"), _env("MAIL_FROM"))
+        if not contact:
             return None
         try:
             vat = int(_env("YOOKASSA_VAT_CODE", default="1"))  # 1 = НДС не облагается
         except ValueError:
             vat = 1
+        if vat < 1 or vat > 12:
+            vat = 1
+        desc = (item or "Доступ к VPN-сервису").strip() or "Доступ к VPN-сервису"
         receipt: dict[str, Any] = {
             "customer": {"email": contact},
             "items": [{
-                "description": (item or "Доступ к VPN-сервису")[:128],
-                "quantity": 1.0,
+                "description": desc[:128],
+                "quantity": "1.00",
                 "amount": {"value": _money(amount), "currency": "RUB"},
                 "vat_code": vat,
-                "payment_subject": "service",
-                "payment_mode": "full_payment",
             }],
-            "internet": True,
         }
         tax = _env("YOOKASSA_TAX_SYSTEM_CODE")
         if tax.isdigit():
