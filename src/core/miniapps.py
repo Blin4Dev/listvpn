@@ -27,6 +27,8 @@ import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 try:
@@ -681,9 +683,6 @@ class SetupProjectBody(BaseModel):
 # ───────────────────────── роутер ─────────────────────────
 
 def build_router(core: Any):
-    from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
-    from fastapi.responses import PlainTextResponse, Response
-
     r = APIRouter()
 
     def _err(e: SetupError) -> HTTPException:
