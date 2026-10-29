@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover
     import database as db  # type: ignore
     import projects  # type: ignore
 
-AGENT_VERSION = "1.0"
+AGENT_VERSION = "1.1"  # = VERSION в miniapp_agent.py; другая у агента → он сам скачает новую
 CODE_TTL = 30 * 60
 ONLINE_SEC = 75           # агент опрашивает панель каждые ≤25 с
 POLL_HOLD = 25.0          # long-poll
@@ -234,7 +234,7 @@ def _cleanup() -> None:
     """старые задачи и просроченные команды неподключённых серверов."""
     now = _now()
     db.execute("DELETE FROM miniapp_tasks WHERE created_at < ? AND state IN ('done', 'error')", (now - 7 * 86400,))
-    db.execute("UPDATE miniapp_tasks SET state = 'error', result = ? WHERE kind = 'mail' AND state IN ('new', 'taken') "
+    db.execute("UPDATE miniapp_tasks SET state = 'error', result = ? WHERE kind IN ('mail', 'port25') AND state IN ('new', 'taken') "
                "AND created_at < ?", (json.dumps({"ok": False, "error": "агент не ответил"}), now - 120))
 
 
@@ -506,6 +506,43 @@ def mail_route(pid: Optional[str] = None) -> Optional[dict[str, Any]]:
     return {"domain": dom, "server_id": int(srv["id"]), "ip": srv["ip"]}
 
 
+def mail_dns(pid: Optional[str] = None) -> dict[str, Any]:
+    """DNS-записи почты проекта (SPF — IP сервера мини-приложения, DKIM, DMARC) с отметкой «найдена»."""
+    route = mail_route(pid)
+    if not route:
+        return {"records": [], "from": ""}
+    try:
+        from . import mailer  # type: ignore
+    except ImportError:  # pragma: no cover
+        import mailer  # type: ignore
+    recs = mailer.dns_records(route["domain"], route["ip"])
+    # SPF: только сервер мини-приложения (письма уходят с него)
+    for rec in recs:
+        if rec["host"] == "@":
+            rec["value"] = f"v=spf1 ip4:{route['ip']} -all"
+        if rec["host"] == "_dmarc":
+            rec["value"] = f"v=DMARC1; p=quarantine; rua=mailto:dmarc@{route['domain']}"
+    return {"records": [{**x, "name": route["domain"] if x["host"] == "@" else f"{x['host']}.{route['domain']}"} for x in recs],
+            "from": f"no-reply@{route['domain']}"}
+
+
+def port25_open(server_id: int, timeout: float = 25.0) -> Optional[bool]:
+    """открыт ли исходящий порт 25 на сервере мини-приложения. None — сервер не ответил (не на связи / старый агент)."""
+    srv = server(server_id)
+    if not server_online(srv):
+        return None
+    tid = add_task(server_id, "port25", {})
+    deadline = _now() + timeout
+    while _now() < deadline:
+        t = _task(tid)
+        if t and t["state"] in ("done", "error"):
+            res = json.loads(t.get("result") or "{}") if t.get("result") else {}
+            return bool(res.get("ok"))
+        time.sleep(0.3)
+    db.execute("UPDATE miniapp_tasks SET state = 'error' WHERE id = ? AND state IN ('new', 'taken')", (tid,))
+    return None
+
+
 def deliver(server_id: int, *, sender: str, to: str, ehlo: str, mx: list[str], message: bytes,
             timeout: float = 45.0) -> tuple[bool, str]:
     """отправить готовое (подписанное DKIM) письмо с сервера мини-приложения."""
@@ -753,7 +790,7 @@ def build_router(core: Any):
             h = bundle_hash(pid)
             if h:
                 want[pid] = h
-        return {"tasks": tasks, "want": want, "gateway": gateway_secret(), "panel_host": panel_host()}
+        return {"tasks": tasks, "want": want, "gateway": gateway_secret(), "panel_host": panel_host(), "agent": AGENT_VERSION}
 
     @r.post("/api/agent/progress")
     def agent_progress(body: ProgressBody = Body(...), authorization: Optional[str] = Header(None)) -> dict[str, Any]:
@@ -898,19 +935,7 @@ def build_router(core: Any):
 
     @r.get("/api/panel/setup/mail/{pid}")
     def setup_mail(pid: str, _: dict = Depends(core.require_owner)) -> dict[str, Any]:
-        route = mail_route(pid)
-        if not route:
-            return {"records": [], "from": ""}
-        import mailer  # type: ignore
-        recs = mailer.dns_records(route["domain"], route["ip"])
-        # SPF: только сервер мини-приложения (письма уходят с него)
-        for rec in recs:
-            if rec["host"] == "@":
-                rec["value"] = f"v=spf1 ip4:{route['ip']} -all"
-            if rec["host"] == "_dmarc":
-                rec["value"] = f"v=DMARC1; p=quarantine; rua=mailto:dmarc@{route['domain']}"
-        return {"records": [{**x, "name": route["domain"] if x["host"] == "@" else f"{x['host']}.{route['domain']}"} for x in recs],
-                "from": f"no-reply@{route['domain']}"}
+        return mail_dns(pid)
 
     @r.put("/api/panel/setup/project/{pid}")
     def setup_project_put(pid: str, body: SetupProjectBody = Body(...), p: dict = Depends(core.require_owner)) -> dict[str, Any]:

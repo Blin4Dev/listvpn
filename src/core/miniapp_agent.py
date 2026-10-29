@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import queue
+import re
 import shutil
 import smtplib
 import socket
@@ -26,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "1.0"
+VERSION = "1.1"  # = AGENT_VERSION в miniapps.py
 CONF = "/etc/blin-agent.json"
 STATE_DIR = "/var/lib/blin-agent"
 STATUS = os.path.join(STATE_DIR, "status.json")
@@ -642,6 +643,45 @@ class Agent:
             last += " — похоже, хостинг сервера мини-приложения закрыл исходящий порт 25 (откройте его в поддержке хостинга)"
         self.result(task["id"], False, last)
 
+    # ── открыт ли исходящий порт 25 (многие хостинги, в т.ч. AWS, его закрывают) ──
+    def do_port25(self, task: dict) -> None:
+        hosts = ("gmail-smtp-in.l.google.com", "mx.yandex.ru", "mxs.mail.ru")
+        last = ""
+        for h in hosts:
+            try:
+                with socket.create_connection((h, 25), timeout=6) as s:
+                    s.settimeout(6)
+                    if s.recv(64).startswith(b"220"):
+                        self.result(task["id"], True)
+                        return
+            except OSError as e:
+                last = f"{h}: {type(e).__name__}"
+        self.result(task["id"], False, last or "порт 25 закрыт")
+
+    def self_update(self, want: str) -> None:
+        """панель отдаёт агента новой версии: скачать, проверить, заменить себя и перезапуститься (systemd Restart=always)."""
+        if getattr(self, "_upd_fail", "") == want:
+            return
+        me = os.path.abspath(__file__)
+        try:
+            src, _ = _request(f"{self.conf['panel']}/api/agent/agent.py", timeout=30, raw=True)
+            text = src.decode("utf-8")
+            import ast
+            ast.parse(text)
+            m = re.search(r'^VERSION = "([^"]+)"', text, re.M)
+            if not m or m.group(1) != want:
+                raise ValueError(f"версия в файле {m.group(1) if m else '?'}")
+            with open(me + ".new", "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.chmod(me + ".new", 0o755)
+            os.replace(me + ".new", me)
+        except Exception as e:  # noqa: BLE001
+            self._upd_fail = want
+            log(f"обновление агента до {want}: {e}")
+            return
+        log(f"агент обновлён {VERSION} → {want}, перезапуск")
+        os._exit(0)
+
     def worker(self) -> None:
         while True:
             t = self.q.get()
@@ -680,8 +720,12 @@ class Agent:
                 for t in r.get("tasks") or []:
                     if t["kind"] == "mail":
                         threading.Thread(target=self.do_mail, args=(t,), daemon=True).start()
+                    elif t["kind"] == "port25":
+                        threading.Thread(target=self.do_port25, args=(t,), daemon=True).start()
                     else:
                         self.q.put(t)
+                if r.get("agent") and r["agent"] != VERSION and not self.busy:
+                    self.self_update(str(r["agent"]))
                 want = r.get("want") or {}
                 if want:
                     threading.Thread(target=self.sync_bundles, args=(want,), daemon=True).start()

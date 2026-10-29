@@ -8923,7 +8923,14 @@ def _mail_smtp_params(body: dict[str, Any]) -> tuple[str, int, str, Optional[str
 
 @app.get("/api/panel/mail")
 def panel_mail_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
-    return {**mailer.public_config(), "server_ip": _server_ip()}
+    out: dict[str, Any] = {**mailer.public_config(), "server_ip": _server_ip()}
+    # письма проекта уходят с его сервера мини-приложения: IP, на связи ли агент, DNS-записи
+    route = miniapps.mail_route()
+    if route:
+        srv = miniapps.server(route["server_id"])
+        out.update({"server_ip": route["ip"], "server_online": miniapps.server_online(srv),
+                    "records": miniapps.mail_dns()["records"]})
+    return out
 
 
 @app.post("/api/panel/mail/login-test")
@@ -8942,6 +8949,9 @@ def panel_mail_login_test(body: dict[str, Any] = Body(...), _: dict = Depends(re
 
 @app.post("/api/panel/mail/port25")
 def panel_mail_port25(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    route = miniapps.mail_route()
+    if route:  # проверяем с сервера мини-приложения — письма уходят с него
+        return {"open": miniapps.port25_open(route["server_id"]), "server_ip": route["ip"]}
     return {"open": mailer.port25_open(), "server_ip": _server_ip()}
 
 
@@ -8986,7 +8996,7 @@ def panel_mail_send_test(body: dict[str, Any] = Body(...), _: dict = Depends(req
         raise HTTPException(400, detail={"message": "Неверный адрес"})
     if not mailer.is_configured():
         raise HTTPException(409, detail={"message": "Почта не настроена"})
-    ok, err = mailer.send(to, "BatmanVPN: проверка почты", text="Почта настроена — письма уходят.")
+    ok, err = mailer.send(to, f"{mailer.mail_from_name()}: проверка почты", text="Почта настроена — письма уходят.")
     if not ok:
         raise HTTPException(502, detail={"message": err[:300]})
     return {"ok": True}
