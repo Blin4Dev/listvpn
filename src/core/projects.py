@@ -88,6 +88,10 @@ PANEL_CONFIG: dict[str, bool] = {
     "CHANNEL_ID": False, "CHANNEL_URL": False,
     "SUPPORT_URL": False, "TELEGRAM_MINIAPP_LINK": False,
     "VPN_SUB_DOMAIN": False, "WHITELIST_SUB_DOMAIN": False,
+    # мини-приложение проекта на своём сервере (ставится из панели, см. miniapps.py)
+    "MINIAPP_DOMAIN": False, "MINIAPP_URL": False, "SITE_DOMAIN": False, "MINIAPP_SERVER": False,
+    # проект включён в панели: "1" / "0"; не задано — работает, если бот подключён (старые установки)
+    "PROJECT_ACTIVE": False,
 }
 _CFG_TTL = 5.0
 _cfg_cache: dict[str, tuple[float, dict[str, str]]] = {}
@@ -218,6 +222,14 @@ class Project:
         return t.split(":", 1)[0] if ":" in t else ""
 
     @property
+    def active(self) -> bool:
+        """проект включён (начальное меню панели): выключенный — бот молчит."""
+        flag = panel_config(self.id).get("PROJECT_ACTIVE", "")
+        if flag:
+            return flag == "1"
+        return bool(self.bot_token)
+
+    @property
     def payments_configured(self) -> bool:
         return bool(self.env("YOOKASSA_SHOP_ID") and self.env("YOOKASSA_SECRET_KEY"))
 
@@ -278,6 +290,7 @@ class Project:
             "miniapp_url": self.miniapp_url,
             "channel_url": self.channel_url,
             "configured": bool(self.bot_token),
+            "active": self.active,
             "payments_configured": self.payments_configured,
             "features": dict(self.cfg.get("features") or {}),
         }

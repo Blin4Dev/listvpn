@@ -500,10 +500,10 @@ def _poll(pid: str, token: str) -> None:
                                             "description": P().bot_text("command_description", f"Запустить {P().name}")}]})
         offset = 0
         allowed = ["message", "edited_message", "callback_query", "pre_checkout_query"]
-        while P().bot_token == token:
+        while P().bot_token == token and P().active:
             try:
                 updates = api("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": allowed}, timeout=40)
-                if not updates or P().bot_token != token:
+                if not updates or P().bot_token != token or not P().active:
                     continue
                 for upd in updates:
                     offset = max(offset, int(upd["update_id"]) + 1)
@@ -511,7 +511,7 @@ def _poll(pid: str, token: str) -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"[bot:{pid}] ошибка цикла: {type(exc).__name__}: {exc}", flush=True)
                 time.sleep(3)
-        print(f"[bot:{pid}] токен изменён в панели — переподключение", flush=True)
+        print(f"[bot:{pid}] токен изменён или проект выключен в панели — переподключение", flush=True)
 
 
 SUPERVISE_SEC = 10
@@ -532,6 +532,12 @@ def run() -> None:
             for p in projects.all_projects():
                 tok = p.bot_token
                 cur = running.get(p.id)
+                if tok and not p.active:
+                    # проект выключен в панели (начальное меню): бот молчит
+                    if p.id not in warned:
+                        print(f"[bot:{p.id}] проект {p.name} выключен в панели.", flush=True)
+                        warned.add(p.id)
+                    continue
                 if not tok:
                     if p.id not in warned:
                         print(f"[bot:{p.id}] бот проекта {p.name} не подключён — панель → Настройки → Проект.", flush=True)

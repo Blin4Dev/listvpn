@@ -3094,8 +3094,19 @@ def panel_push_test(p: dict = Depends(require_panel)) -> dict[str, Any]:
 @app.get("/api/panel/projects")
 def panel_projects(_: dict = Depends(require_panel)) -> dict[str, Any]:
     """проекты сети для переключателя в панели (без секретов)."""
-    return {"items": [p.public() for p in projects.all_projects()], "default": projects.DEFAULT,
-            "current": db.pid()}
+    items = []
+    any_ready = False
+    for p in projects.all_projects():
+        d = p.public()
+        try:
+            with projects.use(p.id):
+                d["ready"] = miniapps.project_ready(p, pay_methods())[0]
+        except Exception:  # noqa: BLE001
+            d["ready"] = False
+        any_ready = any_ready or d["ready"]
+        items.append(d)
+    # setup_needed: ни один проект не работает → владельцу панель открывает начальное меню «Проекты»
+    return {"items": items, "default": projects.DEFAULT, "current": db.pid(), "setup_needed": not any_ready}
 
 
 class ProjectConfigBody(BaseModel):
@@ -9676,6 +9687,14 @@ except ImportError:  # pragma: no cover
     import apiv1_store  # type: ignore
 
 app.include_router(_apiv1.build_router(_sys.modules[__name__]))
+
+# ── серверы мини-приложений проектов: начальное меню панели, агент (/api/agent/*), см. miniapps.py ──
+try:
+    from . import miniapps  # type: ignore
+except ImportError:  # pragma: no cover
+    import miniapps  # type: ignore
+
+app.include_router(miniapps.build_router(_sys.modules[__name__]))
 
 
 @app.on_event("startup")

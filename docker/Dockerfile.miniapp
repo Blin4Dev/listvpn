@@ -17,4 +17,8 @@ RUN npm run build:miniapp
 FROM caddy:2.8.4-alpine
 COPY docker/Caddyfile.miniapp /etc/caddy/Caddyfile
 COPY --from=build /app/dist/miniapp /srv/projects
+# при старте: копия сборок в /export для серверов мини-приложений (ставятся из панели)
+COPY docker/miniapp-export.sh /usr/local/bin/miniapp-export.sh
+RUN chmod 755 /usr/local/bin/miniapp-export.sh
 EXPOSE 80
+CMD ["/usr/local/bin/miniapp-export.sh"]

@@ -27,12 +27,16 @@ import { WithdrawalsPage } from './pages/Withdrawals';
 import { MonitoringPage } from './pages/monitoring/MonitoringPage';
 import { SETTINGS_SECTIONS, SettingsPage } from './pages/settings/SettingsPage';
 import { UserDetailPage } from './pages/user/UserDetailPage';
+import { SetupPage } from './pages/setup/SetupPage';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [me, setMe] = useState<Me | null>(null);
   // проекты сети (BatmanVPN, FGN …) и открытый в панели
   const [projects, setProjects] = useState<ProjectsState | null>(null);
+  // начальное меню «Проекты»: ни один проект не работает (или открыт /setup) — владелец ставит мини-приложения
+  const [setupNeeded, setSetupNeeded] = useState(false);
+  const inSetup = window.location.pathname.replace(/\/+$/, '') === '/setup';
   useEffect(() => {
     if (!isAuthenticated) return;
     apiFetch('/panel/projects').then((r) => {
@@ -40,6 +44,7 @@ export default function App() {
       const saved = getProjectId();
       const current = list.find((p) => p.id === saved) || list.find((p) => p.id === r?.default) || list[0] || null;
       if (current && current.id !== saved) rememberProject(current.id);
+      setSetupNeeded(!!r?.setup_needed);
       setProjects({ list, current });
     }).catch(() => setProjects({ list: [], current: null }));
   }, [isAuthenticated]);
@@ -59,6 +64,7 @@ export default function App() {
 
   if (isAuthenticated === null || (isAuthenticated && (!me || !projects))) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Spinner size={36} /></div>;
   if (!isAuthenticated) return <LoginForm onLogin={() => { setIsAuthenticated(null); loadMe(); }} />;
+  if (isOwner(me) && (inSetup || setupNeeded)) return <MeContext.Provider value={me}><SetupScreen /></MeContext.Provider>;
   return <MeContext.Provider value={me}><ProjectContext.Provider value={projects!}><AuthenticatedApp me={me!} onLogout={async () => {
     // отписать push с этого устройства и закрыть сессию
     try { await disablePush(); } catch { /* */ }
@@ -66,6 +72,19 @@ export default function App() {
     if (t) { fetch('/api/panel/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${t}` } }).catch(() => {}); }
     clearPanelToken(); setMe(null); setIsAuthenticated(false);
   }} /></ProjectContext.Provider></MeContext.Provider>;
+}
+
+function SetupScreen() {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const addToast = (title: string, message: string, type: ToastType = 'success') => {
+    const id = Date.now() + Math.random();
+    setToasts((p) => [...p, { id, title, message, type }]);
+    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 4000);
+  };
+  return <div style={{ minHeight: '100vh', background: 'var(--bg)' }}>
+    <ToastContainer toasts={toasts} removeToast={(id) => setToasts((p) => p.filter((t) => t.id !== id))} />
+    <SetupPage onToast={addToast} onDone={() => { window.location.assign('/'); }} />
+  </div>;
 }
 
 export const NAV = [
@@ -121,6 +140,7 @@ export function buildPath(r: Route): string {
 
 function ProjectSwitcher() {
   const { list, current } = React.useContext(ProjectContext);
+  const owner = isOwner(React.useContext(MeContext));
   if (!current) return null;
   return (
     <div style={{ padding: '12px 14px 0' }}>
@@ -130,9 +150,9 @@ function ProjectSwitcher() {
           {list.map((p) => <option key={p.id} value={p.id}>{p.name}{p.configured ? '' : ' · бот не подключён'}</option>)}
         </select>
       ) : <div className="h-sec" style={{ fontSize: 14 }}>{current.name}</div>}
-      {!current.configured && <div className="faint" style={{ fontSize: 11.5, marginTop: 6 }}>
-        Нет токена бота: {current.is_default ? 'TELEGRAM_BOT_TOKEN' : `${current.id.toUpperCase()}__TELEGRAM_BOT_TOKEN`} в .env
-      </div>}
+      {!current.configured && <div className="faint" style={{ fontSize: 11.5, marginTop: 6 }}>Бот не подключён — Проекты</div>}
+      {owner && <button className="nav-item" style={{ marginTop: 8, padding: '7px 10px', fontSize: 13, width: '100%' }}
+        onClick={() => window.location.assign('/setup')}><Server size={15} className="faint" /> Проекты и серверы</button>}
     </div>
   );
 }

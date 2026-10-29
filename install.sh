@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.25-1"
+INSTALLER_VERSION="2026.10.29-1"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -635,6 +635,49 @@ _caddy_api_headers() {
 EOF
 }
 
+# запросы с серверов мини-приложений (их Caddy ставит X-Miniapp-Gateway = MINIAPP_GATEWAY_SECRET):
+# IP пользователя берём из их X-Real-IP, проект — из X-Project
+_caddy_miniapp_gateway() {
+    local gw; gw="$(get_env_var MINIAPP_GATEWAY_SECRET .env 2>/dev/null || true)"
+    [[ -n "$gw" ]] || return 0
+    cat <<EOF
+		@miniapp_gw header X-Miniapp-Gateway ${gw}
+		handle @miniapp_gw {
+			@gw_hooks path /yookassa* /webhooks/payments/*
+			handle @gw_hooks {
+				reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+					header_up X-Real-IP {http.request.header.X-Real-IP}
+					header_up X-Forwarded-For {http.request.header.X-Real-IP}
+					header_up -CF-Connecting-IP
+					header_up -True-Client-IP
+					header_up -X-Panel-Gateway
+					header_up -X-Miniapp-Gateway
+				}
+			}
+			handle /api/panel* {
+				respond 404
+			}
+			handle /api/agent* {
+				respond 404
+			}
+			handle /api* {
+				reverse_proxy 127.0.0.1:8000 {
+					header_up X-Real-IP {http.request.header.X-Real-IP}
+					header_up X-Forwarded-For {http.request.header.X-Real-IP}
+					header_up -CF-Connecting-IP
+					header_up -True-Client-IP
+					header_up -X-Panel-Gateway
+					header_up -X-Miniapp-Gateway
+					flush_interval -1
+				}
+			}
+			handle {
+				respond 404
+			}
+		}
+EOF
+}
+
 # порт не 443: проверка TLS-ALPN идёт только на 443 (там может быть, например, Xray) — сертификат через HTTP-01 на порту 80
 _caddy_tls_block() {
     [[ "$HTTPS_PORT" == "443" ]] && return 0
@@ -674,7 +717,7 @@ render_bot_caddy() {
 
     local tls_block; tls_block="$(_caddy_tls_block)"
     ( umask 077; cat > "$tmp" <<EOF
-# BatmanVPN — сгенерировано install.sh (правки затрутся при обновлении)
+# listvpn — сгенерировано install.sh (правки затрутся при обновлении)
 
 (blin_sec) {
 	header {
@@ -685,6 +728,12 @@ render_bot_caddy() {
 		defer
 	}
 }
+EOF
+    )
+    # мини-приложение на этом сервере — только у старых установок (MINIAPP_DOMAIN в .env);
+    # новые проекты ставят мини-приложения на свои серверы из панели (начальное меню «Проекты»)
+    if [[ -n "$miniapp_domain" ]]; then
+    cat >> "$tmp" <<EOF
 
 # мини-приложение + api + webhooks
 $(site_addr "$miniapp_domain") {
@@ -729,7 +778,7 @@ $(_caddy_api_headers)
 	}
 }
 EOF
-    )
+    fi
     # остальные проекты сети: свой домен → тот же API и контейнер мини-приложений с X-Project проекта
     local _pid _pdom _psite _paddr
     while read -r _pid; do
@@ -786,7 +835,7 @@ EOF
     if [[ $remote -eq 0 ]]; then
         cat >> "$tmp" <<EOF
 
-# панель
+# панель (+ API, вебхуки и шлюз для серверов мини-приложений проектов)
 $(site_addr "$panel_domain") {
 	import blin_sec
 ${tls_block}
@@ -797,6 +846,24 @@ ${tls_block}
 	route {
 		handle /api/internal* {
 			respond 404
+		}
+$(_caddy_miniapp_gateway)
+		# одноразовая команда установки сервера мини-приложения: curl -fsSL https://<панель>/m/<код> | sudo bash
+		handle_path /m/* {
+			rewrite * /api/agent/script{path}
+			reverse_proxy 127.0.0.1:8000 {
+$(_caddy_api_headers)
+			}
+		}
+		handle /yookassa* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		handle /webhooks/payments/* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
 		}
 		handle /api* {
 			reverse_proxy 127.0.0.1:8000 {
@@ -843,7 +910,7 @@ $(_caddy_api_headers)
 }
 EOF
     fi
-    if hook_separate "$miniapp_domain" && [[ "$HOOK_DOMAIN" != "$panel_domain" ]]; then
+    if [[ -n "$miniapp_domain" ]] && hook_separate "$miniapp_domain" && [[ "$HOOK_DOMAIN" != "$panel_domain" ]]; then
         cat >> "$tmp" <<EOF
 
 # вебхуки: только ЮKassa и Telegram, остальное 404
@@ -930,9 +997,12 @@ proxy_up() { caddy_proxy_up "$@"; }
 # полный подъём прокси: Caddy, главный файл, порты, сайт, сертификаты. При ошибке nginx возвращается.
 caddy_proxy_up() {
     local mini="$1" panel="$2" email="$3"
-    local -a domains=("$mini")
+    local -a domains=()
+    [[ -n "$mini" ]] && domains+=("$mini")
     panel_is_remote || domains+=("$panel")
-    if hook_separate "$mini" && [[ "$HOOK_DOMAIN" != "$panel" ]]; then domains+=("$HOOK_DOMAIN"); fi
+    if [[ -n "$mini" ]] && hook_separate "$mini" && [[ "$HOOK_DOMAIN" != "$panel" ]]; then domains+=("$HOOK_DOMAIN"); fi
+    # шлюз для серверов мини-приложений (render_bot_caddy читает его из .env)
+    [[ -f .env ]] && { ensure_env_var MINIAPP_GATEWAY_SECRET "$(gen_secret_hex)" .env || true; }
     local _xd
     while read -r _xd; do [[ -n "$_xd" ]] && domains+=("$_xd"); done < <(extra_project_domains)
     install_caddy || return 1
@@ -998,6 +1068,8 @@ create_env_file() {
         '^[!-~]{10,}$' "Ключ — латинские символы без пробелов" 1
 
     TELEGRAM_WEBHOOK_SECRET="$(gen_secret_hex)"
+    MINIAPP_GATEWAY_SECRET="$(get_env_var MINIAPP_GATEWAY_SECRET .env 2>/dev/null || true)"
+    MINIAPP_GATEWAY_SECRET="${MINIAPP_GATEWAY_SECRET:-$(gen_secret_hex)}"
     PANEL_SETUP_TOKEN="$(gen_secret_hex)"
     INTERNAL_API_SECRET="$(gen_secret_hex)"
     MONITOR_SECRET_KEY="$(gen_secret_hex)"
@@ -1039,11 +1111,12 @@ TELEGRAM_STARS_DELIVERY=bot
 # почта: в панели → настройки → почта
 MAIL_ENABLED=0
 
-# публичные url
-MINIAPP_URL=$(pub_url "$domain")
+# публичные url: всё на домене панели. Мини-приложения проектов — на своих серверах и доменах,
+# их ставит панель (начальное меню «Проекты»), домены хранятся в панели
+MINIAPP_URL=${domain:+$(pub_url "$domain")}
 PANEL_URL=$(pub_url "$panel_domain")
-WEBHOOK_URL=$(pub_url "$(hook_for "$domain")")
-API_URL=$(pub_url "$domain")/api
+WEBHOOK_URL=$(pub_url "${domain:+$(hook_for "$domain")}${domain:-$panel_domain}")
+API_URL=$(pub_url "${domain:-$panel_domain}")/api
 # порт HTTPS (Caddy); смена — install.sh → «Сменить порт»
 HTTPS_PORT=${HTTPS_PORT}
 
@@ -1059,7 +1132,7 @@ DB_PATH=data/data.db
 
 # безопасность
 ENV=production
-CORS_ORIGINS=$(pub_url "$domain"),$(pub_url "$panel_domain"),https://web.telegram.org
+CORS_ORIGINS=${domain:+$(pub_url "$domain"),}$(pub_url "$panel_domain"),https://web.telegram.org
 # лендинг в cors не добавляем
 TELEGRAM_INITDATA_MAX_AGE=86400
 TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET}
@@ -1069,14 +1142,17 @@ INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
 API_TOKEN_SECRET=${API_TOKEN_SECRET}
 # шифрование ключей нод мониторинга (не менять после выдачи)
 MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY}
+# серверы мини-приложений проектов → API этого сервера (заголовок X-Miniapp-Gateway); смена = переустановка их сайтов
+MINIAPP_GATEWAY_SECRET=${MINIAPP_GATEWAY_SECRET}
 MINIAPP_ALLOW_UNAUTH=0
 
 # ssl / домены
 SSL_EMAIL=${email}
+# мини-приложение на этом сервере — только у старых установок; новые ставятся из панели
 MINIAPP_DOMAIN=${domain}
 PANEL_DOMAIN=${panel_domain}
-# домен вебхуков (ЮKassa, Telegram); смена — install.sh → «Заменить домены»
-WEBHOOK_DOMAIN=$(hook_for "$domain")
+# домен вебхуков (ЮKassa, Telegram); пусто — домен панели
+WEBHOOK_DOMAIN=${domain:+$(hook_for "$domain")}
 # отдельный домен API v1, необязательно (A-запись на этот сервер, затем install.sh → 1)
 API_DOMAIN=
 EOF
@@ -1085,7 +1161,6 @@ EOF
     chmod 600 .env 2>/dev/null || true
     log_success "✔ Файл .env создан (права 600)."
     log_warn "\n⚠️  Логин и пароль панели будут показаны ниже, после запуска (один раз)."
-    log_warn "⚠️  Платежи (ЮKassa, Telegram Stars) — ключи в .env."
 }
 
 # stars: bot polling; webhook только при TELEGRAM_STARS_DELIVERY=webhook
@@ -1268,6 +1343,11 @@ migrate_security_update() {
     fi
 
     secret="$(gen_secret_hex)"
+    if ensure_env_var MINIAPP_GATEWAY_SECRET "$secret" "$file"; then
+        log_info "  + MINIAPP_GATEWAY_SECRET сгенерирован (серверы мини-приложений проектов)"
+    fi
+
+    secret="$(gen_secret_hex)"
     if ensure_env_var MONITOR_SECRET_KEY "$secret" "$file"; then
         log_info "  + MONITOR_SECRET_KEY сгенерирован (шифрование ключей нод мониторинга)"
     fi
@@ -1329,15 +1409,17 @@ update_env_domains() {
     local miniapp="$1"
     local panel="$2"
 
+    local hook=""
+    [[ -n "$miniapp" ]] && hook="$(hook_for "$miniapp")"
     set_env_var MINIAPP_DOMAIN "$miniapp"
-    set_env_var WEBHOOK_DOMAIN "$(hook_for "$miniapp")"
+    set_env_var WEBHOOK_DOMAIN "$hook"
     set_env_var PANEL_DOMAIN   "$panel"
 
-    set_env_var MINIAPP_URL         "$(pub_url "$miniapp")"
-    set_env_var WEBHOOK_URL         "$(pub_url "$(hook_for "$miniapp")")"
-    set_env_var API_URL             "$(pub_url "$miniapp")/api"
+    set_env_var MINIAPP_URL         "${miniapp:+$(pub_url "$miniapp")}"
+    set_env_var WEBHOOK_URL         "$(pub_url "${hook:-$panel}")"
+    set_env_var API_URL             "$(pub_url "${miniapp:-$panel}")/api"
     set_env_var PANEL_URL           "$(pub_url "$panel")"
-    set_env_var CORS_ORIGINS        "$(pub_url "$miniapp"),$(pub_url "$panel"),https://web.telegram.org"
+    set_env_var CORS_ORIGINS        "${miniapp:+$(pub_url "$miniapp"),}$(pub_url "$panel"),https://web.telegram.org"
     set_env_var HTTPS_PORT          "$HTTPS_PORT"
 
     log_success "✔ .env обновлён."
@@ -1355,6 +1437,11 @@ replace_domains_flow() {
     cur_miniapp=$(get_env_var MINIAPP_DOMAIN || true)
     cur_panel=$(get_env_var PANEL_DOMAIN || true)
     cur_email=$(get_env_var SSL_EMAIL || true)
+
+    if [[ -z "$cur_miniapp" ]]; then
+        replace_panel_domain_flow "$cur_panel" "$cur_email"
+        return $?
+    fi
 
     local cur_hook; cur_hook="$(hook_for "$cur_miniapp")"
     log_info "Текущие домены:"
@@ -1500,6 +1587,32 @@ replace_domains_flow() {
         log_warn "Обновите Web App URL в @BotFather:"
         printf "     ${CYAN}%s${NC}\n" "$(pub_url "$new_miniapp")"
     fi
+}
+
+# новая схема: на этом сервере только панель (домены мини-приложений проектов меняются в панели)
+replace_panel_domain_flow() {
+    local cur_panel="$1" cur_email="$2" tmp
+    log_info "Домен панели: ${BOLD}${cur_panel:-—}${NC}"
+    hint "Домены мини-приложений проектов меняются в панели: Проекты → проект → «Перенести на другой сервер»."
+    if [[ -z "$cur_email" ]]; then
+        prompt "Email для Let's Encrypt: " cur_email
+        [[ -n "$cur_email" ]] || { log_error "Email обязателен."; exit 1; }
+        set_env_var SSL_EMAIL "$cur_email"
+    fi
+    prompt "Новый домен панели (Enter = оставить): " tmp
+    tmp="$(sanitize_domain "$tmp")"
+    [[ -n "$tmp" && "$tmp" != "$cur_panel" ]] || { log_info "Изменений нет."; return 0; }
+    dns_preflight "$tmp" || exit 1
+    proxy_up "" "$tmp" "$cur_email" || exit 1
+    update_env_domains "" "$tmp"
+    ensure_env_utf8 .env
+    dc up -d
+    dc restart api webhook bot 2>/dev/null || true
+    cleanup_legacy_certbot "$cur_panel"
+    section "Домен панели заменён"
+    printf "  Панель: ${YELLOW}%s${NC}\n" "$(pub_url "$tmp")"
+    log_warn "Серверы мини-приложений ходят на старый домен панели — переустановите их сайты:"
+    hint "панель → Проекты → проект → «Перенести на другой сервер» (тот же сервер и домен)."
 }
 
 # XBM удалён из BatmanVPN: убрать его следы со старых установок (контейнер, помощник, правку nginx подписки)
@@ -2086,7 +2199,7 @@ change_port_flow() {
     mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
     panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
     email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
-    [[ -n "$mini" && -n "$panel" ]] || { log_error "В .env нет MINIAPP_DOMAIN/PANEL_DOMAIN."; exit 1; }
+    [[ -n "$panel" ]] || { log_error "В .env нет PANEL_DOMAIN."; exit 1; }
     if [[ -z "$email" ]]; then
         prompt "Email для Let's Encrypt: " email
         set_env_var SSL_EMAIL "$email"
@@ -2112,36 +2225,41 @@ change_port_flow() {
             || log_warn "Панель на отдельном сервере не обновлена — повторите: install.sh → «Панель на отдельном сервере»."
     fi
     TELEGRAM_STARS_DELIVERY="$(get_env_var TELEGRAM_STARS_DELIVERY || true)"
-    register_telegram_webhook "$(get_env_var TELEGRAM_BOT_TOKEN || true)" "$(hook_for "$mini")"
+    if [[ -n "$mini" ]]; then
+        register_telegram_webhook "$(get_env_var TELEGRAM_BOT_TOKEN || true)" "$(hook_for "$mini")"
+    fi
     if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active' && [[ "$old" != "443" ]]; then
         sudo ufw delete allow "${old}/tcp" >/dev/null 2>&1 || true
     fi
     section "Порт изменён: ${old} → ${HTTPS_PORT}"
-    printf "  Мини-приложение : ${YELLOW}%s${NC}\n" "$(pub_url "$mini")"
+    [[ -n "$mini" ]] && printf "  Мини-приложение : ${YELLOW}%s${NC}\n" "$(pub_url "$mini")"
     printf "  Панель          : ${YELLOW}%s${NC}\n" "$(pub_url "$panel")"
-    log_warn "Обновите Web App URL в @BotFather и адрес уведомлений в ЮKassa:"
-    printf "     ${CYAN}%s${NC}   и   ${CYAN}%s/yookassa${NC}\n" "$(pub_url "$mini")" "$(pub_url "$(hook_for "$mini")")"
+    if [[ -n "$mini" ]]; then
+        log_warn "Обновите Web App URL в @BotFather и адрес уведомлений в ЮKassa:"
+        printf "     ${CYAN}%s${NC}   и   ${CYAN}%s/yookassa${NC}\n" "$(pub_url "$mini")" "$(pub_url "$(hook_for "$mini")")"
+    else
+        log_warn "Серверы мини-приложений ходят на панель по старому адресу — переустановите их сайты в панели (Проекты)."
+    fi
 }
 
 # ── сеть проектов: подключить / настроить проект (домен, бот, ЮKassa) ──
 project_setup_flow() {
     local def; def="$(default_project)"
     section "Проекты сети"
-    hint "Основной проект: $(project_name "$def") (${def}) — домен $(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || echo '—')."
-    local id dom
+    local id
+    printf "  ${CYAN}%-10s${NC} %s\n" "$def" "$(project_name "$def")"
     while read -r id; do
         [[ -n "$id" ]] || continue
-        dom="$(project_domain "$id")"
-        printf "  ${CYAN}%-10s${NC} %-20s домен: %s\n" "$id" "$(project_name "$id")" "${dom:-—}"
+        printf "  ${CYAN}%-10s${NC} %s\n" "$id" "$(project_name "$id")"
     done < <(extra_projects)
     echo
-    hint "Здесь — только домен проекта (нужен сертификат). Бот, канал и ЮKassa — в панели: Настройки → Проект."
-    hint "Новый проект = копия основного: введите новый id (латиница, например fgn2) — папка projects/<id> создастся сама."
+    hint "Мини-приложения проектов (сервер, домен, сертификат, почта) ставятся в панели: Проекты → «Установить»."
+    hint "Здесь — только новый проект: копия основного, папка projects/<id> (id латиницей, например fgn2)."
     local pid name
     prompt_valid "ID проекта: " pid '^[a-z][a-z0-9]{0,23}$' "Только латиница и цифры, с буквы, до 24 символов"
-    if [[ "$pid" == "$def" ]]; then
-        log_error "Основной проект настраивается обычной установкой (домены — пункт 2)."
-        return 1
+    if [[ -f "projects/${pid}/project.json" ]]; then
+        log_info "Проект ${pid} уже есть — его мини-приложение ставится в панели (Проекты)."
+        return 0
     fi
     if [[ ! -f "projects/${pid}/project.json" ]]; then
         prompt "Название проекта (как видят пользователи, например FGN): " name
@@ -2154,61 +2272,19 @@ project_setup_flow() {
             "projects/${def}/project.json" > "projects/${pid}/project.json"
         log_success "✔ Создан projects/${pid} (копия $(project_name "$def")). Канал и тексты — в projects/${pid}/project.json."
     fi
-    local pre; pre="$(project_env_prefix "$pid")"
-    local cur_dom
-    cur_dom="$(project_domain "$pid")"
-    prompt "Домен мини-приложения $(project_name "$pid") [${cur_dom:-нет}] (Enter = оставить): " dom
-    dom="$(sanitize_domain "${dom:-$cur_dom}")"
-    if [[ -n "$dom" ]] && ! _is_domain "$dom"; then
-        log_error "Некорректный домен: ${dom}"
-        return 1
-    fi
-    [[ -n "$dom" ]] && { set_env_var "${pre}MINIAPP_DOMAIN" "$dom"; set_env_var "${pre}MINIAPP_URL" "$(pub_url "$dom")"; }
-    local site cur_site
-    if [[ -n "$dom" ]] && project_has_site "$pid"; then
-        cur_site="$(get_env_var "${pre}SITE_DOMAIN" .env 2>/dev/null || true)"
-        hint "У $(project_name "$pid") есть сайт: в браузере вместо мини-приложения. Его можно открыть на отдельном домене."
-        prompt "Домен сайта [${cur_site:-нет}] (Enter = оставить, - = убрать): " site
-        if [[ "$site" == "-" ]]; then
-            set_env_var "${pre}SITE_DOMAIN" ""
-        else
-            site="$(sanitize_domain "${site:-$cur_site}")"
-            if [[ -n "$site" ]] && { ! _is_domain "$site" || [[ "$site" == "$dom" ]]; }; then
-                log_error "Некорректный домен сайта: ${site}"
-                return 1
-            fi
-            [[ -n "$site" ]] && set_env_var "${pre}SITE_DOMAIN" "$site"
-        fi
-    fi
     chmod 600 .env 2>/dev/null || true
-
-    if [[ -n "$dom" ]]; then
-        local ip_dom ip_srv _d; ip_srv="$(get_server_ip || true)"
-        for _d in "$dom" $(project_site_domain "$pid"); do
-            ip_dom="$(resolve_domain_ip "$_d" || true)"
-            if [[ -n "$ip_srv" && "$ip_dom" != "$ip_srv" ]]; then
-                log_warn "A-запись ${_d} → ${ip_dom:-нет}, а сервер — ${ip_srv}. Сертификат не выпустится, пока DNS не указывает сюда."
-            fi
-        done
-    fi
 
     log_info "\nПересборка и перезапуск (мини-приложения всех проектов, бот, API)..."
     dc_build || return 1
     dc up -d
     dc restart api webhook bot 2>/dev/null || true
-    local mini panel email
-    mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || true)"
-    panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
-    email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
-    if [[ -n "$mini" && -n "$panel" ]]; then
-        proxy_up "$mini" "$panel" "$email" || return 1
-    fi
 
-    log_success "\n✔ Проект $(project_name "$pid") добавлен${dom:+ на домен ${dom}}."
-    log_info "Дальше — в панели: переключатель «Проект» → $(project_name "$pid") →"
-    printf "  • Настройки → Проект: токен бота, канал, ЮKassa (бот подключится сам, без перезапуска)\n"
-    printf "  • Настройки → Цены: тарифы и пробный период (сейчас — копия основного проекта)\n"
-    [[ -n "$dom" ]] && printf "  • @BotFather → Menu Button / Web App: ${CYAN}%s${NC}\n" "$(pub_url "$dom")"
+    local panel; panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
+    log_success "\n✔ Проект $(project_name "$pid") добавлен."
+    log_info "Дальше — в панели: Проекты → $(project_name "$pid") → «Установить»"
+    printf "  • сервер и домен мини-приложения (панель выдаст команду для сервера)\n"
+    printf "  • затем бот, админы, сквады, оплата и канал — там же\n"
+    [[ -n "$panel" ]] && printf "  • ${CYAN}%s/setup${NC}\n" "$(pub_url "$panel")"
     return 0
 }
 
@@ -2251,7 +2327,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
         _upd_mini="$(get_env_var MINIAPP_DOMAIN .env 2>/dev/null || get_env_var WEBHOOK_DOMAIN .env 2>/dev/null || true)"
         _upd_panel="$(get_env_var PANEL_DOMAIN .env 2>/dev/null || true)"
         _upd_email="$(get_env_var SSL_EMAIL .env 2>/dev/null || true)"
-        if [[ -n "$_upd_mini" && -n "$_upd_panel" ]]; then
+        if [[ -n "$_upd_panel" ]]; then
             # с nginx-версии переезжаем на Caddy автоматически (при ошибке nginx возвращается)
             if [[ -z "$_upd_email" ]]; then
                 prompt "Email для Let's Encrypt: " _upd_email
@@ -2261,10 +2337,14 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
                 log_error "Не удалось применить Caddy. Контейнеры обновлены; прокси оставлен как был."
                 exit 1
             fi
-            set_env_var WEBHOOK_DOMAIN "$(hook_for "$_upd_mini")"
-            set_env_var WEBHOOK_URL "$(pub_url "$(hook_for "$_upd_mini")")"
+            if [[ -n "$_upd_mini" ]]; then
+                set_env_var WEBHOOK_DOMAIN "$(hook_for "$_upd_mini")"
+                set_env_var WEBHOOK_URL "$(pub_url "$(hook_for "$_upd_mini")")"
+            else
+                set_env_var WEBHOOK_URL "$(pub_url "$_upd_panel")"
+            fi
         else
-            log_warn "В .env нет MINIAPP_DOMAIN/PANEL_DOMAIN — прокси не перенастроен."
+            log_warn "В .env нет PANEL_DOMAIN — прокси не перенастроен."
         fi
 
         # панель на отдельном сервере: выкатить новую версию туда
@@ -2293,7 +2373,7 @@ if [[ -f "$NGINX_CONF" || -f "$CADDY_SITE" ]]; then
         step "3)" "Перенести панель на отдельный сервер"
     fi
     step "4)" "Сменить порт HTTPS (сейчас ${HTTPS_PORT})"
-    step "5)" "Проекты сети (FGN и др.): добавить проект / домен"
+    step "5)" "Проекты сети: добавить новый проект (папка projects/<id>)"
     step "6)" "Выход"
     echo
     prompt "Ваш выбор [1-6] (Enter = 1): " ACTION_CHOICE
@@ -2386,53 +2466,27 @@ fi
 cd "$PROJECT_DIR"
 log_success "✔ Репозиторий BatmanVPN готов."
 
-log_info "\nШаг 3: домены и SSL"
+log_info "\nШаг 3: домен панели и SSL"
+hint "Здесь ставится только панель (главный сервер: API, бот, база)."
+hint "Мини-приложения проектов ставятся потом из панели — каждое на свой сервер и домен."
 
-prompt "Домен мини-приложения (например app.example.com): " USER_DOMAIN_INPUT
-DOMAIN=$(sanitize_domain "$USER_DOMAIN_INPUT")
-[[ -n "$DOMAIN" ]] || { log_error "Некорректный домен."; exit 1; }
-
-prompt "Домен панели (например panel.example.com): " USER_PANEL_DOMAIN_INPUT
-PANEL_DOMAIN=$(sanitize_domain "$USER_PANEL_DOMAIN_INPUT")
-[[ -n "$PANEL_DOMAIN" ]] || { log_error "Некорректный домен панели."; exit 1; }
+while true; do
+    prompt "Домен панели (например panel.example.com): " USER_PANEL_DOMAIN_INPUT
+    PANEL_DOMAIN=$(sanitize_domain "$USER_PANEL_DOMAIN_INPUT")
+    [[ -n "$PANEL_DOMAIN" ]] && _is_domain "$PANEL_DOMAIN" && break
+    log_warn "Некорректный домен панели."
+done
+DOMAIN=""
+HOOK_DOMAIN=""
+PANEL_REMOTE=0
+rm -f "$PANEL_REMOTE_FILE" 2>/dev/null || true
 
 prompt_valid "Email для Let's Encrypt: " EMAIL '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' "Email вида name@example.com"
-ask_hook_domain "$DOMAIN" "$PANEL_DOMAIN"
 ask_https_port 443
 
-PANEL_REMOTE=0
-echo
-hint "Панель можно поставить на отдельный сервер: установщик сам зайдёт туда по SSH."
-if confirm "Установить панель на ОТДЕЛЬНЫЙ сервер? (y/n): "; then
-    PANEL_REMOTE=1
-    hint "A-запись ${PANEL_DOMAIN} должна указывать на сервер панели, а не на этот."
-    panel_remote_collect || exit 1
-else
-    rm -f "$PANEL_REMOTE_FILE" 2>/dev/null || true
-fi
-
 SERVER_IP=$(get_server_ip || true)
-DOMAIN_IP=$(resolve_domain_ip "$DOMAIN" || true)
-PANEL_DOMAIN_IP=$(resolve_domain_ip "$PANEL_DOMAIN" || true)
-
 [[ -n "$SERVER_IP" ]] && log_info "IP сервера: ${SERVER_IP}"
-[[ -n "$DOMAIN_IP" ]] && log_info "IP ${DOMAIN}: ${DOMAIN_IP}"
-[[ -n "$PANEL_DOMAIN_IP" ]] && log_info "IP ${PANEL_DOMAIN}: ${PANEL_DOMAIN_IP}"
-
-if [[ -n "$SERVER_IP" && -n "$DOMAIN_IP" && "$SERVER_IP" != "$DOMAIN_IP" ]]; then
-    log_warn "DNS ${DOMAIN} не совпадает с IP сервера."
-    confirm "Продолжить? (y/n): " || exit 1
-fi
-if hook_separate "$DOMAIN"; then
-    dns_preflight "$HOOK_DOMAIN" || exit 1
-fi
-if [[ $PANEL_REMOTE -eq 1 ]]; then
-    panel_remote_check_dns "$PANEL_DOMAIN" || exit 1
-elif [[ -n "$SERVER_IP" && -n "$PANEL_DOMAIN_IP" && "$SERVER_IP" != "$PANEL_DOMAIN_IP" ]]; then
-    log_warn "DNS ${PANEL_DOMAIN} не совпадает с IP сервера."
-    confirm "Продолжить? (y/n): " || exit 1
-fi
-
+dns_preflight "$PANEL_DOMAIN" || exit 1
 
 if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active'; then
     log_warn "UFW активен — открываю порты 80 и ${HTTPS_PORT}, закрываю внутренние."
@@ -2443,23 +2497,25 @@ if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q 'Status: active';
     sudo ufw deny "${WEBHOOK_PORT:-5000}/tcp" 2>/dev/null || true
 fi
 
-log_info "\nШаг 4: Caddy и SSL-сертификаты"
-# сертификаты Caddy выпускает и продлевает сам
-proxy_up "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL" || exit 1
-
-log_info "\nШаг 5: .env"
+# .env раньше Caddy: в конфиге панели нужен секрет шлюза серверов мини-приложений
+log_info "\nШаг 4: .env"
 if [[ -f ".env" ]]; then
     log_warn "Файл .env уже существует."
     if ! confirm "Перезаписать .env? (y/n): "; then
         log_info "Используется существующий .env."
         migrate_security_update ".env"
-        set_env_var HTTPS_PORT "$HTTPS_PORT"
+        update_env_domains "" "$PANEL_DOMAIN"
+        set_env_var SSL_EMAIL "$EMAIL"
     else
-        create_env_file "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL"
+        create_env_file "" "$PANEL_DOMAIN" "$EMAIL"
     fi
 else
-    create_env_file "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL"
+    create_env_file "" "$PANEL_DOMAIN" "$EMAIL"
 fi
+
+log_info "\nШаг 5: Caddy и SSL-сертификат панели"
+# сертификаты Caddy выпускает и продлевает сам
+proxy_up "" "$PANEL_DOMAIN" "$EMAIL" || exit 1
 
 log_info "\nШаг 6: Docker"
 ensure_env_utf8 .env
@@ -2473,28 +2529,8 @@ fix_container_data_permissions
 dc restart api webhook bot monitor 2>/dev/null || true
 remove_legacy_xbm
 
-PANEL_DEPLOY_FAILED=0
-if [[ $PANEL_REMOTE -eq 1 ]]; then
-    log_info "\nШаг 6.1: Панель на отдельном сервере"
-    dc stop panel >/dev/null 2>&1 || true
-    # API должен подняться: проверка шлюза ждёт ответ 401
-    for _i in $(seq 1 30); do
-        curl -fsS --noproxy "*" -m 3 "http://127.0.0.1:${API_PORT:-8000}/api/health" >/dev/null 2>&1 && break
-        sleep 2
-    done
-    if ! panel_remote_deploy "$DOMAIN" "$PANEL_DOMAIN" "$EMAIL"; then
-        PANEL_DEPLOY_FAILED=1
-        log_warn "Бот установлен, но панель на отдельном сервере — нет. Исправьте ошибку выше и запустите install.sh → «Панель на отдельном сервере»."
-    fi
-fi
-
-log_info "\nШаг 7: Telegram Stars"
-TELEGRAM_STARS_DELIVERY="$(get_env_var TELEGRAM_STARS_DELIVERY || true)"
-TELEGRAM_STARS_DELIVERY="${TELEGRAM_STARS_DELIVERY:-bot}"
-register_telegram_webhook "${TELEGRAM_BOT_TOKEN:-}" "$(hook_for "$DOMAIN")"
-
 # логин/пароль панели: data/first_run_credentials.txt, показать один раз и удалить
-log_info "\nШаг 8: Доступ в панель"
+log_info "\nШаг 7: Доступ в панель"
 PANEL_CREDS_FILE="data/first_run_credentials.txt"
 for _i in $(seq 1 30); do
     [[ -f "$PANEL_CREDS_FILE" ]] && break
@@ -2513,19 +2549,10 @@ else
 fi
 
 printf "\n"
-printf "${GREEN}┃${NC}    ${BOLD}Установка завершена${NC}                              ${GREEN}┃${NC}\n"
+printf "${GREEN}┃${NC}    ${BOLD}Панель установлена${NC}                               ${GREEN}┃${NC}\n"
 printf "\n"
-printf "${BOLD}  Адреса${NC}\n"
-printf "  Мини-приложение:  ${YELLOW}%s${NC}\n" "$(pub_url "$DOMAIN")"
-if [[ $PANEL_REMOTE -eq 1 ]]; then
-    printf "  Панель:           ${YELLOW}%s${NC}  (сервер %s)\n" "$(pub_url "$PANEL_DOMAIN")" "$PR_HOST"
-    [[ $PANEL_DEPLOY_FAILED -eq 1 ]] && printf "                    ${RED}не установлена — см. ошибку выше${NC}\n"
-else
-    printf "  Панель:           ${YELLOW}%s${NC}\n" "$(pub_url "$PANEL_DOMAIN")"
-fi
-printf "  API:              ${YELLOW}%s/api${NC}\n" "$(pub_url "$DOMAIN")"
-print_payment_webhooks "$(hook_for "$DOMAIN")"
-printf "${BOLD}  Дальше — в панели${NC}\n"
-printf "  • Настройки → Проект: токен бота, канал, ЮKassa (у каждого проекта свои)\n"
-printf "  • Настройки → Уведомления: Telegram ID админов (коды входа в панель) и форум\n"
-printf "  • @BotFather → Menu Button / Web App: ${CYAN}%s${NC}\n\n" "$(pub_url "$DOMAIN")"
+printf "  Панель:  ${YELLOW}%s${NC}\n" "$(pub_url "$PANEL_DOMAIN")"
+printf "\n${BOLD}  Дальше — в панели, начальное меню «Проекты»${NC}\n"
+printf "  • включите проект → укажите IP сервера и домен мини-приложения\n"
+printf "  • панель выдаст команду для того сервера и сама поставит Caddy, сертификат, мини-приложение и почту\n"
+printf "  • затем бот, админы, сквады Remnawave, оплата и канал — там же\n\n"

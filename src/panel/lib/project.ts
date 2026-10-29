@@ -10,6 +10,8 @@ export type ProjectInfo = {
   channel_url: string;
   configured: boolean;            // бот проекта подключён
   payments_configured: boolean;   // свой магазин ЮKassa
+  active?: boolean;               // проект включён (Проекты)
+  ready?: boolean;                // работает: мини-приложение, бот, админы, сквад, оплата
   features: Record<string, unknown>;
 };
 

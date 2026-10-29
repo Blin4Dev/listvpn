@@ -39,8 +39,16 @@ def _crypto():
 def config() -> dict:
     """
     Настройки почты: из панели (БД), иначе — из .env (старые установки).
-    mode: off | smtp (почтовый ящик) | direct (напрямую с сервера, порт 25 + DKIM).
+    mode: off | smtp (почтовый ящик) | direct (напрямую с сервера, порт 25 + DKIM)
+          | agent (с сервера мини-приложения проекта и с его домена — ставится из панели, miniapps.py).
     """
+    route = _agent_route()
+    if route:
+        dom = route["domain"]
+        return {
+            "mode": "agent", "host": "", "port": 25, "user": "", "password": "", "from": f"no-reply@{dom}",
+            "from_name": _brand(), "domain": dom, "source": "miniapp", "server_id": route["server_id"], "ip": route["ip"],
+        }
     try:
         import json
         raw = _db().get_setting(CONFIG_KEY, "")
@@ -68,6 +76,22 @@ def config() -> dict:
         "password": _env("MAIL_SMTP_PASSWORD"), "from": frm or (f"no-reply@{d}" if d else ""),
         "from_name": _env("MAIL_FROM_NAME", "") or _brand(), "domain": d, "source": "env",
     }
+
+
+def _miniapps():
+    try:
+        from . import miniapps  # type: ignore
+    except ImportError:  # pragma: no cover
+        import miniapps  # type: ignore
+    return miniapps
+
+
+def _agent_route() -> Optional[dict]:
+    """у проекта свой сервер мини-приложения → письма уходят с него (no-reply@<домен мини-приложения>)."""
+    try:
+        return _miniapps().mail_route()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def enabled() -> bool:
@@ -308,9 +332,17 @@ def send(to: str, subject: str, *, html: Optional[str] = None, text: Optional[st
         html = f"<pre style='font-family:inherit;white-space:pre-wrap'>{_esc(text)}</pre>"
 
     message = _build_message(to, subject, html or "", text or "")
-    if config()["mode"] == "smtp":
+    cfg = config()
+    if cfg["mode"] == "smtp":
         return _send_via_relay(to, message)
     recipient_domain = to.split("@")[-1]
+    if cfg["mode"] == "agent":
+        # подпись DKIM — здесь (ключ на главном), доставка на MX — с сервера мини-приложения (его IP в SPF)
+        mx_ips = [ip for ip in (_resolve_public_ip(h) for h in _resolve_mx(recipient_domain)) if ip]
+        if not mx_ips:
+            return False, f"{recipient_domain}: нет доступных MX"
+        return _miniapps().deliver(int(cfg["server_id"]), sender=mail_from(), to=to, ehlo=cfg["domain"],
+                                   mx=list(dict.fromkeys(mx_ips)), message=message)
     timeout = float(_env("MAIL_TIMEOUT", "20") or 20)
     sender = mail_from()
     ehlo = _ehlo_name()

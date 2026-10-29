@@ -79,7 +79,7 @@ services:
     depends_on:
       - api
 
-  # мини-приложения ВСЕХ проектов: Caddy на хосте ставит X-Project по домену проекта
+  # мини-приложения ВСЕХ проектов: сборки для их серверов (ставятся из панели) + старые домены на этом сервере
   miniapp:
     build:
       context: .
@@ -97,6 +97,8 @@ services:
     volumes:
       - ./assets:/srv/live/shared/assets:ro
       - ./projects:/srv/live/projects:ro
+      # сборки для серверов мини-приложений: api отдаёт их агентам (/api/agent/bundle/<id>)
+      - ./data/miniapp-dist:/export
 
   panel:
     build:
