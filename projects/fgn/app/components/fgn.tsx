@@ -222,6 +222,12 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M8 21h8M12 17v4" />
     </>
   ),
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M2 12h20M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+    </>
+  ),
   tv: (
     <>
       <rect x="2" y="7" width="20" height="15" rx="2" />

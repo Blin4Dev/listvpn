@@ -433,12 +433,14 @@ function useSubLink(nav: CabNav) {
   return { link, err };
 }
 
-function DevicePicker({ desktop, onClose }: { desktop: Desktop; onClose: () => void }) {
+// «Куда добавить» → приложение → установка → добавить подписку (как SetupSheet мини-аппа)
+export function DevicePicker({ desktop, onClose, note }: { desktop: Desktop; onClose: () => void; note?: React.ReactNode }) {
   const [dev, setDev] = useState<DeviceKind | null>(null);
   const fgnUrl = (d: DeviceKind) => ((d === "windows" ? desktop.windows_url : d === "macos" ? desktop.macos_url : "") || "").trim();
-  if (dev) return <SetupDialog device={dev} fgnUrl={fgnUrl(dev)} authed onLogin={onClose} onClose={onClose} />;
+  if (dev) return <SetupDialog device={dev} fgnUrl={fgnUrl(dev)} authed onLogin={onClose} onClose={onClose} onBack={() => setDev(null)} />;
   return (
     <Modal title="Куда добавить" onClose={onClose}>
+      {note ? <Note kind="ok">{note}</Note> : null}
       <div className="fs-sheet-hint">На каком устройстве будете пользоваться?</div>
       <div className="fs-pick">
         {DEVICES.map((d) => (

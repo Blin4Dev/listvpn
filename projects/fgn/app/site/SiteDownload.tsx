@@ -9,7 +9,7 @@ import { C } from "../components/fgn";
 
 type Desktop = { windows_url?: string; macos_url?: string; version?: string };
 type App = AppKind | "fgn";
-type Step = "pick" | "install" | "add" | "link" | "fgn" | "done";
+type Step = "pick" | "install" | "add" | "link" | "fgn" | "region" | "done";
 
 export const DEVICES: DeviceKind[] = ["ios", "android", "windows", "macos", "linux", "android_tv"];
 export const DEVICE_NOTE: Record<DeviceKind, string> = {
@@ -78,6 +78,21 @@ export const DOWNLOAD_CSS = `
 .fs-steps > div { display: flex; gap: 12px; align-items: flex-start; font-size: 14px; line-height: 20px; color: #9B9BA4; }
 .fs-steps i { width: 24px; height: 24px; border-radius: 12px; background: #1E1E22; color: #F4F4F5; font-style: normal; font-size: 13px; font-weight: 600;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: -2px; }
+.fs-region-btn { margin-top: 14px; width: 100%; padding: 12px 14px; display: flex; align-items: center; gap: 12px; text-align: left; border-radius: 14px;
+  border: 1px dashed #2A2A30; background: transparent; color: #9B9BA4; font: 13.5px/19px ${C.font}; cursor: pointer; transition: border-color .15s, color .15s; }
+.fs-region-btn:hover { border-color: rgba(255,255,255,.22); color: #F4F4F5; }
+.fs-region-btn b { color: #F4F4F5; font-weight: 600; }
+.fs-region-btn > span { flex: 1; min-width: 0; }
+.fs-steps b { color: #F4F4F5; font-weight: 600; }
+.fs-addr { margin: 12px 0 2px 36px; border-radius: 14px; border: 1px solid #2A2A30; background: #070708; overflow: hidden; }
+.fs-addr button { width: 100%; padding: 10px 14px; display: flex; align-items: center; gap: 10px; border: 0; background: transparent; color: #F4F4F5;
+  font: 14px/20px ${C.font}; text-align: left; cursor: pointer; }
+.fs-addr button + button { border-top: 1px solid #1F1F24; }
+.fs-addr button:hover { background: #111113; }
+.fs-addr small { width: 64px; flex-shrink: 0; font-size: 12.5px; color: #6E6E78; }
+.fs-addr span { flex: 1; min-width: 0; }
+.fs-addr em { font-style: normal; display: flex; color: #6E6E78; }
+.fs-addr em.ok { color: ${C.green}; }
 .fs-sheet-err { margin-top: 10px; font-size: 13px; line-height: 18px; color: ${C.danger}; text-align: center; }
 
 @media (max-width: 860px) {
@@ -142,16 +157,71 @@ function AppIc({ app }: { app: App }) {
   return <span className="fs-appic">{m.img ? <img src={m.img} alt="" /> : <IcLink />}</span>;
 }
 
+// смена региона App Store на США — Incy/Happ нет в российском App Store
+export const US_ADDRESS: [string, string][] = [
+  ["Улица", "1 Apple Park Way"],
+  ["Город", "Cupertino"],
+  ["Штат", "California"],
+  ["Индекс", "95014"],
+  ["Телефон", "408 996 1010"],
+];
+const IcCheck = () => <Svg size={16} stroke={2.2}><path d="M5 12.5l4.5 4.5L19 7.5" /></Svg>;
+const IcGlobe = () => <Svg size={20} stroke={1.7}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z" /></Svg>;
+
+export function RegionSteps() {
+  const [copied, setCopied] = useState("");
+  const copy = async (v: string) => {
+    if (await copyText(v)) {
+      setCopied(v);
+      window.setTimeout(() => setCopied((c) => (c === v ? "" : c)), 1400);
+    }
+  };
+  const steps: React.ReactNode[] = [
+    <>Настройки → нажмите на <b>своё имя</b> вверху</>,
+    <><b>Информация об аккаунте</b>, платежи и настройки</>,
+    <><b>Страна или регион</b> → Изменить страну или регион</>,
+    <>Выберите <b>Соединённые Штаты</b> → примите условия</>,
+    <>Способ оплаты — <b>«Нет»</b></>,
+    <>Адрес — любой из США, например (нажмите, чтобы скопировать):</>,
+    <>Нажмите <b>«Далее»</b> — готово!</>,
+  ];
+  return (
+    <>
+      <div className="fs-sheet-hint">Если приложения нет в App Store — смените регион Apple ID на США. Подписки и покупки останутся.</div>
+      <div className="fs-steps">
+        {steps.map((t, i) => (
+          <React.Fragment key={i}>
+            <div><i>{i + 1}</i><span>{t}</span></div>
+            {i === 5 ? (
+              <div className="fs-addr" style={{ display: "block", marginTop: -2 }}>
+                {US_ADDRESS.map(([k, v]) => (
+                  <button key={k} type="button" onClick={() => void copy(v)}>
+                    <small>{k}</small>
+                    <span>{v}</span>
+                    <em className={copied === v ? "ok" : undefined}>{copied === v ? <IcCheck /> : <IcCopy />}</em>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </React.Fragment>
+        ))}
+      </div>
+    </>
+  );
+}
+
 const appTitle = (a: App) => (a === "fgn" ? "FGN" : APP_META[a].title);
 
 export function SetupDialog({
-  device, fgnUrl, authed, onLogin, onClose,
+  device, fgnUrl, authed, onLogin, onClose, onBack,
 }: {
   device: DeviceKind;
   fgnUrl: string;
   authed: boolean | null;
   onLogin: () => void;
   onClose: () => void;
+  // назад к выбору устройства («Куда добавить»), как в мини-аппе
+  onBack?: () => void;
 }) {
   const isTv = device === "android_tv";
   const [step, setStep] = useState<Step>(isTv ? "install" : "pick");
@@ -232,16 +302,19 @@ export function SetupDialog({
     }
   };
 
-  const canBack = !isTv ? step !== "pick" && step !== "done" : false;
+  const atStart = isTv ? step === "install" : step === "pick";
+  const canBack = step !== "done" && (!atStart || !!onBack);
   const goBack = () => {
     setErr("");
-    if (step === "add") setStep("install");
+    if (atStart) onBack?.();
+    else if (step === "add" || step === "region") setStep("install");
     else setStep("pick");
   };
 
   const title = step === "pick" ? DEVICE_TITLE[device]
     : step === "link" ? "Ссылка на подписку"
     : step === "done" ? "Подписка добавлена"
+    : step === "region" ? "Регион App Store"
     : appTitle(app || "happ");
 
   const loginNote = (
@@ -315,6 +388,13 @@ export function SetupDialog({
             <div className="fs-sheet-hint">Скачайте и установите {APP_META[app].title} на {DEVICE_TITLE[device]}.</div>
             <button type="button" className="fs-dlp-btn white" onClick={download}><IcDownload /> Скачать {APP_META[app].title}</button>
             <button type="button" className="fs-dlp-btn" onClick={() => { setErr(""); setStep("add"); }}>Уже установлено — далее</button>
+            {device === "ios" ? (
+              <button type="button" className="fs-region-btn" onClick={() => setStep("region")}>
+                <IcGlobe />
+                <span><b>Нет в App Store?</b> Как сменить регион на США</span>
+                <IcChevron />
+              </button>
+            ) : null}
           </>
         )}
 
@@ -335,6 +415,13 @@ export function SetupDialog({
               {err ? <div className="fs-sheet-err">{err}</div> : null}
             </>
           ) : loginNote
+        )}
+
+        {step === "region" && (
+          <>
+            <RegionSteps />
+            <button type="button" className="fs-dlp-btn white" onClick={() => setStep("install")}>Регион сменил — к установке</button>
+          </>
         )}
 
         {step === "link" && (

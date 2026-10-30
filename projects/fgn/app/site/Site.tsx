@@ -18,7 +18,8 @@ import SiteCabinet, { CABINET_CSS } from "./SiteCabinet";
 import SiteGifts, { GIFTS_CSS } from "./SiteGifts";
 import SiteReferral, { REFERRAL_CSS } from "./SiteReferral";
 import SiteCheckout, { CHECKOUT_CSS } from "./SiteCheckout";
-import { CAB_CSS, Loader, type CabNav } from "./siteKit";
+import { CAB_CSS, Loader, daysWord, type CabNav } from "./siteKit";
+import TrialButton, { TRIAL_CSS } from "./SiteTrial";
 import type { CaptchaPublic } from "../components/CaptchaBox";
 
 const LINKS = {
@@ -100,6 +101,7 @@ function useSiteConfig() {
   const [bot, setBot] = useState("");
   const [botId, setBotId] = useState("");
   const [captcha, setCaptcha] = useState<CaptchaPublic | null>(null);
+  const [trialDays, setTrialDays] = useState(0);
   useEffect(() => {
     void (async () => {
       try {
@@ -109,27 +111,20 @@ function useSiteConfig() {
           telegramOauthBotId?: string;
           captcha?: CaptchaPublic;
           desktop?: Desktop;
+          trialDays?: number;
         } | null;
         if (!res.ok || !body) return;
         if (body.telegramOauthBotId) setBotId(String(body.telegramOauthBotId));
         if (body.captcha && typeof body.captcha === "object") setCaptcha(body.captcha);
         if (body.desktop && typeof body.desktop === "object") setDesktop(body.desktop);
+        if (typeof body.trialDays === "number") setTrialDays(body.trialDays);
         if (typeof body.botUsername === "string") setBot(body.botUsername.trim().replace(/^@/, ""));
       } catch {
         /* без конфига — кнопки ведут в бота / никуда */
       }
     })();
   }, []);
-  return { desktop, bot, botId, captcha };
-}
-
-function detectMac(): boolean {
-  try {
-    const ua = navigator.userAgent || "";
-    return /Macintosh|Mac OS X/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua);
-  } catch {
-    return false;
-  }
+  return { desktop, bot, botId, captcha, trialDays };
 }
 
 // ── иконки (24×24, контур) ──
@@ -384,12 +379,11 @@ const STEPS = [
 ];
 
 export default function Site() {
-  const { desktop, bot, botId, captcha } = useSiteConfig();
+  const { desktop, bot, botId, captcha, trialDays } = useSiteConfig();
   const { path, go } = usePath();
   const { authed, expired, signedIn } = useAuth();
   const [banner, setBanner] = useState(true);
   const [menu, setMenu] = useState(false);
-  const mac = detectMac();
   const page = path === "/support" ? "support" : path === "/login" ? "login" : path === "/tariffs" ? "tariffs"
     : path === "/download" ? "download" : path === "/rules" ? "rules"
       : path === "/cabinet/referral" ? "referral"
@@ -453,25 +447,6 @@ export default function Site() {
   };
   const account = authed ? { href: LINKS.cabinet, label: "Кабинет" } : { href: loginHref, label: "Войти" };
 
-  const fallback = bot ? `https://t.me/${bot}` : "#";
-  const winUrl = (desktop.windows_url || "").trim() || fallback;
-  const macUrl = (desktop.macos_url || "").trim() || fallback;
-  const version = (desktop.version || "").trim() || "1.0";
-  const ext = (u: string) => (/^https?:/i.test(u) ? { target: "_blank", rel: "noopener noreferrer" } : {});
-
-  const win = (
-    <a key="win" href={winUrl} {...ext(winUrl)} className={mac ? "secondary" : "primary"}>
-      {!mac ? <Icon name="download" size={16} /> : null}
-      Скачать для Windows
-    </a>
-  );
-  const macBtn = (
-    <a key="mac" href={macUrl} {...ext(macUrl)} className={mac ? "primary" : "secondary"}>
-      {mac ? <Icon name="download" size={16} /> : null}
-      Скачать для macOS
-    </a>
-  );
-
   const nav = [
     { href: LINKS.tariffs, label: "Тарифы" },
     { href: LINKS.rules, label: "Правила использования" },
@@ -481,7 +456,7 @@ export default function Site() {
 
   return (
     <div className="fs">
-      <style>{CSS + SUPPORT_CSS + LOGIN_CSS + TARIFFS_CSS + DOWNLOAD_CSS + RULES_CSS + CAB_CSS + CABINET_CSS + GIFTS_CSS + REFERRAL_CSS + CHECKOUT_CSS}</style>
+      <style>{CSS + SUPPORT_CSS + LOGIN_CSS + TARIFFS_CSS + DOWNLOAD_CSS + RULES_CSS + CAB_CSS + CABINET_CSS + GIFTS_CSS + REFERRAL_CSS + CHECKOUT_CSS + TRIAL_CSS}</style>
 
       {DOTS.map((d, i) => (
         <div
@@ -585,10 +560,12 @@ export default function Site() {
             <p className="fs-lead">
               Подключайтесь за один клик, выбирайте из десятков серверов по всему миру и оставайтесь под защитой всегда.
             </p>
-            <div className="fs-dl">{mac ? [macBtn, win] : [win, macBtn]}</div>
+            <div className="fs-dl">
+              <TrialButton authed={authed} nav={cabNav} desktop={desktop} trialDays={trialDays} bot={bot} />
+            </div>
             <div className="fs-meta">
               <Icon name="checkbox" size={14} stroke={1.6} />
-              Версия {version} · Windows 10/11 (64-bit) · macOS 13+
+              {trialDays > 0 ? `${trialDays} ${daysWord(trialDays)} бесплатно · ` : ""}iPhone, Android, Windows, macOS, Linux и TV
             </div>
             <div className="fs-note">VPN и обход белых списков входят в одну подписку.</div>
           </div>
