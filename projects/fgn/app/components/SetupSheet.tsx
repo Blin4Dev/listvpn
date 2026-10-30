@@ -182,7 +182,7 @@ function RegionSteps() {
   );
 }
 
-export default function SetupSheet({ onClose }: { onClose: () => void }) {
+export default function SetupSheet({ onClose, note }: { onClose: () => void; note?: React.ReactNode }) {
   const [step, setStep] = useState<Step>("device");
   const [app, setApp] = useState<AppKind | null>(null);
   const [busy, setBusy] = useState(false);
@@ -323,6 +323,16 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
 
         {step === "device" && (
           <>
+            {note ? (
+              <div
+                style={{
+                  marginTop: 15, padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(52,214,124,.35)",
+                  background: "rgba(52,214,124,.08)", color: TEXT, fontSize: 14, lineHeight: "20px",
+                }}
+              >
+                {note}
+              </div>
+            ) : null}
             <div style={{ ...hint, marginTop: 15 }}>На каком устройстве будете пользоваться?</div>
             <div style={{ marginTop: 16.5, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", columnGap: 9, rowGap: 8 }}>
               {DEVICES.map((d) => (

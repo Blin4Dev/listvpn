@@ -3,7 +3,7 @@
 // сетка с частицами, белый щит, статус, белая кнопка, реферальная карточка, «Подарки», «Настройки» / «Поддержка».
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { activateTrial, fetchConfig, fetchMe, fetchSupport } from "../utils/api";
+import { SUBSCRIPTION_CHANGED_EVENT, activateTrial, fetchConfig, fetchMe, fetchSupport } from "../utils/api";
 import { loadReferral, peekReferral, type ReferralData } from "../utils/referral";
 import { formatDateRu } from "../utils/date";
 import { hasEntered, homeIntroPending, markHomeIntroPlayed, signalHomeIntroReady, subscribeEntered } from "../utils/homeIntro";
@@ -488,7 +488,7 @@ export default function HomePage() {
   };
 
   useEffect(() => {
-    void (async () => {
+    const load = async () => {
       let trial = homeCache?.trialEnabled ?? true;
       try {
         try {
@@ -510,7 +510,12 @@ export default function HomePage() {
       } finally {
         setDataReady(true);
       }
-    })();
+    };
+    void load();
+    // подписка выдана из окна (перенос из старого VPN) — перечитать
+    const onChanged = () => { void load(); };
+    window.addEventListener(SUBSCRIPTION_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(SUBSCRIPTION_CHANGED_EVENT, onChanged);
   }, []);
 
   const subtitle =

@@ -779,6 +779,36 @@ export async function claimDayGift(id: number): Promise<{ days: number; expires_
   return appFetch(`/day-gifts/${id}/claim`, { method: "POST" });
 }
 
+// перенос из старого VPN (ресейл): «<name> теперь <target>», кнопка «Заменить ключ»
+export type MigrationPending = { name: string; target: string; days: number };
+export type MigrationClaim = {
+  success: boolean;
+  already?: boolean;
+  name: string;
+  target: string;
+  days: number;
+  expires_at?: string | null;
+};
+
+export async function fetchMigration(): Promise<MigrationPending | null> {
+  try {
+    const r = await appFetch<{ pending: MigrationPending | null }>("/migration");
+    return r?.pending && r.pending.name ? r.pending : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function claimMigration(): Promise<MigrationClaim> {
+  return appFetch<MigrationClaim>("/migration/claim", { method: "POST" });
+}
+
+// подписка изменилась не на экране оплаты (перенос, подарок) — главная перечитывает /me
+export const SUBSCRIPTION_CHANGED_EVENT = "blin:subscription-changed";
+export function notifySubscriptionChanged(): void {
+  try { window.dispatchEvent(new Event(SUBSCRIPTION_CHANGED_EVENT)); } catch { /* ignore */ }
+}
+
 export type PromoRedeem = {
   type?: "discount" | "gift" | "days";
   value?: number;

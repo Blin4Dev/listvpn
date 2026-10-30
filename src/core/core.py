@@ -102,6 +102,11 @@ except ImportError:  # pragma: no cover
     import family  # type: ignore
 
 try:
+    from . import resale  # type: ignore
+except ImportError:  # pragma: no cover
+    import resale  # type: ignore
+
+try:
     from . import support  # type: ignore
     from . import s3store  # type: ignore
     from . import captcha as captcha_mod  # type: ignore
@@ -6024,6 +6029,73 @@ def panel_gifts_revoke(body: AdminGiftRevokeBody, _: dict = Depends(require_owne
     return {"revoked": reflevels.revoke_admin_gifts(body.ids)}
 
 
+# ── Ресейл: клиенты ресейлеров в Remnawave (dnet_, atom_ …) и перенос в FGN (core/resale.py) ──
+
+class ResaleMigrateBody(BaseModel):
+    prefix: str = Field(..., min_length=2, max_length=40)
+    name: str = Field(..., min_length=1, max_length=80)
+    confirm: str = Field(..., max_length=40)  # повтор префикса — последнее подтверждение
+
+
+class ResaleCancelBody(BaseModel):
+    confirm: str = Field(..., max_length=40)
+
+
+def _resale_http(exc: "resale.ResaleError") -> HTTPException:
+    return HTTPException(exc.status, detail={"message": exc.message})
+
+
+@app.get("/api/panel/resale")
+def panel_resale(p: dict = Depends(require_owner)) -> dict[str, Any]:
+    """группы ресейлеров из последнего чтения Remnawave, идущая задача и переносы."""
+    return resale.overview()
+
+
+@app.post("/api/panel/resale/scan")
+def panel_resale_scan(p: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        resale.start_scan()
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    return {"success": True, "job": resale.job_state()}
+
+
+@app.post("/api/panel/resale/migrate")
+def panel_resale_migrate(body: ResaleMigrateBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        prefix = resale.normalize_prefix(body.prefix)
+        if (body.confirm or "").strip() not in (prefix, prefix[:-1]):
+            raise resale.ResaleError(f"Для подтверждения введите {prefix}")
+        mid = resale.start_migration(prefix, body.name, p.get("username") or p.get("actor") or "owner")
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    audit(p.get("actor") or "owner", p.get("name"), f"resale_migrate {prefix} #{mid}", 200, _client_ip(request))
+    return {"success": True, "migration_id": mid, "job": resale.job_state()}
+
+
+@app.get("/api/panel/resale/migrations/{mid}/users")
+def panel_resale_migration_users(mid: int, status: str = Query("", max_length=16), q: str = Query("", max_length=64),
+                                 limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                                 p: dict = Depends(require_owner)) -> dict[str, Any]:
+    return resale.migration_users(mid, status, q, limit, offset)
+
+
+@app.post("/api/panel/resale/migrations/{mid}/cancel")
+def panel_resale_cancel(mid: int, body: ResaleCancelBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    resale.ensure_schema()
+    m = db.fetchone("SELECT prefix FROM resale_migrations WHERE id = ?", (int(mid),))
+    if not m:
+        raise HTTPException(404, detail={"message": "Перенос не найден"})
+    if (body.confirm or "").strip() not in (m["prefix"], m["prefix"][:-1]):
+        raise HTTPException(400, detail={"message": f"Для подтверждения введите {m['prefix']}"})
+    try:
+        r = resale.cancel_migration(mid, p.get("username") or "owner")
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    audit(p.get("actor") or "owner", p.get("name"), f"resale_cancel #{mid}", 200, _client_ip(request))
+    return {"success": True, **r}
+
+
 @app.get("/api/panel/remnawave/squads")
 def panel_remnawave_squads(_: dict = Depends(require_owner)) -> list[dict[str, Any]]:
     rows = db.fetchall("SELECT squad_uuid, squad_name FROM squads WHERE is_active = 1")
@@ -8167,6 +8239,36 @@ def app_day_gift_claim(gift_id: int, user: dict = Depends(_app_user_from_init)) 
         raise HTTPException(502, detail={"message": "Не удалось начислить дни, попробуйте позже"})
     return {"success": True, "days": int(g["days"]), "expires_at": until,
             "message": f"Готово! +{_days_ru(g['days'])} к подписке"}
+
+
+@app.get("/api/app/migration")
+def app_migration(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """перенос из старого VPN (ресейл): окно «<старый VPN> теперь FGN» при входе."""
+    fresh = get_user(int(user["id"])) or user
+    if subscription_status_for_user(fresh) in ("blocked", "banned"):
+        return {"pending": None}
+    try:
+        return {"pending": resale.pending_for(fresh)}
+    except Exception as exc:  # noqa: BLE001 — окно не должно ломать вход
+        print(f"[resale] pending user {fresh.get('id')}: {type(exc).__name__}: {exc}", flush=True)
+        return {"pending": None}
+
+
+@app.post("/api/app/migration/claim")
+def app_migration_claim(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """«Заменить ключ»: выдать перенесённый срок (≤ 30 дней) к подписке."""
+    allowed, retry = ratelimit.rate_limit(f"resale-claim:{user['id']}", 10, 60)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
+    fresh = get_user(int(user["id"])) or user
+    if subscription_status_for_user(fresh) in ("blocked", "banned"):
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    try:
+        return resale.claim(fresh)
+    except resale.ResaleError as exc:
+        if exc.status >= 500:
+            forum.report_error("Перенос из старого VPN: не удалось выдать подписку", f"user {fresh.get('id')}: {exc.message}")
+        raise _resale_http(exc)
 
 
 @app.get("/api/app/discount")

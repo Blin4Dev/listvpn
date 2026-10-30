@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Home, Ticket, DollarSign, Users, Mail, Gift, Percent, Link, Settings, Menu, X, Wallet, Lock, BarChart2, Server, MessageCircle,
-  Eye, UserCog, Coins, Bell, BellOff, ChevronDown, Layers,
+  Eye, UserCog, Coins, Bell, BellOff, ChevronDown, Layers, ArrowRightLeft,
 } from 'lucide-react';
 import { UserActionModal } from './components/UserActionModal';
 import { Spinner, ToastContainer } from './components/ui';
@@ -16,6 +16,7 @@ import { LoginForm } from './pages/Login';
 import { MailingPage } from './pages/Mailing';
 import { PromocodesPage } from './pages/Promocodes';
 import { GiftsPage } from './pages/Gifts';
+import { ResalePage } from './pages/Resale';
 import { PromotionsPage } from './pages/Promotions';
 import { StaffPage } from './pages/staff/StaffPage';
 import { SalaryPage } from './pages/staff/SalaryPage';
@@ -89,7 +90,7 @@ function SetupScreen() {
 
 export const NAV = [
   { group: 'Главное', items: [{ name: 'Главная', icon: Home }, { name: 'Статистика', icon: BarChart2 }, { name: 'Финансы', icon: DollarSign }] },
-  { group: 'Пользователи', items: [{ name: 'Пользователи', icon: Users }, { name: 'Выводы', icon: Wallet }] },
+  { group: 'Пользователи', items: [{ name: 'Пользователи', icon: Users }, { name: 'Выводы', icon: Wallet }, { name: 'Ресейл', icon: ArrowRightLeft }] },
   { group: 'Поддержка', items: [{ name: 'Поддержка', icon: MessageCircle }, { name: 'Сотрудники', icon: UserCog }, { name: 'Зарплата', icon: Coins }] },
   { group: 'Маркетинг', items: [{ name: 'Рассылка', icon: Mail }, { name: 'Промокоды', icon: Ticket }, { name: 'Подарки', icon: Gift }, { name: 'Акции', icon: Percent }, { name: 'Ссылки', icon: Link }] },
   { group: 'Другое', items: [{ name: 'Мониторинг', icon: Server }, { name: 'Настройки', icon: Settings }] },
@@ -98,7 +99,7 @@ export const NAV = [
 // пути страниц (f5, назад, прямые ссылки)
 const PAGE_PATHS: Record<string, string> = {
   'Главная': '/', 'Статистика': '/statistics', 'Финансы': '/finance',
-  'Пользователи': '/users', 'Поддержка': '/support', 'Выводы': '/withdrawals',
+  'Пользователи': '/users', 'Поддержка': '/support', 'Выводы': '/withdrawals', 'Ресейл': '/resale',
   'Рассылка': '/mailing', 'Промокоды': '/promocodes', 'Подарки': '/gifts', 'Акции': '/promotions', 'Ссылки': '/links',
   'Мониторинг': '/monitoring', 'Настройки': '/settings', 'Сотрудники': '/staff', 'Зарплата': '/salary',
 };
@@ -344,6 +345,7 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
               {activePage === 'Рассылка' && <MailingPage onToast={addToast} />}
               {activePage === 'Промокоды' && <PromocodesPage onToast={addToast} />}
               {activePage === 'Подарки' && <GiftsPage onToast={addToast} onOpenUser={(id) => setDetailUserId(id)} />}
+              {activePage === 'Ресейл' && <ResalePage onToast={addToast} onOpenUser={(id) => setDetailUserId(id)} />}
               {activePage === 'Акции' && <PromotionsPage onToast={addToast} />}
               {activePage === 'Ссылки' && <TrackingLinksPage onToast={addToast} />}
               {activePage === 'Мониторинг' && <MonitoringPage onToast={addToast} nodeId={monNodeId} setNodeId={setMonNodeId} />}

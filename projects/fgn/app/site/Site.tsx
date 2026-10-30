@@ -20,6 +20,7 @@ import SiteReferral, { REFERRAL_CSS } from "./SiteReferral";
 import SiteCheckout, { CHECKOUT_CSS } from "./SiteCheckout";
 import { CAB_CSS, Loader, daysWord, type CabNav } from "./siteKit";
 import TrialButton, { TRIAL_CSS } from "./SiteTrial";
+import SiteMigration, { MIGRATION_CSS } from "./SiteMigration";
 import type { CaptchaPublic } from "../components/CaptchaBox";
 
 const LINKS = {
@@ -456,7 +457,10 @@ export default function Site() {
 
   return (
     <div className="fs">
-      <style>{CSS + SUPPORT_CSS + LOGIN_CSS + TARIFFS_CSS + DOWNLOAD_CSS + RULES_CSS + CAB_CSS + CABINET_CSS + GIFTS_CSS + REFERRAL_CSS + CHECKOUT_CSS + TRIAL_CSS}</style>
+      <style>{CSS + SUPPORT_CSS + LOGIN_CSS + TARIFFS_CSS + DOWNLOAD_CSS + RULES_CSS + CAB_CSS + CABINET_CSS + GIFTS_CSS + REFERRAL_CSS + CHECKOUT_CSS + TRIAL_CSS + MIGRATION_CSS}</style>
+
+      {/* пришёл из проекта, переданного под управление FGN — окно «… теперь FGN» */}
+      {authed === true && page !== "login" ? <SiteMigration nav={cabNav} desktop={desktop} /> : null}
 
       {DOTS.map((d, i) => (
         <div

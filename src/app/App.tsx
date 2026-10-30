@@ -28,6 +28,7 @@ import { homeIntroPending, subscribeHomeIntroReady } from "./utils/homeIntro";
 import { trackRoute } from "./utils/navigation";
 import DayGiftPrompt from "./components/DayGiftSheet";
 import PaymentResume from "./components/PaymentResume";
+import MigrationPrompt from "./components/MigrationPrompt";
 
 // подсказка настройки: раз за сессию
 const SETUP_PROMPT_DISMISSED_KEY = "blinvpn_setup_prompt_dismissed";
@@ -130,6 +131,8 @@ function AnimatedLayout() {
       )}
       {introReady && !blocked && <PaymentResume />}
       {introReady && !blocked && <DayGiftPrompt />}
+      {/* перенос из старого VPN (ресейл): поверх остальных окон */}
+      {introReady && !blocked && <MigrationPrompt />}
     </div>
   );
 }
