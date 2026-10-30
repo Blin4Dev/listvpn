@@ -1,31 +1,112 @@
 // FGN: сайт в браузере (features.site) — вместо мини-приложения вне Telegram.
 // В Telegram открывается мини-апп, в обычном браузере main.tsx рисует эту страницу.
 // Ссылки на установщики и версия — из /api/app/config → desktop (панель: Настройки → Проект → «Сайт»).
-// Вход, тарифы, правила и поддержка — пока заглушки (LINKS ниже), подключим позже.
-import React, { useEffect, useState } from "react";
+// Страницы — по пути (history API, nginx/caddy отдают index.html): «/» — главная, «/support» — поддержка.
+// «/login» — вход, «/tariffs» — тарифы, «/download» — установка на любое устройство. «/rules» — правила. Кабинет — пока заглушка (LINKS ниже).
+import React, { useCallback, useEffect, useState } from "react";
 import { PROJECT_ID } from "../utils/brand";
+import { ApiError, appFetch, clearAppToken, getAppToken } from "../utils/api";
 import { C, Leaf, SHIELD_PATH } from "../components/fgn";
+import SiteSupport, { SUPPORT_CSS } from "./SiteSupport";
+import SiteLogin, { LOGIN_CSS } from "./SiteLogin";
+import SiteTariffs, { TARIFFS_CSS } from "./SiteTariffs";
+import SiteRules, { RULES_CSS } from "./SiteRules";
+import SiteDownload, { DOWNLOAD_CSS } from "./SiteDownload";
+import type { CaptchaPublic } from "../components/CaptchaBox";
 
-// TODO: страницы входа / тарифов / правил / поддержки — позже
+// TODO: страницы кабинета / правил — позже
 const LINKS = {
-  login: "#",
-  tariffs: "#pricing",
-  rules: "#",
-  support: "#",
+  login: "/login",
+  cabinet: "#",
+  tariffs: "/tariffs",
+  rules: "/rules",
+  support: "/support",
+  download: "/download",
   email: "support@fgn.app",
 };
+
+// ── маршрут сайта: путь + переход без перезагрузки ──
+function usePath() {
+  const [path, setPath] = useState(() => window.location.pathname.replace(/\/+$/, "") || "/");
+  useEffect(() => {
+    const on = () => setPath(window.location.pathname.replace(/\/+$/, "") || "/");
+    window.addEventListener("popstate", on);
+    return () => window.removeEventListener("popstate", on);
+  }, []);
+  const go = useCallback((href: string) => {
+    const u = new URL(href, window.location.origin);
+    const next = u.pathname.replace(/\/+$/, "") || "/";
+    if (u.pathname + u.hash !== window.location.pathname + window.location.hash) {
+      window.history.pushState(null, "", u.pathname + u.search + u.hash);
+    }
+    setPath(next);
+    // якорь — после отрисовки страницы
+    window.setTimeout(() => {
+      const el = u.hash ? document.getElementById(u.hash.slice(1)) : null;
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      else window.scrollTo(0, 0);
+    }, 0);
+  }, []);
+  return { path, go };
+}
+
+// куда вернуть после входа: ?next=/путь (только свой сайт)
+function loginNext(): string {
+  try {
+    const n = new URLSearchParams(window.location.search).get("next") || "/";
+    return /^\/(?!\/)/.test(n) && !n.startsWith("/login") ? n : "/";
+  } catch {
+    return "/";
+  }
+}
+
+// вход на сайте: сессия X-App-Session (localStorage), проверка через /me
+function useAuth() {
+  const [authed, setAuthed] = useState<boolean | null>(() => (getAppToken() ? null : false));
+  useEffect(() => {
+    if (!getAppToken()) return;
+    let alive = true;
+    appFetch("/me")
+      .then(() => alive && setAuthed(true))
+      .catch((e) => {
+        if (!alive) return;
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+          clearAppToken();
+          setAuthed(false);
+        } else setAuthed(true); // сеть моргнула — не выкидываем
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const expired = useCallback(() => {
+    clearAppToken();
+    setAuthed(false);
+  }, []);
+  const signedIn = useCallback(() => setAuthed(true), []);
+  return { authed, expired, signedIn };
+}
 
 type Desktop = { windows_url?: string; macos_url?: string; version?: string };
 
 function useSiteConfig() {
   const [desktop, setDesktop] = useState<Desktop>({});
   const [bot, setBot] = useState("");
+  const [botId, setBotId] = useState("");
+  const [captcha, setCaptcha] = useState<CaptchaPublic | null>(null);
   useEffect(() => {
     void (async () => {
       try {
         const res = await fetch("/api/app/config", { headers: { "X-Project": PROJECT_ID } });
-        const body = (await res.json().catch(() => null)) as { botUsername?: string; desktop?: Desktop } | null;
+        const body = (await res.json().catch(() => null)) as {
+          botUsername?: string;
+          telegramOauthBotId?: string;
+          captcha?: CaptchaPublic;
+          desktop?: Desktop;
+        } | null;
         if (!res.ok || !body) return;
+        if (body.telegramOauthBotId) setBotId(String(body.telegramOauthBotId));
+        if (body.captcha && typeof body.captcha === "object") setCaptcha(body.captcha);
         if (body.desktop && typeof body.desktop === "object") setDesktop(body.desktop);
         if (typeof body.botUsername === "string") setBot(body.botUsername.trim().replace(/^@/, ""));
       } catch {
@@ -33,7 +114,7 @@ function useSiteConfig() {
       }
     })();
   }, []);
-  return { desktop, bot };
+  return { desktop, bot, botId, captcha };
 }
 
 function detectMac(): boolean {
@@ -143,6 +224,8 @@ const CSS = `
 .fs-logo i { width: 6px; height: 6px; border-radius: 50%; background: ${C.green}; box-shadow: 0 0 8px rgba(52,214,124,.8); }
 .fs-nav { flex: 1; display: flex; justify-content: center; gap: 33px; font-size: 13px; color: rgba(200,200,206,.82); }
 .fs-nav a:hover { color: #fff; }
+.fs-nav a.on { color: #fff; position: relative; }
+.fs-nav a.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -8px; height: 1.5px; border-radius: 1px; background: #fff; }
 .fs-actions { display: flex; gap: 13px; }
 .fs-btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; height: 39px; padding: 0 18px;
   border-radius: 10px; font: 600 13px ${C.font}; cursor: pointer; border: 1px solid transparent; transition: filter .15s, background .15s; white-space: nowrap; }
@@ -248,9 +331,9 @@ const CSS = `
 }
 `;
 
-function Logo({ dot = true }: { dot?: boolean }) {
+function Logo({ dot = true, onClick }: { dot?: boolean; onClick?: (e: React.MouseEvent) => void }) {
   return (
-    <a href="#" className="fs-logo" aria-label="FGN">
+    <a href="/" onClick={onClick} className="fs-logo" aria-label="FGN">
       FGN{dot ? <i /> : null}
     </a>
   );
@@ -295,14 +378,55 @@ const STEPS = [
 ];
 
 export default function Site() {
-  const { desktop, bot } = useSiteConfig();
+  const { desktop, bot, botId, captcha } = useSiteConfig();
+  const { path, go } = usePath();
+  const { authed, expired, signedIn } = useAuth();
   const [banner, setBanner] = useState(true);
   const [menu, setMenu] = useState(false);
   const mac = detectMac();
+  const page = path === "/support" ? "support" : path === "/login" ? "login" : path === "/tariffs" ? "tariffs"
+    : path === "/download" ? "download" : path === "/rules" ? "rules" : "home";
 
   useEffect(() => {
-    document.title = "FGN — быстрый и надёжный VPN";
+    document.title =
+      page === "support" ? "Поддержка — FGN" : page === "login" ? "Вход — FGN" : page === "tariffs" ? "Тарифы — FGN" : page === "download" ? "Скачать — FGN" : page === "rules" ? "Правила использования — FGN"
+        : "FGN — быстрый и надёжный VPN";
+  }, [page]);
+
+  // вошёл, а открыт /login — уходим туда, откуда пришли
+  useEffect(() => {
+    if (page === "login" && authed) go(loginNext());
+  }, [page, authed, go]);
+
+  // первый заход по /#download и т.п.
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (id) window.setTimeout(() => document.getElementById(id)?.scrollIntoView({ block: "start" }), 50);
   }, []);
+
+  // внутренние ссылки (/…) — без перезагрузки; «#» (заглушки) — никуда
+  const link = (href: string) => ({
+    href,
+    onClick: (e: React.MouseEvent) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      if (href === "#") {
+        e.preventDefault();
+        return;
+      }
+      if (href.startsWith("/")) {
+        e.preventDefault();
+        setMenu(false);
+        go(href);
+      }
+    },
+  });
+  const back = () => {
+    if (window.history.length > 1 && document.referrer.startsWith(window.location.origin)) window.history.back();
+    else go("/");
+  };
+  // «Войти» запоминает, куда вернуть после входа (/login?next=/support)
+  const loginHref = page === "home" || page === "login" ? LINKS.login : `${LINKS.login}?next=${encodeURIComponent(path)}`;
+  const account = authed ? { href: LINKS.cabinet, label: "Кабинет" } : { href: loginHref, label: "Войти" };
 
   const fallback = bot ? `https://t.me/${bot}` : "#";
   const winUrl = (desktop.windows_url || "").trim() || fallback;
@@ -326,13 +450,13 @@ export default function Site() {
   const nav = [
     { href: LINKS.tariffs, label: "Тарифы" },
     { href: LINKS.rules, label: "Правила использования" },
-    { href: "#download", label: "Скачать" },
+    { href: LINKS.download, label: "Скачать" },
     { href: LINKS.support, label: "Поддержка" },
   ];
 
   return (
     <div className="fs">
-      <style>{CSS}</style>
+      <style>{CSS + SUPPORT_CSS + LOGIN_CSS + TARIFFS_CSS + DOWNLOAD_CSS + RULES_CSS}</style>
 
       {DOTS.map((d, i) => (
         <div
@@ -350,10 +474,10 @@ export default function Site() {
         </div>
       ))}
 
-      {banner ? (
+      {banner && authed === false && page !== "login" ? (
         <div className="fs-banner">
           <span>Войдите через почту или Telegram</span>
-          <a href={LINKS.login}>Войти</a>
+          <a {...link(loginHref)}>Войти</a>
           <button type="button" aria-label="Закрыть" onClick={() => setBanner(false)}>
             <Icon name="close" size={16} stroke={2} />
           </button>
@@ -362,20 +486,20 @@ export default function Site() {
 
       <header className="fs-head">
         <div className="fs-wrap">
-          <Logo />
+          <Logo onClick={link("/").onClick} />
           <nav className="fs-nav">
             {nav.map((n) => (
-              <a key={n.label} href={n.href}>
+              <a key={n.label} {...link(n.href)} className={n.href === path ? "on" : undefined}>
                 {n.label}
               </a>
             ))}
           </nav>
           <div className="fs-actions">
-            <a className="fs-btn dark" href="#download">
+            <a className="fs-btn dark" {...link(LINKS.download)}>
               Скачать
             </a>
-            <a className="fs-btn white" href={LINKS.login}>
-              Войти
+            <a className="fs-btn white" {...link(account.href)}>
+              {account.label}
             </a>
           </div>
           <button type="button" className="fs-burger" aria-label="Меню" aria-expanded={menu} onClick={() => setMenu((v) => !v)}>
@@ -388,17 +512,36 @@ export default function Site() {
         <div className="fs-menu">
           <div className="fs-wrap">
             {nav.map((n) => (
-              <a key={n.label} className="item" href={n.href} onClick={() => setMenu(false)}>
+              <a key={n.label} className="item" {...link(n.href)}>
                 {n.label}
               </a>
             ))}
-            <a className="fs-btn white" href={LINKS.login}>
-              Войти
+            <a className="fs-btn white" {...link(account.href)}>
+              {account.label}
             </a>
           </div>
         </div>
       ) : null}
 
+      {page === "login" ? (
+        <SiteLogin botId={botId} captcha={captcha} onAuthed={signedIn} />
+      ) : page === "download" ? (
+        <SiteDownload desktop={desktop} authed={authed} email={LINKS.email} onLogin={() => go(loginHref)} />
+      ) : page === "rules" ? (
+        <SiteRules email={LINKS.email} />
+      ) : page === "tariffs" ? (
+        <SiteTariffs authed={authed} />
+      ) : page === "support" ? (
+        <SiteSupport
+          bot={bot}
+          authed={authed}
+          loginHref={loginHref}
+          onLogin={link(loginHref).onClick}
+          onBack={back}
+          onExpired={expired}
+        />
+      ) : (
+      <>
       <section className="fs-hero" id="download">
         <div className="fs-wrap">
           <div style={{ position: "relative", zIndex: 1 }}>
@@ -463,21 +606,23 @@ export default function Site() {
             <Eyebrow>Тарифы</Eyebrow>
             <h2 className="fs-h2">Выберите свой тариф</h2>
             <p>Месяц, три месяца, полгода или год. Чем длиннее период — тем ниже цена за месяц.</p>
-            <a className="fs-btn" href={LINKS.tariffs === "#pricing" ? "#" : LINKS.tariffs}>
+            <a className="fs-btn" {...link(LINKS.tariffs)}>
               Смотреть тарифы
             </a>
           </div>
         </div>
       </section>
+      </>
+      )}
 
       <footer className="fs-foot">
         <div className="fs-wrap">
-          <Logo dot={false} />
+          <Logo dot={false} onClick={(e) => { e.preventDefault(); go("/"); }} />
           <nav>
-            <a href={LINKS.rules}>Правила использования</a>
-            <a href={LINKS.tariffs}>Тарифы</a>
-            <a href="#download">Скачать</a>
-            <a href={LINKS.support}>Поддержка</a>
+            <a {...link(LINKS.rules)}>Правила использования</a>
+            <a {...link(LINKS.tariffs)}>Тарифы</a>
+            <a {...link(LINKS.download)}>Скачать</a>
+            <a {...link(LINKS.support)}>Поддержка</a>
             <a href={`mailto:${LINKS.email}`}>{LINKS.email}</a>
           </nav>
           <div>© {new Date().getFullYear()} FGN. Все права защищены.</div>

@@ -8383,6 +8383,9 @@ def app_plans() -> dict[str, Any]:
         "base_price": meta["base_price"],
         # тарифы по периодам
         "devices": fulfillment.tariff_devices(),
+        # цена n-го устройства в ₽/мес (индекс n-1) — для выбора устройств без входа (сайт)
+        "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
+        "max_devices": MAX_PLAN_DEVICES,
         "periods": [
             {"months": m, "days": fulfillment.period_days(m), "price": fulfillment.period_price(m),
              "stars": fulfillment.period_stars(m)}
