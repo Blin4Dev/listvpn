@@ -232,25 +232,58 @@ class YooKassaClient:
     def _send_with_receipt_fallback(self, method: str, path: str, body: dict[str, Any], key: str,
                                     amount: float, receipt_email: Optional[str],
                                     receipt_item: Optional[str]) -> Any:
-        """магазин без 54-ФЗ отвергает чек; с 54-ФЗ — требует. один повтор с другим Idempotence-Key."""
+        """магазин без 54-ФЗ отвергает чек; с 54-ФЗ — требует. один повтор с другим Idempotence-Key.
+        Если не помог и повтор — наружу первая ошибка (она про наш чек, а не про его отсутствие)."""
         try:
             return self._request(method, path, body, idempotence_key=key)
         except YooKassaError as exc:
             if not _is_receipt_error(exc):
                 raise
             if body.get("receipt"):
-                body = {k: v for k, v in body.items() if k != "receipt"}
-                return self._request(method, path, body, idempotence_key=f"{key}-nr")
-            extra = self._receipt(amount, receipt_email, receipt_item)
-            if not extra:
+                retry = {k: v for k, v in body.items() if k != "receipt"}
+                suffix = "-nr"
+            else:
+                extra = self._receipt(amount, receipt_email, receipt_item)
+                if not extra:
+                    raise YooKassaError(
+                        "Магазин ЮKassa требует чек, а email для чека не найден: укажите YOOKASSA_RECEIPT_EMAIL "
+                        "или установите мини-приложение проекта (письма no-reply@домен)",
+                        status=exc.status, payload=exc.payload) from exc
+                retry = {**body, "receipt": extra}
+                suffix = "-r"
+            try:
+                return self._request(method, path, retry, idempotence_key=f"{key}{suffix}")
+            except YooKassaError as exc2:
+                if _is_receipt_error(exc2):
+                    raise exc
                 raise
-            body = {**body, "receipt": extra}
-            return self._request(method, path, body, idempotence_key=f"{key}-r")
+
+    @staticmethod
+    def _receipt_contact(email: Optional[str]) -> str:
+        """email для чека: покупателя → YOOKASSA_RECEIPT_EMAIL → адрес писем проекта → no-reply@домен проекта.
+        У пользователей из Telegram email обычно нет, а магазину с 54-ФЗ чек нужен в каждом платеже."""
+        cands: list[Optional[str]] = [email, _env("YOOKASSA_RECEIPT_EMAIL"), _env("MAIL_FROM")]
+        try:
+            try:
+                import mailer  # type: ignore
+            except ImportError:  # pragma: no cover
+                from core import mailer  # type: ignore
+            cands.append(mailer.mail_from())
+        except Exception:  # noqa: BLE001
+            pass
+        for dom_key in ("MINIAPP_DOMAIN", "PANEL_DOMAIN"):
+            dom = re.sub(r"^[a-z]+://", "", _env(dom_key), flags=re.I).split("/", 1)[0].split(":", 1)[0]
+            if dom:
+                cands.append(f"no-reply@{dom}")
+        url = _env("MINIAPP_URL")
+        if url:
+            cands.append("no-reply@" + re.sub(r"^[a-z]+://", "", url, flags=re.I).split("/", 1)[0].split(":", 1)[0])
+        return _customer_email(*cands)
 
     def _receipt(self, amount: float, email: Optional[str], item: Optional[str]) -> Optional[dict[str, Any]]:
         if not self.receipts_enabled():
             return None
-        contact = _customer_email(email, _env("YOOKASSA_RECEIPT_EMAIL"), _env("MAIL_FROM"))
+        contact = self._receipt_contact(email)
         if not contact:
             return None
         try:
@@ -267,6 +300,9 @@ class YooKassaClient:
                 "quantity": "1.00",
                 "amount": {"value": _money(amount), "currency": "RUB"},
                 "vat_code": vat,
+                # обязательны для «Чеков от ЮKassa» и ФФД 1.05+: услуга, полная предоплата/расчёт
+                "payment_subject": _env("YOOKASSA_PAYMENT_SUBJECT", default="service"),
+                "payment_mode": _env("YOOKASSA_PAYMENT_MODE", default="full_payment"),
             }],
         }
         tax = _env("YOOKASSA_TAX_SYSTEM_CODE")
