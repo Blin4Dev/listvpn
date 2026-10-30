@@ -8775,8 +8775,9 @@ def panel_mail_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
     # письма проекта уходят с его сервера мини-приложения: IP, на связи ли агент, DNS-записи
     route = miniapps.mail_route()
     if route:
-        srv = miniapps.server(route["server_id"])
-        out.update({"server_ip": route["ip"], "server_online": miniapps.server_online(srv),
+        srv = miniapps.server(route["server_id"]) if route["server_id"] else None
+        out.update({"server_ip": route["ip"], "server_online": bool(route.get("local")) or miniapps.server_online(srv),
+                    "server_local": bool(route.get("local")),
                     "records": miniapps.mail_dns()["records"]})
     return out
 

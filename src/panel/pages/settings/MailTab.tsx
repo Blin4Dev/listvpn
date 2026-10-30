@@ -10,7 +10,7 @@ import type { ToastType } from '../../lib/types';
 type Rec = { type: string; host: string; name?: string; value: string; ok: boolean };
 type Cfg = {
   mode: 'off' | 'smtp' | 'direct' | 'agent'; host: string; user: string; domain: string; from: string;
-  server_ip: string; server_online?: boolean; records?: Rec[];
+  server_ip: string; server_online?: boolean; server_local?: boolean; records?: Rec[];
 };
 
 const Mark: React.FC<{ ok: boolean | null }> = ({ ok }) =>
@@ -85,15 +85,15 @@ export const MailSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: Toa
           <div className="flex items-center gap-3" style={{ paddingBottom: 12 }}>
             <Mail size={18} className="faint" />
             <div><div style={{ fontWeight: 600 }}>{cfg.from}</div>
-              <div className="sub" style={{ fontSize: 13 }}>Письма уходят с сервера мини-приложения <span className="mono">{cfg.server_ip}</span>. Настроено при установке — менять здесь нечего.</div></div>
+              <div className="sub" style={{ fontSize: 13 }}>Письма уходят с {cfg.server_local ? 'сервера панели' : 'сервера мини-приложения'} <span className="mono">{cfg.server_ip}</span>. Настроено при установке — менять здесь нечего.</div></div>
           </div>
 
-          <Row ok={!!cfg.server_online} title="Сервер мини-приложения на связи">
+          {!cfg.server_local && <Row ok={!!cfg.server_online} title="Сервер мини-приложения на связи">
             {!cfg.server_online && <HowTo items={[
               <>На сервере {cfg.server_ip} проверьте службу: <span className="mono">systemctl status blin-agent</span></>,
               <>Перезапустите её: <span className="mono">systemctl restart blin-agent</span> — и обновите эту страницу.</>,
             ]} />}
-          </Row>
+          </Row>}
 
           <Row ok={port25 === undefined || busy === 'p25' ? null : port25} title="Исходящий порт 25"
             action={<button className="btn sm" disabled={!!busy || !cfg.server_online} onClick={() => void checkPort()}>{spin('p25') || <RefreshCw size={14} />} Проверить</button>}>

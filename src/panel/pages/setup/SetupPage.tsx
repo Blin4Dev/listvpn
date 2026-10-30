@@ -1,5 +1,5 @@
 // Начальное меню «Проекты»: install.sh ставит только панель, мини-приложения проектов ставятся отсюда —
-// каждое на свой сервер и домен (бэкенд: src/core/miniapps.py, агент: src/core/miniapp_agent.py).
+// каждое на свой сервер (или на сервер панели) и домен (бэкенд: src/core/miniapps.py, агент: src/core/miniapp_agent.py).
 // Монохром; оранжевый — только у переключателей, цвет — только у статусов круга установки.
 import React, { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -9,12 +9,12 @@ import { apiFetch, copyToClipboard, parseApiErr } from '../../lib/api';
 type Install = {
   project: string; state: 'waiting' | 'installing' | 'done' | 'error' | string; step: string; step_index: number; pct: number;
   label: string; error: string; domain: string; site_domain: string; server_id: number; server_ip: string;
-  server_online: boolean; connected: boolean; fresh: boolean; expires_in: number;
+  server_online: boolean; local?: boolean; connected: boolean; fresh: boolean; expires_in: number;
   steps: { key: string; label: string }[]; command?: string; panel_url: string;
 };
 type Proj = {
   id: string; name: string; has_site: boolean; installed: boolean; legacy: boolean; active: boolean;
-  domain: string; site_domain: string; server: { id: number; ip: string; online: boolean } | null;
+  domain: string; site_domain: string; server: { id: number; ip: string; online: boolean; local?: boolean } | null;
   install: Install | null;
   bot: { token_set: boolean; username: string; token_hint: string };
   squads: { vpn: string[]; trial: string[] };
@@ -27,6 +27,7 @@ type Server = { id: number; ip: string; hostname: string; online: boolean; caddy
 type Data = {
   panel_url: string; panel_host: string; gateway_ready: boolean; remnawave: boolean;
   projects: Proj[]; servers: Server[]; squads: { uuid: string; name: string }[]; admins: string[];
+  panel_ip: string; local_caddy: boolean;
 };
 
 const CSS = `
@@ -185,6 +186,7 @@ export function SetupPage({ onDone, onToast }: { onDone: () => void; onToast: (t
   const ready = data.projects.filter((p) => p.ready);
   const canGo = ready.length > 0;
   const inst = data.projects.filter((p) => p.installed).length;
+  const localProjects = data.projects.filter((p) => p.server?.local);
 
   const toggle = async (p: Proj) => {
     setSel(p.id);
@@ -230,8 +232,12 @@ export function SetupPage({ onDone, onToast }: { onDone: () => void; onToast: (t
             })}
           </div>
           <div className="su-card su-list">
-            <div className="su-lt"><span>Серверы мини-приложений</span><span>{data.servers.length || ''}</span></div>
-            {data.servers.length ? data.servers.map((s) => (
+            <div className="su-lt"><span>Серверы мини-приложений</span><span>{(data.servers.length + (localProjects.length ? 1 : 0)) || ''}</span></div>
+            {localProjects.length > 0 && <div className="su-srow">
+              <div className="ip"><span className="su-dot on" title="на связи" />{data.panel_ip || 'сервер панели'}</div>
+              <div className="pr">сервер панели · {localProjects.map((p) => p.name).join(' · ')}</div>
+            </div>}
+            {data.servers.length || localProjects.length ? data.servers.map((s) => (
               <div className="su-srow" key={s.id}>
                 <div className="ip"><span className={`su-dot ${s.online ? 'on' : ''}`} title={s.online ? 'на связи' : 'не на связи'} />{s.ip}</div>
                 <div className="pr">{s.projects.map((id) => data.projects.find((p) => p.id === id)?.name || id).join(' · ') || 'без проектов'}
@@ -286,9 +292,9 @@ function ProjectPane({ p, data, onInstall, onReload, onToast }: {
     return <div className="su-empty">
       <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>{p.name} не установлен</div>
       <div className="m sm" style={{ margin: '0 auto 18px', maxWidth: 400 }}>
-        {running ? `Идёт установка на ${inst!.server_ip} (${inst!.domain}).`
-          : inst?.state === 'error' ? `Установка на ${inst.server_ip} не удалась: ${inst.error}`
-            : 'Мини-приложение проекта ставится на отдельный сервер со своим доменом. С этого же сервера уходят письма пользователям.'}
+        {running ? `Идёт установка на ${inst!.local ? 'сервер панели' : inst!.server_ip} (${inst!.domain}).`
+          : inst?.state === 'error' ? `Установка на ${inst.local ? 'сервер панели' : inst.server_ip} не удалась: ${inst.error}`
+            : 'Мини-приложение проекта ставится на отдельный сервер или на сервер панели — со своим доменом. С этого же сервера уходят письма пользователям.'}
       </div>
       <button className="btn solid" onClick={onInstall}>{running ? 'Открыть установку' : inst?.state === 'error' ? 'Повторить' : 'Установить'}</button>
     </div>;
@@ -359,7 +365,7 @@ function ProjectPane({ p, data, onInstall, onReload, onToast }: {
       <div className="su-sec"><span className="su-mark ok" /><div>
         <div className="su-sname">Мини-приложение и почта</div>
         <dl className="su-kv">
-          <dt>Сервер</dt><dd className="mono">{p.legacy ? 'главный (старая установка)' : p.server ? `${p.server.ip}${p.server.online ? '' : ' · не на связи'}` : '—'}</dd>
+          <dt>Сервер</dt><dd className="mono">{p.legacy ? 'главный (старая установка)' : p.server ? `${p.server.local ? 'сервер панели · ' : ''}${p.server.ip}${p.server.online ? '' : ' · не на связи'}` : '—'}</dd>
           <dt>Домен</dt><dd className="mono">{p.domain}{p.site_domain ? `, ${p.site_domain}` : ''}</dd>
           <dt>Письма</dt><dd>{p.mail_from ? <><span className="mono">{p.mail_from}</span> <MailDns pid={p.id} /></> : <span className="f">как в Настройки → Почта</span>}</dd>
         </dl>
@@ -501,7 +507,7 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
   const pending = p.install && (p.install.state === 'waiting' || p.install.state === 'installing' || p.install.state === 'error') ? p.install : null;
   const [inst, setInst] = useState<Install | null>(pending);
   const [command, setCommand] = useState('');
-  const [mode, setMode] = useState<'new' | 'existing'>(otherServers.length ? 'existing' : 'new');
+  const [mode, setMode] = useState<'new' | 'existing' | 'local'>(otherServers.length ? 'existing' : 'new');
   const [ip, setIp] = useState('');
   const [srv, setSrv] = useState<number | null>(otherServers[0]?.id ?? null);
   const [domain, setDomain] = useState(moving ? p.domain : '');
@@ -526,14 +532,15 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
 
   const ipBusy = mode === 'new' && data.servers.some((s) => s.ip === ip.trim());
   const siteBad = !!site.trim() && (!isDomain(siteDom) || siteDom === dom);
-  const valid = isDomain(dom) && !siteBad && (mode === 'new' ? isIp(ip.trim()) && !ipBusy : !!srv);
+  const valid = isDomain(dom) && !siteBad && (mode === 'new' ? isIp(ip.trim()) && !ipBusy : mode === 'local' ? data.local_caddy : !!srv);
+  const targetIp = mode === 'local' ? data.panel_ip : mode === 'new' ? ip.trim() : (data.servers.find((s) => s.id === srv)?.ip || '');
 
   const go = async () => {
     if (!valid || busy) return;
     setBusy(true); setFormErr('');
     try {
       const body: any = { project: p.id, domain: dom, site_domain: siteDom };
-      if (mode === 'new') body.ip = ip.trim(); else body.server_id = srv;
+      if (mode === 'new') body.ip = ip.trim(); else if (mode === 'local') body.local = true; else body.server_id = srv;
       const r = await apiFetch('/panel/setup/install', { method: 'POST', body: JSON.stringify(body) });
       setCommand(r?.install?.command || '');
       setInst(r?.install || null);
@@ -572,8 +579,9 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
         <div className="su-mh">
           <div><div className="title">{title}</div>
             <div className="f sm">{phase === 'form'
-              ? (moving ? 'Мини-приложение переедет на другой сервер, старый сайт отключится после проверки.' : 'Мини-приложение проекта будет работать на своём сервере и домене.')
-              : 'Панель сама настроит сервер: Caddy, сертификат, мини-приложение и почту.'}</div></div>
+              ? (moving ? 'Мини-приложение переедет на другой сервер, старый сайт отключится после проверки.' : 'Мини-приложение проекта будет работать на своём домене — на отдельном сервере или рядом с панелью.')
+              : inst?.local ? 'Панель сама добавит сайт в свой Caddy, выпустит сертификат и настроит почту.'
+                : 'Панель сама настроит сервер: Caddy, сертификат, мини-приложение и почту.'}</div></div>
           <button className="su-x" onClick={close} aria-label="Закрыть" title={inst?.state === 'installing' ? 'Дождитесь окончания установки' : 'Закрыть'}>×</button>
         </div>
         <div className="su-mb">
@@ -583,8 +591,19 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
               <button className={`seg-item ${mode === 'existing' ? 'on' : ''}`} disabled={!otherServers.length} style={otherServers.length ? undefined : { opacity: 0.35, cursor: 'not-allowed' }}
                 title={otherServers.length ? '' : 'Пока нет подключённых серверов'} onClick={() => otherServers.length && setMode('existing')}>
                 Подключённый сервер{otherServers.length ? ` · ${otherServers.length}` : ''}</button>
+              <button className={`seg-item ${mode === 'local' ? 'on' : ''}`} onClick={() => setMode('local')}>Сервер панели</button>
             </div>
-            {mode === 'new' ? <div className="su-field">
+            {mode === 'local' ? <div className="su-field">
+              <label>Сервер панели</label>
+              <div className="su-srv on" style={{ cursor: 'default' }}>
+                <span className="su-radio" />
+                <div style={{ flex: 1, minWidth: 0 }}><div className="mono" style={{ fontSize: 13 }}>{data.panel_ip || 'IP не определён'}</div>
+                  <div className="f sm">{data.panel_host}</div></div>
+                <span className="f sm">на связи</span>
+              </div>
+              {!data.local_caddy && <div className="su-note">Сначала обновите панель: <span className="mono">sudo bash install.sh</span> → 1 — в её Caddy появится общий сайт для мини-приложений.</div>}
+              <div className="su-hint">Отдельный сервер не нужен: сайт встанет в Caddy панели со своим сертификатом и DKIM-ключом, письма уйдут с этого же IP.</div>
+            </div> : mode === 'new' ? <div className="su-field">
               <label>IP сервера мини-приложения</label>
               <input className="input mono" style={{ width: '100%' }} placeholder="203.0.113.10" value={ip} inputMode="decimal" onChange={(e) => setIp(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && go()} />
               {ipBusy && <div className="su-note">Этот сервер уже подключён — выберите его во вкладке «Подключённый сервер»</div>}
@@ -606,7 +625,7 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
               <input className="input mono" style={{ width: '100%' }} placeholder={`app.${p.id}.ru`} value={domain} autoCapitalize="off" spellCheck={false}
                 onChange={(e) => setDomain(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && go()} />
               {dom && !isDomain(dom) && <div className="su-note">Похоже на опечатку в домене</div>}
-              <div className="su-hint">С этого домена бот открывает мини-приложение, а пользователям приходят письма. A-запись должна указывать на IP сервера — иначе сертификат не выпустится.</div>
+              <div className="su-hint">С этого домена бот открывает мини-приложение, а пользователям приходят письма. A-запись должна указывать на {targetIp ? <span className="mono">{targetIp}</span> : 'IP сервера'} — иначе сертификат не выпустится.</div>
             </div>
             {p.has_site && <div className="su-field" style={{ marginBottom: 0 }}>
               <label>Домен сайта <span className="f">— необязательно: сайт в браузере вместо мини-приложения</span></label>
@@ -620,7 +639,7 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
             </div>
           </> : <>
             <dl className="su-kv" style={{ margin: '0 0 16px' }}>
-              <dt>Сервер</dt><dd className="mono">{inst!.server_ip}</dd>
+              <dt>Сервер</dt><dd className="mono">{inst!.local ? `сервер панели · ${inst!.server_ip}` : inst!.server_ip}</dd>
               <dt>Домен</dt><dd className="mono">{inst!.domain}{inst!.site_domain ? `, ${inst!.site_domain}` : ''}</dd>
             </dl>
             {phase === 'wait' && !inst!.connected && <>

@@ -520,6 +520,10 @@ ${CADDY_MARKER}
 	servers {
 		protocols h1 h2
 	}
+	# мини-приложения проектов на этом сервере (ставятся из панели): сертификат — только доменам, которые знает API
+	on_demand_tls {
+		ask http://127.0.0.1:8000/api/internal/miniapp/ask
+	}
 }
 
 import ${CADDY_SITES}/*.caddy
@@ -832,6 +836,67 @@ $(_caddy_api_headers)
 }
 EOF
     done < <(extra_projects)
+    # мини-приложения проектов, поставленные из панели на этот сервер: любой домен, который знает API
+    # (сертификат on-demand: /api/internal/miniapp/ask), проект статике — от API (forward_auth → X-Project),
+    # /api сам узнаёт проект по домену. Конкретные сайты выше важнее этого общего.
+    local any_addr="https://"
+    [[ "$HTTPS_PORT" == "443" ]] || any_addr="https://:${HTTPS_PORT}"
+    cat >> "$tmp" <<EOF
+
+# мини-приложения проектов на этом сервере (панель → «Проекты» → «Сервер панели»)
+${any_addr} {
+	import blin_sec
+	tls {
+		on_demand
+$( [[ "$HTTPS_PORT" == "443" ]] || printf '\t\tissuer acme {\n\t\t\tdisable_tlsalpn_challenge\n\t\t}\n' )
+	}
+	request_body {
+		max_size 55MB
+	}
+	route {
+		handle /api/internal* {
+			respond 404
+		}
+		handle /api/panel* {
+			respond 404
+		}
+		handle /api/agent* {
+			respond 404
+		}
+		handle /api* {
+			reverse_proxy 127.0.0.1:8000 {
+$(_caddy_api_headers)
+				header_up -X-Project
+				flush_interval -1
+			}
+		}
+		handle /yookassa* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		handle /webhooks/payments/* {
+			reverse_proxy 127.0.0.1:${WEBHOOK_PORT:-5000} {
+$(_caddy_api_headers)
+			}
+		}
+		# route — порядок как написан: сначала срезать чужой X-Project, потом взять его у API
+		handle {
+			route {
+				request_header -X-Project
+				forward_auth 127.0.0.1:8000 {
+					uri /api/internal/miniapp/route
+					copy_headers X-Project
+				}
+				reverse_proxy 127.0.0.1:9741 {
+					header_up X-Real-IP {client_ip}
+					header_up X-Forwarded-For {client_ip}
+				}
+			}
+		}
+	}
+}
+EOF
     if [[ $remote -eq 0 ]]; then
         cat >> "$tmp" <<EOF
 

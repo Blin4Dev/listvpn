@@ -7,6 +7,9 @@
 #   → задача install: Caddy, сертификат LE, статика мини-приложения, прокси /api и вебхуков ЮKassa на главный
 #     сервер (заголовок X-Miniapp-Gateway — общий секрет MINIAPP_GATEWAY_SECRET), DKIM, проверка.
 # Письма проекта уходят с его сервера и домена (no-reply@<домен>): главный подписывает DKIM, агент доставляет на MX.
+# Или на сервер панели (MINIAPP_SERVER = "local"): без агента — в Caddy панели общий сайт `https://` с on-demand TLS
+# (install.sh), сертификат выпускается, только если /api/internal/miniapp/ask узнал домен; проект статике — из
+# /api/internal/miniapp/route (forward_auth → X-Project), API узнаёт проект по домену сам. Почта — напрямую с панели.
 # Состояние проекта — в настройках панели (projects.PANEL_CONFIG): MINIAPP_DOMAIN / MINIAPP_URL / SITE_DOMAIN /
 # MINIAPP_SERVER / PROJECT_ACTIVE.
 from __future__ import annotations
@@ -156,6 +159,96 @@ def gateway_secret() -> str:
     return (os.getenv("MINIAPP_GATEWAY_SECRET") or "").strip()
 
 
+LOCAL = "local"  # MINIAPP_SERVER проекта, чьё мини-приложение стоит на сервере панели (в miniapp_installs — server_id 0)
+_pip: dict[str, Any] = {"ip": "", "at": 0.0}
+
+
+def _sid_cfg(sid: Any) -> str:
+    """server_id установки → значение MINIAPP_SERVER."""
+    try:
+        return LOCAL if int(sid or 0) == 0 else str(int(sid))
+    except (TypeError, ValueError):
+        return str(sid)
+
+
+def https_port() -> int:
+    try:
+        return int(os.getenv("HTTPS_PORT") or 443)
+    except ValueError:
+        return 443
+
+
+def _no_proxy_open(url: str, timeout: float):
+    import urllib.request
+    return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout)
+
+
+def panel_ip() -> str:
+    """публичный IPv4 сервера панели (SERVER_IP из .env, иначе спрашиваем снаружи; кэш на час)."""
+    ip = norm_ip(os.getenv("SERVER_IP"))
+    if ip:
+        return ip
+    if _pip["ip"] and _now() - _pip["at"] < 3600:
+        return _pip["ip"]
+    import urllib.request
+    for url in ("https://api.ipify.org", "https://ipv4.icanhazip.com"):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                ip = norm_ip(resp.read(64).decode(errors="ignore").strip())
+        except Exception:  # noqa: BLE001
+            ip = ""
+        if ip:
+            break
+    if not ip:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
+                so.connect(("1.1.1.1", 53))
+                ip = norm_ip(so.getsockname()[0])
+        except OSError:
+            ip = ""
+    if ip:
+        _pip.update(ip=ip, at=_now())
+    return ip
+
+
+def local_caddy_ready() -> Optional[bool]:
+    """есть ли в Caddy панели общий сайт для мини-приложений (on-demand TLS от install.sh). None — не узнать."""
+    try:
+        with _no_proxy_open("http://127.0.0.1:2019/config/apps/tls/automation/on_demand", 3) as resp:
+            body = resp.read(4096).decode(errors="ignore").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    return body not in ("", "null", "{}")
+
+
+def _resolve_a(dom: str) -> list[str]:
+    try:
+        return sorted({i[4][0] for i in socket.getaddrinfo(dom, None, socket.AF_INET)})
+    except OSError:
+        return []
+
+
+def _tls_get(dom: str, path: str = "/", timeout: float = 30.0) -> tuple[int, bytes]:
+    """HTTPS-запрос к своему Caddy (127.0.0.1) с SNI домена — без «шпильки» через внешний IP. Сертификат проверяется."""
+    import ssl
+    ctx = ssl.create_default_context()
+    with socket.create_connection(("127.0.0.1", https_port()), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=dom) as s:
+            s.sendall(f"GET {path} HTTP/1.1\r\nHost: {dom}\r\nUser-Agent: blin-panel\r\nConnection: close\r\n\r\n".encode())
+            data = b""
+            while len(data) < 262144:
+                chunk = s.recv(16384)
+                if not chunk:
+                    break
+                data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    try:
+        code = int(head.split(b" ", 2)[1])
+    except (IndexError, ValueError):
+        code = 0
+    return code, body
+
+
 def _data_dir() -> str:
     return os.path.dirname(os.path.abspath(os.getenv("DB_PATH") or "data/data.db"))
 
@@ -264,6 +357,9 @@ def _start_install_task(pid: str) -> None:
     row = install_row(pid)
     if not row:
         return
+    if int(row["server_id"] or 0) == 0:
+        _start_local(pid)
+        return
     tid = add_task(int(row["server_id"]), "install", _install_payload(pid, row))
     _install_update(pid, state="installing", step="connect", label=STEPS[0][1], error="", task_id=tid)
 
@@ -290,14 +386,15 @@ class SetupError(Exception):
         self.status = status
 
 
-def start_install(pid: str, *, ip: str = "", server_id: Optional[int] = None, domain: str, site_domain: str = "") -> dict[str, Any]:
-    """новая установка / перенос мини-приложения проекта. Возвращает {"code": …} для нового сервера."""
+def start_install(pid: str, *, ip: str = "", server_id: Optional[int] = None, domain: str, site_domain: str = "",
+                  local: bool = False) -> dict[str, Any]:
+    """новая установка / перенос мини-приложения проекта (local — на сервер панели). Возвращает {"code": …} для нового сервера."""
     ensure()
     if not projects.exists(pid):
         raise SetupError("Нет такого проекта", 404)
-    if not panel_url():
+    if not local and not panel_url():
         raise SetupError("В .env главного сервера нет PANEL_URL — запустите install.sh → обновление")
-    if not gateway_secret():
+    if not local and not gateway_secret():
         raise SetupError("В .env главного сервера нет MINIAPP_GATEWAY_SECRET — запустите install.sh → обновление")
     dom = norm_domain(domain)
     if not dom:
@@ -321,7 +418,12 @@ def start_install(pid: str, *, ip: str = "", server_id: Optional[int] = None, do
 
     code = ""
     now = _now()
-    if server_id:
+    if local:
+        if local_caddy_ready() is False:
+            raise SetupError("Caddy панели ещё без общего сайта для мини-приложений — обновите панель: "
+                             "sudo bash install.sh → 1, затем повторите")
+        sid = 0
+    elif server_id:
         srv = server(server_id)
         if not srv or not srv.get("token_hash"):
             raise SetupError("Сервер не найден", 404)
@@ -344,7 +446,7 @@ def start_install(pid: str, *, ip: str = "", server_id: Optional[int] = None, do
             c = db.execute("INSERT INTO miniapp_servers (ip, code_hash, code_expires, created_at) VALUES (?, ?, ?, ?)",
                            (ipn, _sha(code), now + CODE_TTL, now))
             sid = int(c.lastrowid)
-    fresh = 0 if server_projects(sid) else 1
+    fresh = 0 if (local or server_projects(sid)) else 1
     db.execute("INSERT INTO miniapp_installs (project_id, server_id, domain, site_domain, state, step, label, error, fresh, "
                "task_id, created_at, updated_at, done_at) VALUES (?, ?, ?, ?, 'waiting', '', '', '', ?, NULL, ?, ?, NULL) "
                "ON CONFLICT(project_id) DO UPDATE SET server_id = excluded.server_id, domain = excluded.domain, "
@@ -381,8 +483,13 @@ def install_view(pid: str) -> Optional[dict[str, Any]]:
     row = install_row(pid)
     if not row:
         return None
-    srv = server(row["server_id"]) or {}
+    local = int(row["server_id"] or 0) == 0
+    srv = {} if local else (server(row["server_id"]) or {})
     state = row.get("state") or ""
+    if local and state == "installing" and pid not in _local_running:
+        state = "error"
+        _install_update(pid, state="error", error="Установка прервалась (панель перезапустилась) — нажмите «Повторить»")
+        row = install_row(pid) or row
     if state == "installing" and (row.get("updated_at") or 0) < _now() - INSTALL_STUCK:
         state = "error"
         _install_update(pid, state="error", error="Сервер перестал отвечать во время установки")
@@ -397,9 +504,11 @@ def install_view(pid: str) -> Optional[dict[str, Any]]:
         expires = max(0, int((srv.get("code_expires") or 0) - _now()))
     labels = []
     for key, label, _p in STEPS:
+        if local and key in LOCAL_LABELS:
+            label = LOCAL_LABELS[key]
         if key == "domain":
             label = f"Получен домен {row['domain']}"
-        elif key == "caddy" and not row.get("fresh"):
+        elif key == "caddy" and not row.get("fresh") and not local:
             label = "Caddy уже стоит — добавляем сайт"
         elif key == "check":
             label = f"Проверка https://{row['domain']}"
@@ -408,8 +517,9 @@ def install_view(pid: str) -> Optional[dict[str, Any]]:
         "project": pid, "state": state, "step": step, "step_index": idx, "pct": pct,
         "label": row.get("label") or "", "error": row.get("error") or "",
         "domain": row["domain"], "site_domain": row.get("site_domain") or "",
-        "server_id": row["server_id"], "server_ip": srv.get("ip") or "", "server_online": server_online(srv),
-        "connected": bool(srv.get("token_hash")), "fresh": bool(row.get("fresh")),
+        "server_id": row["server_id"], "server_ip": panel_ip() if local else (srv.get("ip") or ""),
+        "server_online": local or server_online(srv), "local": local,
+        "connected": local or bool(srv.get("token_hash")), "fresh": bool(row.get("fresh")),
         "expires_in": expires, "steps": labels,
         "command": "", "panel_url": panel_url(),
     }
@@ -426,14 +536,17 @@ def _finish_install(pid: str, ok: bool, error: str = "") -> None:
     old_sid = old.get("MINIAPP_SERVER", "")
     old_dom = old.get("MINIAPP_DOMAIN", "")
     dom = row["domain"]
+    new_sid = _sid_cfg(row["server_id"])
+    port = https_port() if new_sid == LOCAL else 443
     projects.set_panel_config(pid, {
-        "MINIAPP_DOMAIN": dom, "MINIAPP_URL": f"https://{dom}",
-        "SITE_DOMAIN": row.get("site_domain") or "", "MINIAPP_SERVER": str(row["server_id"]),
+        "MINIAPP_DOMAIN": dom, "MINIAPP_URL": f"https://{dom}" + (f":{port}" if port != 443 else ""),
+        "SITE_DOMAIN": row.get("site_domain") or "", "MINIAPP_SERVER": new_sid,
         "PROJECT_ACTIVE": "1",
     })
+    _local_cache["at"] = 0.0
     _install_update(pid, state="done", step="check", label="Готово", error="", done_at=_now())
-    # перенос: старый сайт снять после проверки нового
-    if old_sid and old_sid != str(row["server_id"]):
+    # перенос: старый сайт снять после проверки нового (на сервере панели снимать нечего — общий сайт)
+    if old_sid and old_sid != new_sid and old_sid != LOCAL:
         try:
             add_task(int(old_sid), "remove", {"project": pid, "domain": old_dom})
         except (TypeError, ValueError):
@@ -442,6 +555,149 @@ def _finish_install(pid: str, ok: bool, error: str = "") -> None:
         set_menu_button(pid)
     except Exception as exc:  # noqa: BLE001
         print(f"[miniapps] кнопка мини-приложения {pid}: {exc}", flush=True)
+
+
+# ───────────────────────── установка на сервер панели ─────────────────────────
+
+LOCAL_LABELS = {
+    "connect": "Сервер панели",
+    "caddy": "Caddy панели — добавляем сайт",
+    "bundle": "Мини-приложение из сборки панели",
+}
+_local_lock = threading.Lock()
+_local_running: set[str] = set()
+_local_cache: dict[str, Any] = {"at": 0.0, "map": {}}
+
+
+def local_domains(fresh: bool = False) -> dict[str, str]:
+    """домены мини-приложений на сервере панели → проект (готовые и устанавливаемые)."""
+    if not fresh and _now() - _local_cache["at"] < 3:
+        return _local_cache["map"]
+    ensure()
+    out: dict[str, str] = {}
+    for p in projects.all_projects():
+        cfg = projects.panel_config(p.id, fresh=fresh)
+        if cfg.get("MINIAPP_SERVER") == LOCAL:
+            for k in ("MINIAPP_DOMAIN", "SITE_DOMAIN"):
+                if cfg.get(k):
+                    out[cfg[k].lower()] = p.id
+    for row in db.fetchall("SELECT project_id, domain, site_domain FROM miniapp_installs WHERE server_id = 0"):
+        for d in (row.get("domain"), row.get("site_domain")):
+            if d:
+                out.setdefault(d.lower(), row["project_id"])
+    _local_cache.update(at=_now(), map=out)
+    return out
+
+
+def _start_local(pid: str) -> None:
+    with _local_lock:
+        if pid in _local_running:
+            return
+        _local_running.add(pid)
+    _local_cache["at"] = 0.0
+    _install_update(pid, state="installing", step="connect", label=LOCAL_LABELS["connect"], error="", task_id=None)
+    threading.Thread(target=_run_local, args=(pid,), daemon=True, name=f"miniapp-local-{pid}").start()
+
+
+def _run_local(pid: str) -> None:
+    try:
+        try:
+            err = _local_steps(pid)
+        except Exception as exc:  # noqa: BLE001
+            err = f"{type(exc).__name__}: {exc}"
+        row = install_row(pid)
+        if row and int(row["server_id"] or 0) == 0 and row.get("state") == "installing":
+            _finish_install(pid, not err, err)
+    finally:
+        with _local_lock:
+            _local_running.discard(pid)
+
+
+def _wait_cert(dom: str, tries: int = 6) -> str:
+    """Caddy выпускает сертификат при первом TLS-рукопожатии (on-demand). '' — сертификат есть."""
+    import ssl
+    err = ""
+    for i in range(tries):
+        try:
+            _tls_get(dom, "/api/health", timeout=90)
+            return ""
+        except ssl.SSLCertVerificationError as exc:
+            err = f"сертификат не подтверждён ({exc.verify_message or exc})"
+        except ssl.SSLError as exc:
+            err = f"Caddy не смог выпустить сертификат ({exc.reason or exc})"
+        except OSError as exc:
+            err = f"Caddy панели не отвечает на 127.0.0.1:{https_port()} ({exc})"
+        if i < tries - 1:
+            time.sleep(15)
+    return err
+
+
+def _local_steps(pid: str) -> str:
+    """шаги установки на сервер панели; '' — успех, иначе текст ошибки."""
+    row = install_row(pid)
+    if not row:
+        return "Установка отменена"
+    dom, site = row["domain"], row.get("site_domain") or ""
+
+    def step(key: str, label: str) -> None:
+        _install_update(pid, step=key, label=label, state="installing")
+
+    step("domain", f"Получен домен {dom}")
+    ip = panel_ip()
+    wrong: list[str] = []
+    for d in (dom, site):
+        if not d:
+            continue
+        ips = _resolve_a(d)
+        if not ips:
+            return f"У домена {d} нет A-записи — добавьте её на IP сервера панели {ip}".rstrip()
+        if ip and ip not in ips:
+            wrong.append(f"{d} → {', '.join(ips)}")
+
+    step("caddy", LOCAL_LABELS["caddy"])
+    if local_caddy_ready() is False:
+        return "Caddy панели ещё без общего сайта для мини-приложений — обновите панель: sudo bash install.sh → 1"
+
+    step("cert", f"Выпуск сертификата Let’s Encrypt для {dom}")
+    for d in (dom, site):
+        if not d:
+            continue
+        err = _wait_cert(d)
+        if err:
+            hint = f". A-запись: {'; '.join(wrong)}, а IP сервера панели — {ip}" if wrong else \
+                ". Проверьте, что порты 80 и 443 открыты"
+            return f"Сертификат для {d} не выпустился: {err}{hint}"
+
+    step("bundle", LOCAL_LABELS["bundle"])
+    for _ in range(30):
+        if bundle_hash(pid):
+            break
+        time.sleep(2)
+    else:
+        return "Сборка мини-приложения ещё не готова (контейнер miniapp) — повторите через минуту"
+
+    step("dkim", "Настройка почты: DKIM-ключ для домена")
+    try:
+        try:
+            from . import mailer  # type: ignore
+        except ImportError:  # pragma: no cover
+            import mailer  # type: ignore
+        mailer.ensure_dkim(dom)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[miniapps] DKIM {dom}: {exc}", flush=True)
+
+    step("check", f"Проверка https://{dom}")
+    _local_cache["at"] = 0.0
+    for d in (dom, site):
+        if not d:
+            continue
+        code, _b = _tls_get(d, "/")
+        if code != 200:
+            return f"https://{d} ответил {code or 'непонятно'} — мини-приложение не открылось (контейнер miniapp запущен?)"
+        code, body = _tls_get(d, "/api/health")
+        if code != 200 or b"blinvpn-api" not in body:
+            return f"https://{d}/api/health ответил {code or 'непонятно'} — API недоступен через этот домен"
+    return ""
 
 
 def set_menu_button(pid: str) -> bool:
@@ -497,6 +753,8 @@ def mail_route(pid: Optional[str] = None) -> Optional[dict[str, Any]]:
     dom, sid = cfg.get("MINIAPP_DOMAIN", ""), cfg.get("MINIAPP_SERVER", "")
     if not dom or not sid:
         return None
+    if sid == LOCAL:  # мини-приложение на сервере панели: письма уходят прямо отсюда
+        return {"domain": dom, "server_id": 0, "ip": panel_ip(), "local": True}
     try:
         srv = server(sid)
     except Exception:  # noqa: BLE001
@@ -528,6 +786,12 @@ def mail_dns(pid: Optional[str] = None) -> dict[str, Any]:
 
 def port25_open(server_id: int, timeout: float = 25.0) -> Optional[bool]:
     """открыт ли исходящий порт 25 на сервере мини-приложения. None — сервер не ответил (не на связи / старый агент)."""
+    if not server_id:  # сервер панели
+        try:
+            from . import mailer  # type: ignore
+        except ImportError:  # pragma: no cover
+            import mailer  # type: ignore
+        return mailer.port25_open()
     srv = server(server_id)
     if not server_online(srv):
         return None
@@ -657,6 +921,7 @@ class InstallBody(BaseModel):
     project: str = Field(..., max_length=24)
     ip: str = Field("", max_length=45)
     server_id: Optional[int] = None
+    local: bool = False
     domain: str = Field(..., max_length=253)
     site_domain: str = Field("", max_length=253)
 
@@ -847,10 +1112,33 @@ def build_router(core: Any):
         return Response(bundle_tar(pid), media_type="application/gzip",
                         headers={"X-Bundle-Hash": bundle_hash(pid), "Cache-Control": "no-store"})
 
+    # ── сервер панели: общий сайт Caddy с on-demand TLS (install.sh) ──
+    def _loopback(request: Request) -> None:
+        if (request.client.host if request.client else "") not in ("127.0.0.1", "::1"):
+            raise HTTPException(404)
+
+    @r.get("/api/internal/miniapp/ask")
+    def local_ask(request: Request, domain: str = "") -> Response:
+        """Caddy спрашивает перед выпуском сертификата: наш ли домен."""
+        _loopback(request)
+        d = norm_domain(domain)
+        return Response(status_code=200 if d and d in local_domains(fresh=True) else 404)
+
+    @r.get("/api/internal/miniapp/route")
+    def local_route(request: Request) -> Response:
+        """forward_auth: проект статики по домену → X-Project для контейнера мини-приложений."""
+        _loopback(request)
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+        pid = local_domains().get(norm_domain(host))
+        if not pid:
+            return Response("Not found", status_code=404)
+        return Response(status_code=200, headers={"X-Project": pid, "Cache-Control": "no-store"})
+
     # ── панель: начальное меню ──
     def _project_view(p: Any) -> dict[str, Any]:
         cfg = projects.panel_config(p.id, fresh=True)
-        srv = server(cfg["MINIAPP_SERVER"]) if cfg.get("MINIAPP_SERVER") else None
+        local = cfg.get("MINIAPP_SERVER") == LOCAL
+        srv = server(cfg["MINIAPP_SERVER"]) if cfg.get("MINIAPP_SERVER") and not local else None
         legacy = bool(p.miniapp_url) and not cfg.get("MINIAPP_DOMAIN")
         with projects.use(p.id):
             # сквады: свои у проекта, иначе — общие сети (как их видит выдача подписки)
@@ -866,7 +1154,8 @@ def build_router(core: Any):
             "installed": bool(cfg.get("MINIAPP_DOMAIN")) or legacy, "legacy": legacy,
             "active": p.active, "domain": cfg.get("MINIAPP_DOMAIN") or (urlparse(p.miniapp_url).hostname or ""),
             "site_domain": cfg.get("SITE_DOMAIN", ""),
-            "server": ({"id": srv["id"], "ip": srv["ip"], "online": server_online(srv)} if srv else None),
+            "server": ({"id": 0, "ip": panel_ip(), "online": True, "local": True} if local else
+                       {"id": srv["id"], "ip": srv["ip"], "online": server_online(srv), "local": False} if srv else None),
             "install": install_view(p.id),
             "bot": {"token_set": bool(tok), "username": p.bot_username,
                     "token_hint": core._mask(tok.split(":", 1)[1]) if ":" in tok else ""},
@@ -898,6 +1187,7 @@ def build_router(core: Any):
             "servers": _servers_view(),
             "squads": [{"uuid": q["squad_uuid"], "name": q["squad_name"]} for q in squads],
             "admins": admins,
+            "panel_ip": panel_ip(), "local_caddy": local_caddy_ready() is not False,
         }
 
     @r.get("/api/panel/setup/install/{pid}")
@@ -908,7 +1198,7 @@ def build_router(core: Any):
     def setup_install(body: InstallBody = Body(...), p: dict = Depends(core.require_owner)) -> dict[str, Any]:
         try:
             out = start_install(body.project, ip=body.ip, server_id=body.server_id, domain=body.domain,
-                                site_domain=body.site_domain)
+                                site_domain=body.site_domain, local=body.local)
         except SetupError as e:
             raise _err(e)
         core.audit(p["actor"], p["name"], f"setup: установка {body.project} → {body.domain}")
@@ -927,8 +1217,7 @@ def build_router(core: Any):
         row = install_row(pid)
         if not row:
             raise HTTPException(404, detail={"message": "Установки нет"})
-        srv = server(row["server_id"])
-        if not server_online(srv):
+        if int(row["server_id"] or 0) != 0 and not server_online(server(row["server_id"])):
             raise HTTPException(400, detail={"message": "Сервер не на связи — проверьте службу blin-agent"})
         _start_install_task(pid)
         return {"install": install_view(pid)}

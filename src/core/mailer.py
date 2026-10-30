@@ -48,6 +48,7 @@ def config() -> dict:
         return {
             "mode": "agent", "host": "", "port": 25, "user": "", "password": "", "from": f"no-reply@{dom}",
             "from_name": _brand(), "domain": dom, "source": "miniapp", "server_id": route["server_id"], "ip": route["ip"],
+            "local": bool(route.get("local")),
         }
     try:
         import json
@@ -336,7 +337,7 @@ def send(to: str, subject: str, *, html: Optional[str] = None, text: Optional[st
     if cfg["mode"] == "smtp":
         return _send_via_relay(to, message)
     recipient_domain = to.split("@")[-1]
-    if cfg["mode"] == "agent":
+    if cfg["mode"] == "agent" and not cfg.get("local"):
         # подпись DKIM — здесь (ключ на главном), доставка на MX — с сервера мини-приложения (его IP в SPF)
         mx_ips = [ip for ip in (_resolve_public_ip(h) for h in _resolve_mx(recipient_domain)) if ip]
         if not mx_ips:
@@ -345,7 +346,8 @@ def send(to: str, subject: str, *, html: Optional[str] = None, text: Optional[st
                                    mx=list(dict.fromkeys(mx_ips)), message=message)
     timeout = float(_env("MAIL_TIMEOUT", "20") or 20)
     sender = mail_from()
-    ehlo = _ehlo_name()
+    # мини-приложение на сервере панели: письма уходят прямо отсюда, EHLO — домен мини-приложения (как у агента)
+    ehlo = cfg["domain"] if cfg["mode"] == "agent" else _ehlo_name()
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # starttls без проверки cert
