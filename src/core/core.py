@@ -7802,8 +7802,10 @@ def _bot_has_main_app() -> bool:
     return bool(val)
 
 
-def _payment_return_url(payment_id: str, in_telegram: bool, failed: bool = False) -> Optional[str]:
-    """куда ЮKassa вернёт после оплаты (сайт или мини-приложение)."""
+def _payment_return_url(payment_id: str, in_telegram: bool, failed: bool = False, origin: str = "") -> Optional[str]:
+    """куда ЮKassa вернёт после оплаты (сайт или мини-приложение).
+    origin — Origin запроса из браузера: если это домен проекта (сайт), возвращаем туда же —
+    вход на сайте хранится в его localStorage, на домене мини-приложения его нет."""
     if in_telegram and P().bot_username:
         tag = f"{'payfail' if failed else 'pay'}_{payment_id}"
         link = (P().miniapp_link or "").strip().rstrip("/")
@@ -7814,6 +7816,14 @@ def _payment_return_url(payment_id: str, in_telegram: bool, failed: bool = False
         # нет главного мини-приложения: кнопка «открыть» через бота
         return f"https://t.me/{P().bot_username}?start={tag}"
     suffix = "&result=fail" if failed else ""
+    try:
+        from urllib.parse import urlparse as _up
+        o = _up((origin or "").strip())
+        host = (o.hostname or "").lower()
+        if o.scheme == "https" and host and host in P().hosts:
+            return f"https://{o.netloc}/payment/return?payment_id={payment_id}{suffix}"
+    except ValueError:
+        pass
     if P().miniapp_url:
         return f"{P().miniapp_url}/payment/return?payment_id={payment_id}{suffix}"
     base = P().yookassa_return_url
@@ -7952,7 +7962,7 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
 
     # куда вернуть после оплаты: мини-приложение или сайт
     in_telegram = bool((request.headers.get("X-Telegram-Init-Data") or "").strip())
-    return_url = _payment_return_url(payment_id, in_telegram)
+    return_url = _payment_return_url(payment_id, in_telegram, origin=request.headers.get("Origin") or "")
     try:
         yp = client.create_payment(
             amount=float(charge),

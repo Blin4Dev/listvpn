@@ -1,6 +1,6 @@
 // FGN сайт: «/tariffs» — выбор тарифа (как в мини-аппе: устройства + период).
 // Цены — /api/app/plans (без входа); вошедшему — /payment/quote: минимум устройств с учётом текущей подписки.
-// Оплата на сайте пока не подключена — кнопка «Оформить» выключена.
+// «Оформить» → /checkout?months=&dev= (без входа — сначала /login?next=…).
 import React, { useEffect, useState } from "react";
 import { applyDiscount, appFetch, fetchDiscount, fetchQuote, type TariffPeriod } from "../utils/api";
 import { C } from "../components/fgn";
@@ -84,7 +84,7 @@ function StepIcon({ plus }: { plus?: boolean }) {
   );
 }
 
-export default function SiteTariffs({ authed }: { authed: boolean | null }) {
+export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | null; onCheckout: (months: number, dev: number) => void }) {
   const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
   const [included, setIncluded] = useState(2); // устройств в тарифе
   const [table, setTable] = useState<number[]>([]); // цена n-го устройства ₽/мес
@@ -210,7 +210,7 @@ export default function SiteTariffs({ authed }: { authed: boolean | null }) {
 
         {cur ? (
           <div className="fs-tar-card fs-tar-buy">
-            <button type="button" disabled title="Оплата на сайте скоро будет доступна">
+            <button type="button" onClick={() => onCheckout(cur.months, devNow)}>
               Оформить «{periodTitle(cur.months)}» · {rub(final(cur))}
             </button>
             {save > 0 ? <div className="fs-tar-save">Вы экономите {rub(save)}</div> : null}
@@ -218,7 +218,7 @@ export default function SiteTariffs({ authed }: { authed: boolean | null }) {
         ) : null}
 
         <div className="fs-tar-foot">
-          Оплата на сайте подключается в ближайшее время. После оформления подписка привяжется к вашему аккаунту.
+          Оплата картой или через СБП. После оплаты подписка сразу появится в личном кабинете.
         </div>
       </div>
     </section>

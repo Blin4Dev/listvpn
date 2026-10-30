@@ -2,7 +2,9 @@
 // В Telegram открывается мини-апп, в обычном браузере main.tsx рисует эту страницу.
 // Ссылки на установщики и версия — из /api/app/config → desktop (панель: Настройки → Проект → «Сайт»).
 // Страницы — по пути (history API, nginx/caddy отдают index.html): «/» — главная, «/support» — поддержка.
-// «/login» — вход, «/tariffs» — тарифы, «/download» — установка на любое устройство. «/rules» — правила. Кабинет — пока заглушка (LINKS ниже).
+// «/login» — вход, «/tariffs» — тарифы, «/download» — установка на любое устройство. «/rules» — правила.
+// «/cabinet…» — кабинет (SiteCabinet), «/cabinet/gifts», «/gifts/*» — подарки, «/cabinet/referral» — рефералка,
+// «/checkout» — оплата, «/payment/return» — возврат из ЮKassa. Без входа эти страницы ведут на /login?next=…
 import React, { useCallback, useEffect, useState } from "react";
 import { PROJECT_ID } from "../utils/brand";
 import { ApiError, appFetch, clearAppToken, getAppToken } from "../utils/api";
@@ -12,12 +14,16 @@ import SiteLogin, { LOGIN_CSS } from "./SiteLogin";
 import SiteTariffs, { TARIFFS_CSS } from "./SiteTariffs";
 import SiteRules, { RULES_CSS } from "./SiteRules";
 import SiteDownload, { DOWNLOAD_CSS } from "./SiteDownload";
+import SiteCabinet, { CABINET_CSS } from "./SiteCabinet";
+import SiteGifts, { GIFTS_CSS } from "./SiteGifts";
+import SiteReferral, { REFERRAL_CSS } from "./SiteReferral";
+import SiteCheckout, { CHECKOUT_CSS } from "./SiteCheckout";
+import { CAB_CSS, Loader, type CabNav } from "./siteKit";
 import type { CaptchaPublic } from "../components/CaptchaBox";
 
-// TODO: страницы кабинета / правил — позже
 const LINKS = {
   login: "/login",
-  cabinet: "#",
+  cabinet: "/cabinet",
   tariffs: "/tariffs",
   rules: "/rules",
   support: "/support",
@@ -36,7 +42,7 @@ function usePath() {
   const go = useCallback((href: string) => {
     const u = new URL(href, window.location.origin);
     const next = u.pathname.replace(/\/+$/, "") || "/";
-    if (u.pathname + u.hash !== window.location.pathname + window.location.hash) {
+    if (u.pathname + u.search + u.hash !== window.location.pathname + window.location.search + window.location.hash) {
       window.history.pushState(null, "", u.pathname + u.search + u.hash);
     }
     setPath(next);
@@ -385,11 +391,19 @@ export default function Site() {
   const [menu, setMenu] = useState(false);
   const mac = detectMac();
   const page = path === "/support" ? "support" : path === "/login" ? "login" : path === "/tariffs" ? "tariffs"
-    : path === "/download" ? "download" : path === "/rules" ? "rules" : "home";
+    : path === "/download" ? "download" : path === "/rules" ? "rules"
+      : path === "/cabinet/referral" ? "referral"
+        : path === "/cabinet/gifts" || path.startsWith("/gifts/") ? "gifts"
+          : path === "/cabinet" || path.startsWith("/cabinet/") ? "cabinet"
+            : path === "/checkout" || path === "/payment/return" ? "checkout" : "home";
+  // страницы только для вошедших
+  const privatePage = page === "cabinet" || page === "gifts" || page === "referral" || page === "checkout";
 
   useEffect(() => {
     document.title =
       page === "support" ? "Поддержка — FGN" : page === "login" ? "Вход — FGN" : page === "tariffs" ? "Тарифы — FGN" : page === "download" ? "Скачать — FGN" : page === "rules" ? "Правила использования — FGN"
+        : page === "cabinet" ? "Кабинет — FGN" : page === "gifts" ? "Подарки — FGN" : page === "referral" ? "Реферальная программа — FGN"
+          : page === "checkout" ? "Оплата — FGN"
         : "FGN — быстрый и надёжный VPN";
   }, [page]);
 
@@ -397,6 +411,11 @@ export default function Site() {
   useEffect(() => {
     if (page === "login" && authed) go(loginNext());
   }, [page, authed, go]);
+
+  // закрытая страница без входа — на вход с возвратом сюда (вместе с ?параметрами)
+  useEffect(() => {
+    if (privatePage && authed === false) go(`${LINKS.login}?next=${encodeURIComponent(path + window.location.search)}`);
+  }, [privatePage, authed, path, go]);
 
   // первый заход по /#download и т.п.
   useEffect(() => {
@@ -425,7 +444,13 @@ export default function Site() {
     else go("/");
   };
   // «Войти» запоминает, куда вернуть после входа (/login?next=/support)
-  const loginHref = page === "home" || page === "login" ? LINKS.login : `${LINKS.login}?next=${encodeURIComponent(path)}`;
+  const loginHref = page === "home" || page === "login" ? LINKS.login : `${LINKS.login}?next=${encodeURIComponent(path + window.location.search)}`;
+  const cabNav: CabNav = { go, expired };
+  // «Оформить» на тарифах: вошёл — к оплате, нет — сначала вход
+  const checkout = (months: number, dev: number) => {
+    const to = `/checkout?months=${months}&dev=${dev}`;
+    go(authed ? to : `${LINKS.login}?next=${encodeURIComponent(to)}`);
+  };
   const account = authed ? { href: LINKS.cabinet, label: "Кабинет" } : { href: loginHref, label: "Войти" };
 
   const fallback = bot ? `https://t.me/${bot}` : "#";
@@ -456,7 +481,7 @@ export default function Site() {
 
   return (
     <div className="fs">
-      <style>{CSS + SUPPORT_CSS + LOGIN_CSS + TARIFFS_CSS + DOWNLOAD_CSS + RULES_CSS}</style>
+      <style>{CSS + SUPPORT_CSS + LOGIN_CSS + TARIFFS_CSS + DOWNLOAD_CSS + RULES_CSS + CAB_CSS + CABINET_CSS + GIFTS_CSS + REFERRAL_CSS + CHECKOUT_CSS}</style>
 
       {DOTS.map((d, i) => (
         <div
@@ -489,7 +514,7 @@ export default function Site() {
           <Logo onClick={link("/").onClick} />
           <nav className="fs-nav">
             {nav.map((n) => (
-              <a key={n.label} {...link(n.href)} className={n.href === path ? "on" : undefined}>
+              <a key={n.label} {...link(n.href)} className={n.href === path || (n.href === LINKS.tariffs && path === "/checkout") ? "on" : undefined}>
                 {n.label}
               </a>
             ))}
@@ -523,14 +548,24 @@ export default function Site() {
         </div>
       ) : null}
 
-      {page === "login" ? (
+      {privatePage && authed !== true ? (
+        <main className="fs-cab"><Loader /></main>
+      ) : page === "cabinet" ? (
+        <SiteCabinet path={path} nav={cabNav} desktop={desktop} />
+      ) : page === "gifts" ? (
+        <SiteGifts path={path} nav={cabNav} />
+      ) : page === "referral" ? (
+        <SiteReferral nav={cabNav} />
+      ) : page === "checkout" ? (
+        <SiteCheckout path={path} nav={cabNav} />
+      ) : page === "login" ? (
         <SiteLogin botId={botId} captcha={captcha} onAuthed={signedIn} />
       ) : page === "download" ? (
         <SiteDownload desktop={desktop} authed={authed} email={LINKS.email} onLogin={() => go(loginHref)} />
       ) : page === "rules" ? (
         <SiteRules email={LINKS.email} />
       ) : page === "tariffs" ? (
-        <SiteTariffs authed={authed} />
+        <SiteTariffs authed={authed} onCheckout={checkout} />
       ) : page === "support" ? (
         <SiteSupport
           bot={bot}

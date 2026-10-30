@@ -11,8 +11,8 @@ type Desktop = { windows_url?: string; macos_url?: string; version?: string };
 type App = AppKind | "fgn";
 type Step = "pick" | "install" | "add" | "link" | "fgn" | "done";
 
-const DEVICES: DeviceKind[] = ["ios", "android", "windows", "macos", "linux", "android_tv"];
-const DEVICE_NOTE: Record<DeviceKind, string> = {
+export const DEVICES: DeviceKind[] = ["ios", "android", "windows", "macos", "linux", "android_tv"];
+export const DEVICE_NOTE: Record<DeviceKind, string> = {
   ios: "iPhone и iPad · App Store",
   android: "Смартфоны и планшеты · Google Play",
   windows: "Windows 10/11 · 64-bit",
@@ -104,7 +104,7 @@ export const DOWNLOAD_CSS = `
 @media (max-width: 420px) { .fs-dlp h1 { font-size: 30px; } }
 `;
 
-function Svg({ children, size = 30, stroke = 1.6 }: { children: React.ReactNode; size?: number; stroke?: number }) {
+export function Svg({ children, size = 30, stroke = 1.6 }: { children: React.ReactNode; size?: number; stroke?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke}
       strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: "block", flexShrink: 0 }}>
@@ -113,7 +113,7 @@ function Svg({ children, size = 30, stroke = 1.6 }: { children: React.ReactNode;
   );
 }
 
-function DeviceIcon({ d }: { d: DeviceKind }) {
+export function DeviceIcon({ d }: { d: DeviceKind }) {
   switch (d) {
     case "ios":
     case "android":
@@ -129,11 +129,11 @@ function DeviceIcon({ d }: { d: DeviceKind }) {
   }
 }
 
-const IcBack = () => <Svg size={18} stroke={2}><path d="M15 5l-7 7 7 7" /></Svg>;
-const IcClose = () => <Svg size={18} stroke={2}><path d="M6 6l12 12M18 6L6 18" /></Svg>;
-const IcChevron = () => <span style={{ color: "#6E6E78", display: "flex" }}><Svg size={17} stroke={2.2}><path d="M9 5l7 7-7 7" /></Svg></span>;
-const IcDownload = () => <Svg size={18} stroke={2}><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" /></Svg>;
-const IcCopy = () => <Svg size={18} stroke={2}><rect x="8.5" y="8.5" width="11" height="11" rx="2.2" /><path d="M15.5 8.5V6.2a1.7 1.7 0 0 0-1.7-1.7H6.2a1.7 1.7 0 0 0-1.7 1.7v7.6c0 .94.76 1.7 1.7 1.7h2.3" /></Svg>;
+export const IcBack = () => <Svg size={18} stroke={2}><path d="M15 5l-7 7 7 7" /></Svg>;
+export const IcClose = () => <Svg size={18} stroke={2}><path d="M6 6l12 12M18 6L6 18" /></Svg>;
+export const IcChevron = () => <span style={{ color: "#6E6E78", display: "flex" }}><Svg size={17} stroke={2.2}><path d="M9 5l7 7-7 7" /></Svg></span>;
+export const IcDownload = () => <Svg size={18} stroke={2}><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" /></Svg>;
+export const IcCopy = () => <Svg size={18} stroke={2}><rect x="8.5" y="8.5" width="11" height="11" rx="2.2" /><path d="M15.5 8.5V6.2a1.7 1.7 0 0 0-1.7-1.7H6.2a1.7 1.7 0 0 0-1.7 1.7v7.6c0 .94.76 1.7 1.7 1.7h2.3" /></Svg>;
 const IcLink = () => <Svg size={20} stroke={1.8}><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1" /></Svg>;
 
 function AppIc({ app }: { app: App }) {
@@ -144,7 +144,7 @@ function AppIc({ app }: { app: App }) {
 
 const appTitle = (a: App) => (a === "fgn" ? "FGN" : APP_META[a].title);
 
-function SetupDialog({
+export function SetupDialog({
   device, fgnUrl, authed, onLogin, onClose,
 }: {
   device: DeviceKind;
