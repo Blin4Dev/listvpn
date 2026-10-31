@@ -42,10 +42,11 @@ INVITE_TTL_DAYS = 30  # непринятое приглашение стольк
 class FamilyError(Exception):
     """ошибка с текстом для пользователя (уходит в detail.message)"""
 
-    def __init__(self, message: str, status: int = 400) -> None:
+    def __init__(self, message: str, status: int = 400, code: str = "family_error") -> None:
         super().__init__(message)
         self.message = message
         self.status = int(status)
+        self.code = code  # машинный код для API v1 (already_in_family, family_full …)
 
 
 def _now() -> str:
@@ -330,7 +331,8 @@ def _room(project_id: Optional[str]) -> int:
 
 
 def _no_room(limit: int) -> FamilyError:
-    return FamilyError(f"В семье уже максимум участников ({limit}). Удалите кого-нибудь, чтобы добавить нового.")
+    return FamilyError(f"В семье уже максимум участников ({limit}). Удалите кого-нибудь, чтобы добавить нового.",
+                       code="family_full")
 
 
 def _insert_member(project_id: str, owner_id: int, member_id: Optional[int], invite_query: Optional[str],
@@ -507,7 +509,7 @@ def join(user: dict[str, Any], raw_code: Any) -> dict[str, Any]:
     """
     code = normalize_code(raw_code)
     if len(code) < 4:
-        raise FamilyError("Введите код семьи")
+        raise FamilyError("Введите код семьи", code="code_required")
     project_id = projects.of(user)
     uid = int(user["id"])
     row = db.fetchone("SELECT owner_id, project_id FROM family_codes WHERE code = ?", (code,))
@@ -517,25 +519,25 @@ def join(user: dict[str, Any], raw_code: Any) -> dict[str, Any]:
         # не мастер-код: возможно, это персональный токен из приглашения
         found = _token_owner_id(user, code, project_id)
         if found is None:
-            raise FamilyError("Код не найден. Проверьте, что он введён верно")
+            raise FamilyError("Код не найден. Проверьте, что он введён верно", 404, "code_not_found")
         owner_id = found
     if owner_id == uid:
-        raise FamilyError("Это ваш код — вы уже владелец семьи")
+        raise FamilyError("Это ваш код — вы уже владелец семьи", 409, "already_in_family")
     owner = db.fetchone("SELECT * FROM users WHERE id = ?", (owner_id,))
     if not owner or owner.get("is_banned") or projects.of(owner) != project_id:
-        raise FamilyError("Семья недоступна")
+        raise FamilyError("Семья недоступна", code="family_unavailable")
     if not has_paid_sub(owner_id):
-        raise FamilyError("У владельца семьи сейчас нет активной подписки")
+        raise FamilyError("У владельца семьи сейчас нет активной подписки", code="owner_no_subscription")
 
     current = active_owner_id(uid)
     if current == owner_id:
         return {"owner_id": owner_id, "owner_name": _label(owner), "code": code}
     if current is not None:
-        raise FamilyError("Вы уже состоите в семье — сначала выйдите из неё")
+        raise FamilyError("Вы уже состоите в семье — сначала выйдите из неё", 409, "in_other_family")
     if has_members(uid):
-        raise FamilyError("У вас своя семья — сначала удалите из неё участников")
+        raise FamilyError("У вас своя семья — сначала удалите из неё участников", 409, "has_own_family")
     if has_live_sub(uid):
-        raise FamilyError("У вас есть своя активная подписка — она важнее семейной")
+        raise FamilyError("У вас есть своя активная подписка — она важнее семейной", 409, "has_own_subscription")
 
     cands = _candidates(user)
     low = [c.lower() for c in cands]
@@ -567,7 +569,7 @@ def join(user: dict[str, Any], raw_code: Any) -> dict[str, Any]:
             )
     except sqlite3.IntegrityError:
         # параллельный вход того же аккаунта уже создал активную запись
-        raise FamilyError("Вы уже в семье") from None
+        raise FamilyError("Вы уже в семье", 409, "already_in_family") from None
     return {"owner_id": owner_id, "owner_name": _label(owner), "code": code}
 
 

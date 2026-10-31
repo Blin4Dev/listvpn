@@ -124,7 +124,7 @@ def _pair(user_id: int, sid: str, refresh: str, now: float, refresh_exp: float) 
     }
 
 
-def create_session(user_id: int, ip: str = "", user_agent: str = "") -> dict[str, Any]:
+def create_session(user_id: int, ip: str = "", user_agent: str = "", app_key_id: Optional[int] = None) -> dict[str, Any]:
     now = time.time()
     sid = secrets.token_urlsafe(18)
     refresh = secrets.token_urlsafe(48)
@@ -135,6 +135,9 @@ def create_session(user_id: int, ip: str = "", user_agent: str = "") -> dict[str
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (sid, int(user_id), _sha(refresh), now, exp, now, (ip or "")[:64], (user_agent or "")[:256]),
         )
+        if app_key_id:
+            # каким ключом приложения выдана сессия (колонку добавляет apiv1_app.ensure_schema)
+            conn.execute("UPDATE api_sessions SET app_key_id = ? WHERE id = ?", (int(app_key_id), sid))
         # не больше MAX_SESSIONS_PER_USER живых сессий: старые отзываем
         conn.execute(
             "UPDATE api_sessions SET revoked_at = ?, revoke_reason = 'too_many_sessions' "

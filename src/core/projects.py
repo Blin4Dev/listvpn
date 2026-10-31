@@ -71,6 +71,8 @@ PROJECT_SETTING_KEYS = frozenset({
     "notconn_hours", "winback_after_days", "winback_gift_days",
     # сайт проекта (features.site): приложения для компьютера
     "desktop_windows_url", "desktop_macos_url", "desktop_version",
+    # мобильное приложение (API v1): панель → Настройки → «Приложение (API)»
+    "app_api_enabled", "app_key_required", "app_payment_return_url", "app_invite_url", "app_whitelist_included",
 })
 PROJECT_SETTING_PREFIXES = ("period_price_", "period_stars_")
 

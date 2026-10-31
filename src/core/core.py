@@ -107,6 +107,11 @@ except ImportError:  # pragma: no cover
     import resale  # type: ignore
 
 try:
+    from . import apiv1_app  # type: ignore
+except ImportError:  # pragma: no cover
+    import apiv1_app  # type: ignore
+
+try:
     from . import support  # type: ignore
     from . import s3store  # type: ignore
     from . import captcha as captcha_mod  # type: ignore
@@ -205,7 +210,8 @@ app.add_middleware(
     allow_credentials=not _cors_wildcard,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Telegram-Init-Data",
-                   "X-App-Session", "X-Panel-Setup-Token", "X-Project"],
+                   "X-App-Session", "X-Panel-Setup-Token", "X-Project",
+                   "X-App-Key", "X-HWID", "X-Device-OS", "X-Device-OS-Version", "X-Device-Model"],
 )
 
 
@@ -6096,6 +6102,114 @@ def panel_resale_cancel(mid: int, body: ResaleCancelBody, request: Request, p: d
     return {"success": True, **r}
 
 
+# ── «Приложение (API)»: API v1 для мобильного приложения проекта (core/apiv1.py, apiv1_app.py) ──
+
+class AppApiSettingsBody(BaseModel):
+    enabled: Optional[bool] = None
+    key_required: Optional[bool] = None
+    return_url: Optional[str] = Field(None, max_length=320)
+    invite_url: Optional[str] = Field(None, max_length=320)
+    whitelist_included: Optional[bool] = None
+
+
+class AppKeyBody(BaseModel):
+    name: str = Field("", max_length=60)
+
+
+class AppSessionsRevokeBody(BaseModel):
+    confirm: str = Field(..., max_length=40)
+
+
+def _app_api_view() -> dict[str, Any]:
+    apiv1_app.ensure_schema()
+    pid = db.pid()
+    bases: list[str] = []
+    for u in (P().miniapp_url, P().site_url):
+        if u and f"{u}/api/v1" not in bases:
+            bases.append(f"{u}/api/v1")
+    api_domain = (os.getenv("API_DOMAIN") or "").strip().lower()
+    if api_domain and re.fullmatch(r"[a-z0-9.-]{3,253}", api_domain):
+        bases.append(f"https://{api_domain}")
+    hook = (os.getenv("WEBHOOK_DOMAIN") or "").strip().lower()
+    hook_base = f"https://{hook}" if hook and re.fullmatch(r"[a-z0-9.-]{3,253}", hook) else (P().miniapp_url or "")
+    return {
+        "project": {"id": pid, "name": P().name},
+        "settings": apiv1_app.settings_view(pid),
+        "keys": apiv1_app.list_keys(pid),
+        "sessions_active": apiv1_app.sessions_count(pid),
+        "base_urls": bases,
+        "webhook_url": f"{hook_base}/webhooks/payments/yookassa" if hook_base else None,
+    }
+
+
+@app.get("/api/panel/app-api")
+def panel_app_api(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return _app_api_view()
+
+
+@app.put("/api/panel/app-api")
+def panel_app_api_save(body: AppApiSettingsBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    apiv1_app.ensure_schema()
+    pid = db.pid()
+    for name, val in (("Адрес возврата после оплаты", body.return_url), ("Ссылка-приглашение", body.invite_url)):
+        if val is not None and not apiv1_app.valid_url(val):
+            raise HTTPException(400, detail={"message": f"{name}: нужен https://… или ссылка приложения вида fgn://…"})
+    if body.key_required and apiv1_app.active_keys_count(pid) == 0:
+        raise HTTPException(400, detail={"message": "Сначала создайте ключ приложения — иначе приложение не сможет войти"})
+    if body.enabled is not None:
+        db.set_setting(apiv1_app.S_ENABLED, "1" if body.enabled else "0", project=pid)
+    if body.key_required is not None:
+        db.set_setting(apiv1_app.S_KEY_REQUIRED, "1" if body.key_required else "0", project=pid)
+    if body.return_url is not None:
+        db.set_setting(apiv1_app.S_RETURN_URL, body.return_url.strip(), project=pid)
+    if body.invite_url is not None:
+        db.set_setting(apiv1_app.S_INVITE_URL, body.invite_url.strip(), project=pid)
+    if body.whitelist_included is not None:
+        db.set_setting(apiv1_app.S_WHITELIST, "1" if body.whitelist_included else "0", project=pid)
+    audit(p.get("actor") or "owner", p.get("name"), f"app_api_settings {pid}", 200, _client_ip(request))
+    return _app_api_view()
+
+
+@app.post("/api/panel/app-api/keys")
+def panel_app_key_create(body: AppKeyBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        k = apiv1_app.create_key(body.name, p.get("username") or p.get("actor") or "owner", db.pid())
+    except ValueError as exc:
+        raise HTTPException(400, detail={"message": str(exc)})
+    audit(p.get("actor") or "owner", p.get("name"), f"app_key_create {db.pid()} #{k['id']}", 200, _client_ip(request))
+    # сам ключ — только в этом ответе: в БД лежит хеш
+    return {"key": k, **_app_api_view()}
+
+
+@app.delete("/api/panel/app-api/keys/{key_id}")
+def panel_app_key_revoke(key_id: int, request: Request, revoke_sessions: bool = Query(False),
+                         p: dict = Depends(require_owner)) -> dict[str, Any]:
+    pid = db.pid()
+    apiv1_app.ensure_schema()
+    row = db.fetchone("SELECT revoked_at FROM app_keys WHERE id = ? AND project_id = ?", (int(key_id), pid))
+    if row and not row.get("revoked_at") and apiv1_app.key_required(pid) and apiv1_app.active_keys_count(pid) <= 1:
+        raise HTTPException(400, detail={"message": "Это последний ключ, а ключ обязателен — сначала создайте новый "
+                                                    "или выключите «Требовать ключ»"})
+    try:
+        r = apiv1_app.revoke_key(int(key_id), bool(revoke_sessions), pid)
+    except LookupError as exc:
+        raise HTTPException(404, detail={"message": str(exc)})
+    audit(p.get("actor") or "owner", p.get("name"), f"app_key_revoke {pid} #{key_id} sessions={r['sessions_revoked']}",
+          200, _client_ip(request))
+    return {"result": r, **_app_api_view()}
+
+
+@app.post("/api/panel/app-api/sessions/revoke")
+def panel_app_sessions_revoke(body: AppSessionsRevokeBody, request: Request,
+                              p: dict = Depends(require_owner)) -> dict[str, Any]:
+    pid = db.pid()
+    if body.confirm.strip().lower() != pid:
+        raise HTTPException(400, detail={"message": f"Для подтверждения введите {pid}"})
+    n = apiv1_app.revoke_project_sessions(pid)
+    audit(p.get("actor") or "owner", p.get("name"), f"app_sessions_revoke {pid} n={n}", 200, _client_ip(request))
+    return {"revoked": n, **_app_api_view()}
+
+
 @app.get("/api/panel/remnawave/squads")
 def panel_remnawave_squads(_: dict = Depends(require_owner)) -> list[dict[str, Any]]:
     rows = db.fetchall("SELECT squad_uuid, squad_name FROM squads WHERE is_active = 1")
@@ -6759,8 +6873,20 @@ def app_auth_email_request(body: EmailRequestBody, request: Request = None) -> d
     if not _valid_email(email):
         raise HTTPException(400, detail={"message": "Введите корректный email"})
     _require_captcha(body.captcha_token, request)
+    _email_send_limits(email, request)
 
-    # лимиты писем на адрес и с ip
+    code, throttled = create_email_code(email)
+    if not throttled:
+        send_login_code(email, code)
+    resp: dict[str, Any] = {"ok": True, "throttled": throttled, "resend_after": EMAIL_CODE_RESEND}
+    # без smtp отдаём код для отладки (не в проде)
+    if ENV != "production" and not mailer.is_configured():
+        resp["dev_code"] = code
+    return resp
+
+
+def _email_send_limits(email: str, request: Optional[Request]) -> None:
+    """лимиты писем с кодом входа на адрес и с ip (мини-приложение и API v1 — общие)."""
     ip = _client_ip(request) or "unknown"
     allowed, retry = ratelimit.rate_limit(f"emailcode:{email}:{ip}", 3, 300)
     if allowed:
@@ -6774,16 +6900,8 @@ def app_auth_email_request(body: EmailRequestBody, request: Request = None) -> d
                 allowed, retry = ratelimit.rate_limit(f"emailcode_iphour:{ip}", 30, 3600)
     if not allowed:
         wait = f"{retry} сек." if retry < 90 else f"{math.ceil(retry / 60)} мин."
-        raise HTTPException(429, detail={"message": f"Слишком много запросов. Повторите через {wait}"})
-
-    code, throttled = create_email_code(email)
-    if not throttled:
-        send_login_code(email, code)
-    resp: dict[str, Any] = {"ok": True, "throttled": throttled, "resend_after": EMAIL_CODE_RESEND}
-    # без smtp отдаём код для отладки (не в проде)
-    if ENV != "production" and not mailer.is_configured():
-        resp["dev_code"] = code
-    return resp
+        raise HTTPException(429, detail={"message": f"Слишком много запросов. Повторите через {wait}",
+                                         "code": "rate_limited", "retry_after_seconds": retry})
 
 
 def _email_verify_limits(email: str, request: Optional[Request]) -> None:
@@ -8035,6 +8153,10 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
     # куда вернуть после оплаты: мини-приложение или сайт
     in_telegram = bool((request.headers.get("X-Telegram-Init-Data") or "").strip())
     return_url = _payment_return_url(payment_id, in_telegram, origin=request.headers.get("Origin") or "")
+    # приложение (API v1): свой адрес возврата из панели — «Приложение (API)»
+    app_tpl = getattr(getattr(request, "state", None), "pay_return_url", None)
+    if app_tpl:
+        return_url = str(app_tpl).replace("{payment_id}", payment_id)
     try:
         yp = client.create_payment(
             amount=float(charge),
@@ -9713,6 +9835,7 @@ app.include_router(miniapps.build_router(_sys.modules[__name__]))
 def _apiv1_startup() -> None:
     try:
         apiv1_store.ensure()
+        apiv1_app.ensure_schema()
     except Exception as exc:  # noqa: BLE001
         print(f"[api-v1] init failed: {type(exc).__name__}: {exc}", flush=True)
     # ключ подписи токенов: короткий API_TOKEN_SECRET — ошибка сразу при старте, а не на первом запросе

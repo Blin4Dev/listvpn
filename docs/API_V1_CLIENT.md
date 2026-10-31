@@ -37,7 +37,30 @@ Content-Type: application/json
 }
 ```
 
-Если пользователь вошёл по email, вместо `init_data` передаётся `{"session_token": "..."}` (токен из `/api/app/auth/email/verify`).
+**Вход по почте** (мобильное приложение, вместо Telegram):
+
+```http
+POST {BASE}/auth/email/send
+{"email": "user@mail.ru"}
+→ {"ok": true, "resend_after": 60, "code_ttl": 600}
+
+POST {BASE}/auth/email/verify
+{"email": "user@mail.ru", "code": "123456", "ref": "123"}      // ref — реф. код, только для нового аккаунта, необязательно
+→ {"session_token": "lt_...", "expires_in": 600, "is_new_user": true}
+```
+
+Полученный `session_token` сразу отправьте в `POST {BASE}/auth/token` вместо `init_data`: `{"session_token": "lt_..."}` — в ответ та же пара токенов. Билет одноразовый и живёт 10 минут.
+
+Ошибки: `400 bad_email`, `401 code_invalid` (неверный/истёкший код), `403 account_banned`, `429 rate_limited` (подождать `retry_after_seconds`). Если в панели включена капча, а запрос идёт без ключа приложения, нужен `captcha_token`.
+
+**Заголовки приложения.** Мобильное приложение шлёт в каждом запросе:
+
+| Заголовок | Что | Когда нужен |
+|---|---|---|
+| `X-App-Key` | ключ приложения из панели (Настройки → «Приложение (API)») | если в панели включено «Требовать ключ»; с ключом не нужна капча |
+| `X-HWID` | постоянный id устройства, 8–128 символов `[A-Za-z0-9._:-]` | для получения `config` в `/subscription` |
+| `X-Device-OS`, `X-Device-OS-Version`, `X-Device-Model` | `iOS`, `17.5`, `iPhone 15` | необязательно — имя устройства в списке |
+| `X-Project` | id проекта | только на общем домене API (адрес показан в панели) |
 
 **Шаг 2. Слать запросы с заголовком:**
 
@@ -64,12 +87,25 @@ Content-Type: application/json
 
 | Метод | Путь | Токен | Что делает |
 |---|---|---|---|
+| POST | `/auth/email/send` | — | код на почту |
+| POST | `/auth/email/verify` | — | проверить код → `session_token` |
 | POST | `/auth/token` | — | вход, получить токены |
 | POST | `/auth/refresh` | — | обновить токены |
 | POST | `/auth/logout` | да | выход |
-| GET | `/subscription` | да | статус подписки и ссылка |
+| GET | `/users/me` | да | профиль |
+| POST | `/users/me/terms` | да | принять оферту (без этого оплата недоступна) |
+| GET | `/subscription` | да | статус подписки, `config`, трафик, статистика сетей |
 | POST | `/subscription/resync` | да | «ссылка не работает» — перевыпустить из панели |
 | GET | `/tariffs` | — | тарифы |
+| POST | `/purchases/yookassa/create` | да | оплата тарифа → ссылка на ЮKassa |
+| POST | `/purchases/hwid-slot/create` | да | докупить слоты устройств |
+| GET | `/purchases/{id}/status` | да | статус оплаты (поллинг) |
+| GET | `/family` | да | семья: устройства, гости, лимит |
+| POST | `/family/invite` | да | код/ссылка приглашения |
+| POST | `/family/join` | да | войти в семью по коду |
+| DELETE | `/family/members/{user_id}` | да | владелец удаляет гостя |
+| DELETE | `/family/members/me` (= `POST /family/leave`) | да | гость выходит сам |
+| DELETE | `/family/devices/{device_id}` | да | отвязать устройство |
 | GET | `/referrals/me` | да | реферальная статистика |
 | POST | `/referrals/withdrawals` | да | заявка на вывод |
 | GET | `/tasks` | да | задания |
@@ -83,11 +119,23 @@ Content-Type: application/json
 ```json
 {
   "state": "active",
+  "status": "active",
   "expires_at": "2030-01-01T00:00:00Z",
   "subscription_url": "https://sub.example.com/hIeb",
-  "retry_after_seconds": null
+  "retry_after_seconds": null,
+  "config": "vless://...#NL\nvless://...#DE",
+  "config_error": null,
+  "traffic": {"used_bytes": 134217728000, "limit_bytes": 536870912000, "whitelist_active": true},
+  "network_stats": {"lte_days": 12, "wifi_days": 17, "period_days": 30}
 }
 ```
+
+- `status` — то же, что `state`.
+- `config` — ключи подключения открытым текстом, по строке на сервер (шифрования больше нет, поля `encrypted_config` нет). Приходит только при `active` и только с заголовком `X-HWID`: устройство при этом регистрируется в подписке (занимает слот). При `provisioning`, `expired`, `disabled` — `null`.
+- `config_error` — почему `config` нет при `active`: `hwid_required` (не передан `X-HWID`), `hwid_limit_reached` (все слоты заняты — отвязать устройство или докупить слот), `unavailable` (панель не ответила — повторить позже).
+- `traffic.limit_bytes` — `0`, если трафик не ограничен; `used_bytes`/`limit_bytes` — `null`, если узнать не удалось.
+- `network_stats` — сколько дней из последних 30 VPN был включён через мобильную сеть / Wi-Fi (по телеметрии с полем `network`).
+- Гость семьи получает подписку владельца.
 
 | `state` | Что показать |
 |---|---|
@@ -102,7 +150,90 @@ Content-Type: application/json
 
 Тело не нужно. Сервер отвечает `202` и возвращает тот же объект, что `GET /subscription`, обычно со `state: "provisioning"`. Дальше опрашивайте `GET /subscription` каждые `retry_after_seconds` секунд, пока не придёт `active` с новой ссылкой.
 
-Ошибки: `409` — подписка истекла, `403` — заблокирована.
+Ошибки: `409` — подписка истекла, `403` — заблокирована, `403 family_member` — гость семьи (перевыпускает владелец).
+
+### GET /users/me
+
+```json
+{
+  "id": 123, "telegram_id": 555000111, "telegram_username": "ivan", "email": "ivan@mail.ru",
+  "registered_at": "2026-01-01T10:00:00Z", "terms_accepted": true, "is_banned": false,
+  "family_role": "owner", "project": {"id": "fgn", "name": "FGN"}
+}
+```
+
+`family_role`: `owner` | `member` | `none`. `POST /users/me/terms` — принять оферту и политику, ответ тот же.
+
+### POST /purchases/yookassa/create
+
+```json
+{"tariff_code": "m1", "extra_devices": 0, "use_referral_balance": false}
+```
+
+Ответ `201`:
+
+```json
+{"purchase_id": "a1b2c3", "payment_url": "https://yoomoney.ru/checkout/...", "status": "pending",
+ "amount": 180, "full_price": 180, "referral_applied": 0, "currency": "RUB"}
+```
+
+Откройте `payment_url` во внешнем браузере. После оплаты ЮKassa вернёт на адрес из панели (например `fgn://payment?id=...`). Если всё оплачено реферальным балансом — `status: "succeeded"`, `payment_url: null`.
+
+Ошибки: `403 terms_not_accepted` (сначала `POST /users/me/terms`), `404 tariff_not_found`, `503 payments_unavailable`.
+
+### POST /purchases/hwid-slot/create
+
+```json
+{"count": 1, "months": 1}
+```
+
+Докупка слотов устройств к своей платной подписке; `months` — 1, 3, 6 или 12. Ответ как у `/purchases/yookassa/create`. После оплаты растёт `hwid_limit`. Ошибки: `403 family_member` (докупает владелец), `409 no_subscription`, `422 bad_months`.
+
+### GET /purchases/{id}/status
+
+```json
+{"purchase_id": "a1b2c3", "status": "pending", "purpose": "subscription", "amount": 180, "currency": "RUB",
+ "payment_url": "https://yoomoney.ru/...", "paid_at": null, "expires_at": null}
+```
+
+`status`: `pending` | `succeeded` | `failed` | `canceled`. Опрашивайте раз в 3–5 секунд, пока `pending`. При `succeeded` в `expires_at` — новый срок подписки. Подписку продлевает вебхук ЮKassa; поллинг лишь показывает результат (и заодно перепроверяет платёж в ЮKassa).
+
+### GET /family
+
+```json
+{
+  "role": "owner", "is_owner": true,
+  "owner": {"user_id": 123, "display_name": "@ivan"},
+  "used_hwids": 3, "hwid_limit": 5, "devices_available": true,
+  "devices": [{"id": "hwid-...", "name": "iPhone 15 · 17.5", "platform": "iOS",
+               "last_seen_at": "2026-10-30T10:00:00Z", "user_id": 123, "is_mine": true, "can_delete": true}],
+  "members": [{"user_id": 456, "display_name": "@petr", "used_hwids": 1, "joined_at": "2026-10-01T12:00:00Z"}],
+  "max_members": 5, "can_invite": true,
+  "invite": {"code": "AB12CD", "link": "https://.../family?code=AB12CD"}
+}
+```
+
+Лимит общий: устройства владельца и всех гостей вместе (`used_hwids / hwid_limit`). `devices[].id` — это HWID, его передают в `DELETE /family/devices/{id}`. `devices_available: false` — список устройств сейчас не получить.
+
+### POST /family/invite
+
+Тело необязательно: `{"rotate": true}` — выдать новый код (старый перестанет работать). Ответ: `{"code": "AB12CD", "invite_link": "..."}`. Только владелец с платной подпиской.
+
+### POST /family/join
+
+`{"code": "AB12CD"}` → объект как у `GET /family`.
+
+Ошибки: `409 already_in_family` (свой код или уже в этой семье), `409 in_other_family`, `409 has_own_family`, `409 has_own_subscription`, `404 code_not_found`, `400 family_full | owner_no_subscription`.
+
+### DELETE /family/members/{user_id}, DELETE /family/members/me, POST /family/leave
+
+Владелец удаляет гостя — ответ как у `GET /family`. Гость выходит сам (`/members/me` или `/leave`) — `{"ok": true}`, `409 not_in_family`, если не в семье.
+
+Когда гость уходит, ключ владельца перевыпускается и **все** устройства подписки отвязываются (иначе у ушедшего остался бы рабочий ключ) — приложения получат новый `config` при следующем `GET /subscription`.
+
+### DELETE /family/devices/{device_id}
+
+Отвязать устройство и освободить слот. Владелец — любое, гость — только своё (`403 not_your_device`). Ответ как у `GET /family`. `404 device_not_found`, `503 devices_unavailable`.
 
 ### GET /tariffs
 
@@ -170,8 +301,10 @@ Content-Type: application/json
 Нужно для заданий вида «проведи 15 минут в VPN».
 
 ```json
-{"session_id": "c0a8012e-...", "node_name": "DE-Frankfurt"}
+{"session_id": "c0a8012e-...", "node_name": "DE-Frankfurt", "network": "wifi"}
 ```
+
+`network` — необязательно: `wifi` или `lte` (`cellular`, `4g`, `5g` тоже понимаются как `lte`). Из него считается `network_stats`.
 
 Ответ: `{"ok": true}`.
 
@@ -195,7 +328,9 @@ Content-Type: application/json
 | HTTP | Что делать |
 |---|---|
 | 401 `token_expired` | вызвать `/auth/refresh` и повторить запрос |
+| 401 `app_key_invalid` | ключ приложения отозван/неверный — обновить приложение |
 | 401 (любой другой code) | войти заново через `/auth/token` |
+| 503 `api_disabled` | API приложения выключено в панели |
 | 403 `channel_required` | предложить подписаться на канал, ссылка в `detail.channel_url` |
 | 403 `account_banned` | аккаунт заблокирован |
 | 429 | слишком часто, подождать `detail.retry_after_seconds` секунд |

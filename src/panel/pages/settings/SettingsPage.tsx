@@ -1,9 +1,10 @@
 import React from 'react';
 import {
-  DollarSign, Zap, Send, Cloud, FileText, Shield, ShieldAlert, Database, Mail, Fingerprint, Bot,
+  DollarSign, Zap, Send, Cloud, FileText, Shield, ShieldAlert, Database, Mail, Fingerprint, Bot, Smartphone,
 } from 'lucide-react';
 import type { ToastType } from '../../lib/types';
 import { AntiAbuseSettingsTab } from './AntiAbuseTab';
+import { AppApiSettingsTab } from './AppApiTab';
 import { BackupSettingsTab } from './BackupsTab';
 import { CaptchaSettingsTab } from './CaptchaTab';
 import { ForumSettingsTab } from './ForumTab';
@@ -14,11 +15,12 @@ import { ProjectSettingsTab } from './ProjectTab';
 import { SquadsPage } from './SquadsTab';
 import { StorageSettingsTab } from './StorageTab';
 
-export type Tab = 'project' | 'price' | 'antiabuse' | 'offer' | 'privacy' | 'squads' | 'mail' | 'captcha' | 'backups' | 'forum' | 'storage';
+export type Tab = 'project' | 'app' | 'price' | 'antiabuse' | 'offer' | 'privacy' | 'squads' | 'mail' | 'captcha' | 'backups' | 'forum' | 'storage';
 
 // разделы настроек (подменю в сайдбаре)
 export const SETTINGS_SECTIONS: { id: Tab; icon: React.ElementType; label: string }[] = [
   { id: 'project', icon: Bot, label: 'Проект: бот и оплата' },
+  { id: 'app', icon: Smartphone, label: 'Приложение (API)' },
   { id: 'price', icon: DollarSign, label: 'Цены' },
   { id: 'antiabuse', icon: ShieldAlert, label: 'Анти-абуз' },
   { id: 'offer', icon: FileText, label: 'Оферта' },
@@ -34,6 +36,7 @@ export const SETTINGS_SECTIONS: { id: Tab; icon: React.ElementType; label: strin
 export const SettingsPage: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void; tab: Tab; onTab?: (t: Tab) => void }> = ({ onToast, tab }) => (
   <div style={{ maxWidth: 980 }}>
     {tab === 'project' && <ProjectSettingsTab onToast={onToast} />}
+    {tab === 'app' && <AppApiSettingsTab onToast={onToast} />}
     {tab === 'price' && <PricesSettingsTab onToast={onToast} />}
     {tab === 'antiabuse' && <AntiAbuseSettingsTab onToast={onToast} />}
     {tab === 'offer' && <LegalSettingsTab kind="offer" title="Договор оферты" onToast={onToast} />}

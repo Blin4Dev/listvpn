@@ -7,7 +7,8 @@
 (Caddy проксирует на сервис `api` только `/api*`) или без префикса на отдельном домене `API_DOMAIN`
 (Caddy делает `rewrite * /api/v1{uri}`).
 
-Код: `src/core/apiv1.py` (роуты), `src/core/apiv1_store.py` (БД, очередь, леджер, задания).
+Код: `src/core/apiv1.py` (роуты), `src/core/apiv1_store.py` (БД, очередь, леджер, задания),
+`src/core/apiv1_app.py` (мобильное приложение: ключи, вход по почте, устройства, config, статистика сетей).
 Схема — в `src/core/database.py` (таблицы создаются и мигрируют сами при старте).
 
 ## Авторизация: токены API v1
@@ -210,10 +211,48 @@
 часа: параллельные сессии время не умножают, после долгого разрыва отсчёт начинается заново.
 `session_id` — до 64 символов `[A-Za-z0-9._:-]`; лимит — 30 запросов в минуту.
 
+## 5. Мобильное приложение (`src/core/apiv1_app.py`)
+
+Клиентские форматы — в [API_V1_CLIENT.md](API_V1_CLIENT.md). Здесь — что под капотом.
+
+**Панель → Настройки → «Приложение (API)»** (на проект, ключи `app_*` в `PROJECT_SETTING_KEYS`):
+вкл/выкл API (`503 api_disabled`), «Требовать ключ» (`X-App-Key`, иначе `401 app_key_invalid`),
+адрес возврата после оплаты (`{payment_id}`; https или deep link, `javascript:`/`http:` нельзя),
+шаблон ссылки-приглашения в семью (`{code}`), флаг `whitelist_active`. Ключи `fak_…` — в `app_keys`
+только sha-256, показываются один раз; отзыв ключа может сразу завершить выданные с ним сессии
+(`api_sessions.app_key_id`). Проверка — зависимость `gate` у всего роутера v1.
+
+**Вход по почте:** `/auth/email/send` и `/auth/email/verify` используют те же коды и лимиты, что мини-приложение
+(`create_email_code`, `_email_send_limits`, `_email_verify_limits`). Verify выдаёт одноразовый билет `lt_…`
+(`app_login_tickets`, 10 минут, только хеш), который `/auth/token` принимает как `session_token`.
+Старые app-сессии (`/api/app/auth/*`) тоже принимаются. С ключом приложения капча не спрашивается.
+
+**config:** при `state = active` и заголовке `X-HWID` сервер сам регистрирует устройство в Remnawave
+(`POST /api/hwid/devices`), проверяя общий лимит подписки (`hwidDeviceLimit`, иначе `devices_limit` из БД),
+и отдаёт `links` из `GET /api/sub/{shortUuid}/info` строками через `\n` (кеш 2 мин). E2EE и `encrypted_config` убраны.
+В `app_devices` пишется, чей HWID (владелец или гость) — для `members[].used_hwids` и права гостя
+удалять только своё устройство.
+
+**traffic / network_stats:** трафик — из пользователя Remnawave (`_rw_traffic`), `network_stats` — `vpn_network_days`
+(день × тип сети из `POST /telemetry/sessions` с полем `network`), за 30 дней.
+
+**Семья:** поверх `family.py` (те же коды, лимит участников, перевыпуск ключа владельца при уходе гостя —
+`_family_revoke_owner_key`, после него `app_devices` владельца очищается). `FamilyError` получил машинный `code`
+и статусы `409` (`already_in_family`, `in_other_family`, `has_own_family`, `has_own_subscription`).
+
+**Оплата:** `/purchases/yookassa/create` и `/purchases/hwid-slot/create` идут через `app_payment_create`
+(`purpose = subscription | devices`), то есть цены, реф. баланс и `fulfill_payment` — общие с мини-приложением.
+Выдача после оплаты идемпотентна: `pending → processing` забирает один обработчик, повторные уведомления
+ничего не начисляют; Remnawave недоступен — задача в `provisioning_jobs`.
+
 ## Таблицы
 
 | таблица | назначение |
 |---|---|
+| `app_keys` | ключи приложения (sha-256), на проект |
+| `app_login_tickets` | одноразовые билеты входа по почте |
+| `app_devices` | чей HWID в подписке (владелец / гость) |
+| `vpn_network_days` | дни с VPN по типу сети (`network_stats`) |
 | `provisioning_jobs` | очередь выдачи / пересинхронизации ссылки |
 | `tariffs` | тарифы для `GET /tariffs` |
 | `purchases` | факт покупки, одна строка на оплаченный платёж (при первом запуске заполняется из `payments`) |
