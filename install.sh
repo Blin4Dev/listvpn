@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.29-1"
+INSTALLER_VERSION="2026.10.31-1"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -21,6 +21,21 @@ on_error() {
     log_error "Ошибка на строке $1. Установка прервана."
 }
 trap 'on_error $LINENO' ERR
+
+# от root на минимальных образах (Debian netinst, LXC, VPS) sudo часто не установлен:
+# root ему не нужен — выполняем команду как есть
+if ! command -v sudo >/dev/null 2>&1; then
+    if [[ $EUID -eq 0 ]]; then
+        sudo() {
+            while [[ "${1:-}" == -* ]]; do shift; done  # -n и т.п. для root не нужны
+            "$@"
+        }
+        export -f sudo
+    else
+        log_error "Нет sudo, а установщик запущен не от root. Запустите от root (su -) или установите sudo."
+        exit 1
+    fi
+fi
 
 # utf-8 локаль: иначе backspace ломает русские буквы в .env
 if locale -a 2>/dev/null | grep -qiE '^(C|en_US)\.utf-?8$'; then
