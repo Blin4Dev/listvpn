@@ -121,12 +121,16 @@
       var $ = function (id) { return document.getElementById(id); };
 
       // только схемы наших приложений (без open-redirect на сайты)
-      var SCHEME = /^(incy|happ):\/\//i;
+      var SCHEME = /^(incy|happ|koala-clash):\/\//i;
       var APPS = {
         incy: {
           name: 'Incy', icon: '/assets/incy.png', pkg: 'llc.itdev.incy',
           ios: 'https://apps.apple.com/ru/app/incy/id6756943388',
           android: 'https://play.google.com/store/apps/details?id=llc.itdev.incy'
+        },
+        'koala-clash': {
+          name: 'Koala Clash', icon: '/assets/koala.png', desktop: true,
+          store: 'https://github.com/coolcoala/koala-clash/releases/latest'
         },
         happ: {
           name: 'Happ', icon: '/assets/happ.png', pkg: 'com.happproxy',
@@ -143,6 +147,7 @@
         $('go').classList.add('hidden');
         return;
       }
+      if (appKey === 'koala') appKey = 'koala-clash';
       if (!APPS[appKey]) appKey = target.split(':')[0].toLowerCase();
       var meta = APPS[appKey] || APPS.incy;
 
@@ -152,7 +157,7 @@
 
       // Android: intent:// открывает приложение надёжнее, без приложения — Google Play
       var primary = target;
-      if (isAndroid) {
+      if (isAndroid && !meta.desktop) {
         var m = /^([a-z]+):\/\/(.*)$/i.exec(target);
         if (m) primary = 'intent://' + m[2] + '#Intent;scheme=' + m[1] + ';package=' + meta.pkg +
           ';S.browser_fallback_url=' + encodeURIComponent(meta.android) + ';end';
@@ -164,7 +169,7 @@
       go.textContent = 'Открыть ' + meta.name;
       go.setAttribute('href', primary);
 
-      var store = isIOS ? meta.ios : (isAndroid ? meta.android : '');
+      var store = meta.desktop ? meta.store : (isIOS ? meta.ios : (isAndroid ? meta.android : ''));
       if (store) {
         var st = $('store');
         st.href = store;
@@ -172,6 +177,11 @@
         st.classList.remove('hidden');
       }
       var plain = (/^(?:incy|happ):\/\/(?:add|import)\/(https?:\/\/.+)$/i.exec(target) || [])[1];
+      // Koala Clash: koala-clash://install-config?url=<подписка> — её же можно вставить в приложение вручную
+      if (!plain && /^koala-clash:/i.test(target)) {
+        try { plain = new URL(target.replace(/^koala-clash:/i, 'https:')).searchParams.get('url') || ''; } catch (e) { plain = ''; }
+        if (!/^https?:\/\//i.test(plain)) plain = '';
+      }
       if (plain && navigator.clipboard) {
         var cp = $('copy');
         cp.classList.remove('hidden');

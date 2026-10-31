@@ -5,7 +5,7 @@ import { useTgBack } from "./noir";
 import { copyText } from "./SubLinkBox";
 import { C, FGN_DIM, FgnIcon, fgnButton } from "./fgn";
 import { fetchAppLink, openDeepLink } from "../utils/api";
-import { APP_META, DEVICE_TITLE, installUrl, type AppKind, type DeviceKind } from "../utils/apps";
+import { APP_META, DEVICE_TITLE, KOALA_GUIDE, appSub, appsFor, installOptions, isRecommended, type AppKind, type DeviceKind } from "../utils/apps";
 
 type Step = "pick" | "device" | "install" | "add" | "link" | "region" | "done";
 
@@ -193,7 +193,8 @@ export default function SetupSheet({ onClose, note }: { onClose: () => void; not
   const [device, setDevice] = useState<DeviceKind>("ios");
 
   const isTv = device === "android_tv";
-  const needLink = step === "link" || (step === "install" && isTv);
+  // ссылка подписки: «другое приложение», Android TV и Koala Clash (вставить вручную, если настраивают с телефона)
+  const needLink = step === "link" || (step === "install" && isTv) || ((step === "add" || step === "done") && app === "koala");
   useEffect(() => {
     if (!needLink || link) return;
     let alive = true;
@@ -212,11 +213,7 @@ export default function SetupSheet({ onClose, note }: { onClose: () => void; not
     setStep(a === "other" ? "link" : "install");
   };
 
-  const install = () => {
-    if (!app) return;
-    const url = installUrl(app, device);
-    if (url) window.open(url, "_blank", "noopener,noreferrer");
-  };
+  const open = (url: string) => { window.open(url, "_blank", "noopener,noreferrer"); };
 
   const add = async () => {
     if (!app || busy) return;
@@ -364,20 +361,24 @@ export default function SetupSheet({ onClose, note }: { onClose: () => void; not
           <>
             <div style={{ ...hint, marginTop: 15 }}>Выберите приложение для {DEVICE_TITLE[device]}.</div>
             <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 8 }}>
-              {(["incy", "happ", "other"] as const).map((a) => {
+              {appsFor(device).map((a) => {
                 const m = APP_META[a];
+                const rec = isRecommended(a, device);
                 return (
                   <button
                     key={a}
                     type="button"
                     className="blin-press"
                     onClick={() => pick(a)}
-                    style={{ ...cell, width: "100%", minHeight: 68, padding: "0 16px", display: "flex", alignItems: "center", gap: 12, textAlign: "left" }}
+                    style={{
+                      ...cell, width: "100%", minHeight: 68, padding: "0 16px", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+                      ...(rec ? { border: "1px solid rgba(52,214,124,.45)", background: "rgba(52,214,124,.06)" } : {}),
+                    }}
                   >
                     <AppIcon app={a} />
                     <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
                       <span style={{ fontSize: 16, fontWeight: 500, lineHeight: "20px" }}>{m.title}</span>
-                      <span style={{ fontSize: 13, lineHeight: "18px", color: m.recommended ? C.green : MUTED }}>{m.sub}</span>
+                      <span style={{ fontSize: 13, lineHeight: "18px", color: rec ? C.green : MUTED }}>{appSub(a, device)}</span>
                     </span>
                     <FgnIcon name="chevron" size={17} stroke={2.2} style={{ color: "#6E6E78" }} />
                   </button>
@@ -407,10 +408,30 @@ export default function SetupSheet({ onClose, note }: { onClose: () => void; not
 
         {step === "install" && !isTv && app && (
           <>
-            <div style={{ ...hint, marginTop: 15 }}>Скачайте и установите {APP_META[app].title} на {DEVICE_TITLE[device]}.</div>
-            <button type="button" className="blin-press" style={{ ...mainBtn, marginTop: 20, gap: 8 }} onClick={install}>
-              <FgnIcon name="download" size={18} stroke={2} /> Скачать {APP_META[app].title}
-            </button>
+            {app === "koala" && KOALA_GUIDE[device] ? (
+              <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+                {KOALA_GUIDE[device]!.map((t, i) => (
+                  <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                    <span style={stepNum}>{i + 1}</span>
+                    <span style={{ ...hint, paddingTop: 2 }}>{t}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ ...hint, marginTop: 15 }}>Скачайте и установите {APP_META[app].title} на {DEVICE_TITLE[device]}.</div>
+            )}
+            {installOptions(app, device).map((o, i) => i === 0 ? (
+              <button key={o.url} type="button" className="blin-press" style={{ ...mainBtn, marginTop: 20, gap: 8 }} onClick={() => open(o.url)}>
+                <FgnIcon name="download" size={18} stroke={2} /> {o.label}
+              </button>
+            ) : (
+              <button key={o.url} type="button" className="blin-press" onClick={() => open(o.url)}
+                style={{ ...cell, width: "100%", marginTop: 8, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, textAlign: "left", fontSize: 14, color: MUTED, borderRadius: 14 }}>
+                <FgnIcon name="download" size={16} stroke={2} />
+                <span style={{ flex: 1, minWidth: 0 }}>{o.label}</span>
+                <FgnIcon name="chevron" size={15} stroke={2.2} style={{ color: "#6E6E78" }} />
+              </button>
+            ))}
             <button type="button" className="blin-press" style={{ ...ghostBtn, marginTop: 8 }} onClick={() => { setErr(""); setStep("add"); }}>
               Уже установлено — далее
             </button>
@@ -435,12 +456,25 @@ export default function SetupSheet({ onClose, note }: { onClose: () => void; not
         {step === "add" && app && (
           <>
             <div style={{ ...hint, marginTop: 15 }}>
-              Нажмите кнопку — подписка сама добавится в {APP_META[app].title}. После этого откройте приложение и подключитесь.
+              {app === "koala"
+                ? "Откройте мини-приложение на этом компьютере и нажмите кнопку — Koala Clash предложит добавить профиль, нажмите «Да»."
+                : `Нажмите кнопку — подписка сама добавится в ${APP_META[app].title}. После этого откройте приложение и подключитесь.`}
             </div>
             <button type="button" className="blin-press" disabled={busy} style={{ ...mainBtn, marginTop: 20, opacity: busy ? 0.6 : 1 }} onClick={() => void add()}>
               {busy ? "Открываем…" : "Добавить подписку"}
             </button>
-            {err ? <div style={{ marginTop: 10, fontSize: 13, color: C.danger, textAlign: "center" }}>{err}</div> : null}
+            {err && app !== "koala" ? <div style={{ marginTop: 10, fontSize: 13, color: C.danger, textAlign: "center" }}>{err}</div> : null}
+            {app === "koala" ? (
+              <>
+                <div style={{ ...hint, marginTop: 18 }}>
+                  Настраиваете с телефона? Скопируйте ссылку и вставьте её в Koala Clash: <b style={strong}>Профили → «+»</b>.
+                </div>
+                {linkBox}
+                <button type="button" className="blin-press" disabled={!link} style={{ ...ghostBtn, marginTop: 8, gap: 8, opacity: link ? 1 : 0.6 }} onClick={() => void copy()}>
+                  <FgnIcon name={copied ? "check" : "copy"} size={18} stroke={2} /> {copied ? "Скопировано" : "Скопировать ссылку"}
+                </button>
+              </>
+            ) : null}
           </>
         )}
 
@@ -465,7 +499,11 @@ export default function SetupSheet({ onClose, note }: { onClose: () => void; not
 
         {step === "done" && app && (
           <>
-            <div style={{ ...hint, marginTop: 15 }}>Откройте {APP_META[app].title} и нажмите «Подключиться».</div>
+            <div style={{ ...hint, marginTop: 15 }}>
+              {app === "koala"
+                ? "В Koala Clash подтвердите добавление профиля, выберите его и включите подключение."
+                : `Откройте ${APP_META[app].title} и нажмите «Подключиться».`}
+            </div>
             <button type="button" className="blin-press" style={{ ...mainBtn, marginTop: 20 }} onClick={onClose}>Готово</button>
             <button type="button" className="blin-press" style={{ ...ghostBtn, marginTop: 8 }} onClick={() => void add()}>Не добавилась? Ещё раз</button>
           </>

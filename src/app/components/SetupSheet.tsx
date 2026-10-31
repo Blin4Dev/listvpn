@@ -27,7 +27,7 @@ function Btn({ children, onClick, disabled, style }: { children: React.ReactNode
   );
 }
 import { fetchAppLink, openDeepLink } from "../utils/api";
-import { APP_META, DEVICE_TITLE, detectDeviceKind, installUrl, type AppKind, type DeviceKind } from "../utils/apps";
+import { APP_META, DEVICE_TITLE, KOALA_GUIDE, appSub, appsFor, detectDeviceKind, installOptions, isRecommended, type AppKind, type DeviceKind } from "../utils/apps";
 
 // pick → install → add → done; «другое» → link
 type Step = "pick" | "device" | "install" | "add" | "link" | "done";
@@ -91,7 +91,8 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
   const [linkLoading, setLinkLoading] = useState(false);
   const [device, setDevice] = useState<DeviceKind>(() => detectDeviceKind());
 
-  const needLink = step === "link" || (step === "install" && device === "android_tv");
+  // ссылка подписки: «другое приложение», Android TV и Koala Clash (вставить вручную, если настраивают с телефона)
+  const needLink = step === "link" || (step === "install" && device === "android_tv") || (step === "add" && app === "koala");
   useEffect(() => {
     if (!needLink || link) return;
     let alive = true;
@@ -110,11 +111,7 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
     setStep(a === "other" ? "link" : "install");
   };
 
-  const install = () => {
-    if (!app) return;
-    const url = installUrl(app, device);
-    if (url) window.open(url, "_blank", "noopener,noreferrer");
-  };
+  const open = (url: string) => { window.open(url, "_blank", "noopener,noreferrer"); };
 
   const add = async () => {
     if (!app || busy) return;
@@ -219,8 +216,9 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
             <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
               Выберите приложение для {DEVICE_TITLE[device]}.
             </div>
-            {(["incy", "happ", "other"] as const).map((a) => {
+            {appsFor(device).map((a) => {
               const m = APP_META[a];
+              const rec = isRecommended(a, device);
               return (
                 <button
                   key={a}
@@ -236,7 +234,7 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
                     minHeight: 64,
                     padding: "12px 16px",
                     borderRadius: T.radius.lg,
-                    border: m.recommended ? `1px solid ${T.orange}` : `1px solid ${T.border}`,
+                    border: rec ? `1px solid ${T.orange}` : `1px solid ${T.border}`,
                     background: T.surface,
                     cursor: "pointer",
                     textAlign: "left",
@@ -246,9 +244,9 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
                   <span style={{ flex: 1 }}>
                     <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontWeight: 600, fontSize: 16, color: T.text }}>{m.title}</span>
-                      {m.recommended ? <span style={{ fontSize: 11, fontWeight: 600, color: T.orange }}>рекомендуем</span> : null}
+                      {rec ? <span style={{ fontSize: 11, fontWeight: 600, color: T.orange }}>рекомендуем</span> : null}
                     </span>
-                    <span style={{ display: "block", fontSize: 12, color: T.textMuted, marginTop: 2 }}>{m.sub}</span>
+                    <span style={{ display: "block", fontSize: 12, color: T.textMuted, marginTop: 2 }}>{rec ? (a === "koala" ? "Windows, macOS, Linux" : m.sub) : appSub(a, device)}</span>
                   </span>
                   <MSIcon name="chevron_right" style={{ color: T.orange }} />
                 </button>
@@ -359,12 +357,27 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
               </>
             ) : app ? (
               <>
-                <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.45 }}>
-                  Скачайте и установите {APP_META[app].title} на {DEVICE_TITLE[device]}.
-                </div>
-                <Btn onClick={install}>
-                  <MSIcon name="download" style={{ fontSize: 18, marginRight: 6 }} /> Скачать {APP_META[app].title}
-                </Btn>
+                {app === "koala" && KOALA_GUIDE[device] ? (
+                  KOALA_GUIDE[device]!.map((text, i) => (
+                    <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                      <span style={{ width: 24, height: 24, borderRadius: 12, background: T.surfaceRaised, color: T.orange, fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        {i + 1}
+                      </span>
+                      <span style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.45, paddingTop: 2 }}>{text}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.45 }}>
+                    Скачайте и установите {APP_META[app].title} на {DEVICE_TITLE[device]}.
+                  </div>
+                )}
+                {installOptions(app, device).map((o, i) => i === 0 ? (
+                  <Btn key={o.url} onClick={() => open(o.url)}>
+                    <MSIcon name="download" style={{ fontSize: 18, marginRight: 6 }} /> {o.label}
+                  </Btn>
+                ) : (
+                  <TextButton key={o.url} onClick={() => open(o.url)}>{o.label}</TextButton>
+                ))}
                 <TextButton onClick={() => { setErr(""); setStep("add"); }}>Далее</TextButton>
               </>
             ) : null}
@@ -374,12 +387,22 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
         {step === "add" && app && (
           <>
             <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.45, marginBottom: 4 }}>
-              Нажмите кнопку — подписка сама добавится в {APP_META[app].title}. После этого откройте приложение и подключитесь.
+              {app === "koala"
+                ? "Откройте мини-приложение на этом компьютере и нажмите кнопку — Koala Clash предложит добавить профиль, нажмите «Да»."
+                : `Нажмите кнопку — подписка сама добавится в ${APP_META[app].title}. После этого откройте приложение и подключитесь.`}
             </div>
             <Btn disabled={busy} onClick={() => void add()}>
               {busy ? "Открываем…" : "Добавить подписку"}
             </Btn>
-            {err ? <div style={{ fontSize: 12, color: T.danger, textAlign: "center" }}>{err}</div> : null}
+            {err && app !== "koala" ? <div style={{ fontSize: 12, color: T.danger, textAlign: "center" }}>{err}</div> : null}
+            {app === "koala" ? (
+              <>
+                <div style={{ fontSize: 13, color: T.textMuted, lineHeight: 1.45, marginTop: 8 }}>
+                  Настраиваете с телефона? Скопируйте ссылку и вставьте её в Koala Clash: Профили → «+».
+                </div>
+                <NoirLinkBox link={link} loading={linkLoading} error={err} />
+              </>
+            ) : null}
           </>
         )}
 
@@ -397,7 +420,9 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
             <MSIcon name="check_circle" style={{ fontSize: 56, color: T.orange }} />
             <div style={{ fontWeight: 600, fontSize: 18, color: T.text, marginTop: 10 }}>Подписка добавлена</div>
             <div style={{ fontSize: 13, color: T.textMuted, marginTop: 6, lineHeight: 1.45 }}>
-              Откройте {APP_META[app].title} и нажмите «Подключиться».
+              {app === "koala"
+                ? "В Koala Clash подтвердите добавление профиля, выберите его и включите подключение."
+                : `Откройте ${APP_META[app].title} и нажмите «Подключиться».`}
             </div>
           </div>
         )}

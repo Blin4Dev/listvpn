@@ -657,7 +657,7 @@ export async function requestWithdraw(
 
 export type SubAppLink = { app: string; link: string; encrypted: boolean; open_url?: string };
 
-export async function fetchAppLink(app: "incy" | "happ" | "other"): Promise<SubAppLink> {
+export async function fetchAppLink(app: "koala" | "incy" | "happ" | "other"): Promise<SubAppLink> {
   return appFetch<SubAppLink>(`/subscription/applink?app=${encodeURIComponent(app)}`);
 }
 

@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.request
 
-APP_SCHEMES = ("incy", "happ")
+APP_SCHEMES = ("incy", "happ", "koala-clash")
 
 HAPP_PREFIX = "happ://crypt5/"
 INCY_PREFIX = "incy://crypt1/"
@@ -158,11 +158,26 @@ def incy_crypt1(url: str, name: str | None = None) -> str:
     return link
 
 
+def koala_install(url: str, name: str | None = None) -> str:
+    """Koala Clash (компьютер): koala-clash://install-config?url=<подписка>&name=<имя>.
+    Шифрованных ссылок у Koala Clash нет — подписка передаётся как есть (как при вставке вручную).
+    Формат — src/main/index.ts в github.com/coolcoala/koala-clash (handleDeepLink, host install-config)."""
+    from urllib.parse import quote
+    url = _check_url(url)
+    link = f"koala-clash://install-config?url={quote(url, safe='')}"
+    if name:
+        link += f"&name={quote(name, safe='')}"
+    return link
+
+
 def build_link(app: str, url: str, name: str | None = None) -> str:
-    """incy → incy://crypt1/…, happ → happ://crypt5/…; other / plain / link → сама ссылка подписки."""
+    """incy → incy://crypt1/…, happ → happ://crypt5/…, koala → koala-clash://install-config?url=…;
+    other / plain / link → сама ссылка подписки."""
     a = (app or "incy").lower()
     if a in ("other", "plain", "link"):
         return url
+    if a == "koala":
+        return koala_install(url, name)
     if a == "happ":
         return happ_crypt5(url)
     return incy_crypt1(url, name)

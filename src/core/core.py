@@ -7671,6 +7671,12 @@ def app_subscription_applink(
         raise HTTPException(404, detail={"message": "Нет активной подписки"})
 
     which = (app or "incy").lower()
+    if which == "koala":
+        # Koala Clash (компьютер): koala-clash://install-config?url=… — без шифрования, его у Koala нет
+        import applinks  # type: ignore
+        link = applinks.build_link("koala", sub_url, name=P().app_link_name)
+        return {"app": "koala", "link": link, "encrypted": False, "subscription_url": sub_url,
+                "open_url": _deeplink_redirect_url(link, app="koala")}
     if which in ("incy", "happ"):
         # только зашифрованные ссылки: incy://crypt1/…, happ://crypt5/… (см. src/api/applinks.py)
         import applinks  # type: ignore
