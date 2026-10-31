@@ -67,6 +67,8 @@ PROJECT_SETTING_KEYS = frozenset({
     "family_max_members",
     # сквады Remnawave: у проекта свои (FGN — свои обходы); не задано — берутся общие сети
     "squad_mapping_vpn", "squad_mapping_trial",
+    # внешний сквад Remnawave (панель → Сквады): у каждого проекта свой
+    "squad_external",
     # фишки проекта (features в project.json): напоминания и подарки
     "notconn_hours", "winback_after_days", "winback_gift_days",
     # сайт проекта (features.site): приложения для компьютера

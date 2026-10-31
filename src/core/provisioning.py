@@ -36,14 +36,21 @@ def rw_username(user_id: int) -> str:
 EXTERNAL_SQUAD_KEY = "squad_external"
 
 
-def external_squad() -> Optional[str]:
-    """внешний сквад Remnawave для всех пользователей (панель → Сквады); None — не трогать."""
+def external_squad(user_id: Optional[int] = None) -> Optional[str]:
+    """внешний сквад Remnawave проекта (панель → Сквады, у каждого проекта свой); None — не трогать.
+    user_id — берём проект пользователя (а не текущего запроса/задачи), иначе — текущий проект."""
     try:
         try:
             from . import database as db  # type: ignore
         except ImportError:
             import database as db  # type: ignore
-        v = (db.get_setting(EXTERNAL_SQUAD_KEY, "") or "").strip()
+        pid = None
+        if user_id:
+            try:
+                pid = db.projects.of_user(int(user_id))
+            except Exception:  # noqa: BLE001
+                pid = None
+        v = (db.get_setting(EXTERNAL_SQUAD_KEY, "", project=pid) or "").strip()
     except Exception:  # noqa: BLE001
         return None
     return v or None
@@ -208,7 +215,7 @@ def provision(
             user_id = _local_user_id(telegram_id, email)
         existing = lookup(client, user_id=user_id, telegram_id=telegram_id, email=email)
         squad_list = list(squads or [])
-        ext_squad = external_squad()
+        ext_squad = external_squad(user_id)
 
         if existing:
             uid = _num_id(existing)

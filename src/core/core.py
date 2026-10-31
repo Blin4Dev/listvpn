@@ -6324,7 +6324,7 @@ def panel_squads_external(_: dict = Depends(require_owner)) -> dict[str, Any]:
 
 @app.put("/api/panel/squads/external")
 def panel_squads_external_set(body: ExternalSquadBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
-    """выбрать внешний сквад для всех пользователей; пусто — не назначать (в Remnawave ничего не меняется)."""
+    """внешний сквад проекта (X-Project); пусто — не назначать (в Remnawave ничего не меняется)."""
     uuid = (body.uuid or "").strip()
     if uuid:
         client = _rw_client()

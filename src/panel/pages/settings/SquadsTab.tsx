@@ -5,6 +5,7 @@ import {
 import { PageHead, Spinner, Toggle } from '../../components/ui';
 import { apiFetch, parseApiErr } from '../../lib/api';
 import type { ToastType } from '../../lib/types';
+import { useProject } from '../../lib/project';
 
 export interface SquadConfig {
   id: number; squad_uuid: string; squad_name: string; squad_type: string;
@@ -138,21 +139,23 @@ const GraceCard: React.FC<{ squads: SquadConfig[]; onToast: (t: string, m: strin
 type ExtSquad = { uuid: string; name: string; members: number | null };
 type ExtState = { selected: string | null; squads: ExtSquad[]; error: string | null };
 
-// внешний сквад Remnawave: необязательный, один на всех пользователей
+// внешний сквад Remnawave: необязательный, свой у каждого проекта сети
 const ExternalSquadCard: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void }> = ({ onToast }) => {
+  const project = useProject();
+  const pname = project?.name || 'проекта';
   const [st, setSt] = useState<ExtState | null>(null);
   const [pick, setPick] = useState<string>('');
   const [busy, setBusy] = useState<'' | 'load' | 'save' | 'apply'>('load');
   const apply = (d: ExtState) => { setSt(d); setPick(d.selected || ''); };
   const load = () => { setBusy('load'); apiFetch('/panel/squads/external').then(apply).catch((e) => onToast('Ошибка', parseApiErr(e, 'Не удалось загрузить внешние сквады'), 'error')).finally(() => setBusy('')); };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [project?.id]);
   if (!st) return null;
   const dirty = (st.selected || '') !== pick;
   const save = async () => {
     setBusy('save');
     try {
       apply(await apiFetch('/panel/squads/external', { method: 'PUT', body: JSON.stringify({ uuid: pick || null }) }));
-      onToast('Готово', pick ? 'Внешний сквад будет назначаться всем пользователям' : 'Внешний сквад не назначается', 'success');
+      onToast('Готово', pick ? `Внешний сквад будет назначаться пользователям ${pname}` : `${pname}: внешний сквад не назначается`, 'success');
     } catch (e) { onToast('Не сохранено', parseApiErr(e, 'Ошибка'), 'error'); } finally { setBusy(''); }
   };
   const missing = st.selected && !st.squads.some((x) => x.uuid === st.selected) && !st.error;
@@ -160,9 +163,10 @@ const ExternalSquadCard: React.FC<{ onToast: (t: string, m: string, ty: ToastTyp
     <div className="card" style={{ padding: 24 }}>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="h-sec mb-2">Внешний сквад</h3>
+          <h3 className="h-sec mb-2">Внешний сквад · {pname}</h3>
           <p className="sub" style={{ maxWidth: 620 }}>
-            Необязательно. Выбранный внешний сквад получают все новые пользователи и все, кто продлевает или покупает подписку.
+            Свой у каждого проекта — переключите проект вверху, чтобы задать другой.
+            Необязательно. Выбранный внешний сквад получают новые пользователи {pname} и все, кто в {pname} продлевает или покупает подписку.
             «Не назначать» — бот не трогает внешний сквад пользователей в Remnawave.
           </p>
         </div>

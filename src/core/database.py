@@ -1125,6 +1125,23 @@ def _migrate_projects(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _split_external_squad(conn: sqlite3.Connection) -> None:
+    """внешний сквад был общим на сеть (squad_external) — теперь у каждого проекта свой.
+    Один раз: проекты без своего значения получают прежний общий, чтобы ничего не поменялось."""
+    flag = "__squad_external_split"
+    if conn.execute("SELECT 1 FROM settings WHERE key = ?", (flag,)).fetchone():
+        return
+    row = conn.execute("SELECT value FROM settings WHERE key = 'squad_external'").fetchone()
+    shared = (row["value"] if row else "") or ""
+    if shared:
+        for p in projects.all_projects():
+            if p.id != projects.DEFAULT:
+                conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                             (f"@{p.id}/squad_external", shared))
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (flag, utcnow_iso()))
+    conn.commit()
+
+
 def _seed_projects(conn: sqlite3.Connection) -> None:
     """новый проект стартует копией настроек проекта по умолчанию (цены, тарифы, пробный, документы)."""
     default = projects.get(projects.DEFAULT)
@@ -1532,6 +1549,7 @@ def _seed_defaults(conn: sqlite3.Connection) -> None:
         )
     conn.commit()
     _seed_projects(conn)
+    _split_external_squad(conn)
 
 
 def get_setting(key: str, default: str = "", *, project: Optional[str] = None) -> str:
