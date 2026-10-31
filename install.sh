@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.31-3"
+INSTALLER_VERSION="2026.10.31-4"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -560,6 +560,63 @@ caddy_detect_docker() {
     log_success "✔ listvpn использует Caddy контейнера «${c}»."
 }
 
+# Caddyfile контейнера на хосте (том с файлом или с его папкой); '' — не смонтирован
+_docker_caddy_config_host() {
+    local c="$1" cfg="$2" src dst host="" bestlen=0
+    while IFS='|' read -r src dst; do
+        [[ -n "$dst" ]] || continue
+        if [[ "$cfg" == "$dst" || "$cfg" == "$dst"/* ]] && (( ${#dst} > bestlen )); then
+            bestlen=${#dst}; host="${src}${cfg#"$dst"}"
+        fi
+    done < <(sudo docker inspect -f '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' "$c" 2>/dev/null)
+    [[ -n "$host" ]] && sudo test -f "$host" && printf '%s' "$host"
+}
+
+# мини-приложения проектов на сервере панели получают сертификат on-demand: Caddy спрашивает API, наш ли домен.
+# Это глобальная опция — добавляем её в Caddyfile контейнера (с копией для отката). 0 — on-demand доступен.
+CADDY_ON_DEMAND=0
+CADDY_CFG_HOST=""
+CADDY_CFG_BACKUP=""
+CADDY_OD_MARK="# listvpn: on-demand TLS для мини-приложений проектов"
+caddy_docker_on_demand() {
+    CADDY_ON_DEMAND=0; CADDY_CFG_BACKUP=""
+    CADDY_CFG_HOST="$(_docker_caddy_config_host "$CADDY_CONTAINER" "$CADDY_DOCKER_CONFIG" || true)"
+    if [[ -z "$CADDY_CFG_HOST" ]]; then
+        log_warn "Caddyfile контейнера «${CADDY_CONTAINER}» не смонтирован с хоста — мини-приложения проектов на этот сервер не поставить (только на свои серверы)."
+        return 0
+    fi
+    if sudo grep -qE '^[[:space:]]*on_demand_tls([[:space:]]|\{|$)' "$CADDY_CFG_HOST"; then
+        sudo grep -qF "$CADDY_OD_MARK" "$CADDY_CFG_HOST" || sudo grep -qF '/api/internal/miniapp/ask' "$CADDY_CFG_HOST" \
+            || { log_warn "В ${CADDY_CFG_HOST} уже есть свой on_demand_tls — мини-приложения проектов на этот сервер не поставить."; return 0; }
+        CADDY_ON_DEMAND=1
+        return 0
+    fi
+    local tmp; tmp="$(mktemp)"
+    CADDY_CFG_BACKUP="$(mktemp)"; sudo cp -p "$CADDY_CFG_HOST" "$CADDY_CFG_BACKUP"
+    # первая значимая строка «{» — глобальный блок уже есть: вписываем внутрь, иначе — новый блок в начало
+    if sudo awk 'NF && $1 !~ /^#/ {exit ($0 ~ /^[[:space:]]*\{[[:space:]]*$/) ? 0 : 1}' "$CADDY_CFG_HOST"; then
+        sudo awk -v mark="$CADDY_OD_MARK" -v port="${API_PORT:-8000}" '
+            !done && NF && $1 !~ /^#/ && $0 ~ /^[[:space:]]*\{[[:space:]]*$/ {
+                print; print "\t" mark; print "\ton_demand_tls {"; print "\t\task http://127.0.0.1:" port "/api/internal/miniapp/ask"; print "\t}"
+                done = 1; next
+            } { print }' "$CADDY_CFG_HOST" > "$tmp"
+    else
+        { printf '%s\n{\n\ton_demand_tls {\n\t\task http://127.0.0.1:%s/api/internal/miniapp/ask\n\t}\n}\n\n' "$CADDY_OD_MARK" "${API_PORT:-8000}"
+          sudo cat "$CADDY_CFG_HOST"; } > "$tmp"
+    fi
+    # содержимое заменяем на месте (cat >), чтобы не сломать bind-mount одного файла
+    sudo sh -c "cat '$tmp' > '$CADDY_CFG_HOST'"
+    rm -f "$tmp"
+    CADDY_ON_DEMAND=1
+    log_info "В ${CADDY_CFG_HOST} добавлен on_demand_tls (копия до правки — откатится при ошибке)."
+}
+
+_caddy_docker_restore_cfg() {
+    [[ -n "$CADDY_CFG_BACKUP" && -f "$CADDY_CFG_BACKUP" ]] || return 0
+    sudo sh -c "cat '$CADDY_CFG_BACKUP' > '$CADDY_CFG_HOST'"
+    rm -f "$CADDY_CFG_BACKUP"; CADDY_CFG_BACKUP=""
+}
+
 _caddy_docker_reload() {
     sudo docker exec "$CADDY_CONTAINER" caddy reload --adapter caddyfile --config "$CADDY_DOCKER_CONFIG" >"$1" 2>&1 \
         || sudo docker restart "$CADDY_CONTAINER" >>"$1" 2>&1
@@ -578,12 +635,13 @@ caddy_apply_site_docker() {
        || ! _caddy_docker_reload "$vlog"; then
         sed 's/^/   /' "$vlog" | grep -v '^   *$' | tail -n 15
         if [[ -n "$backup" ]]; then sudo install -m 644 -o root -g root "$backup" "$CADDY_SITE"; else sudo rm -f "$CADDY_SITE"; fi
+        _caddy_docker_restore_cfg
         _caddy_docker_reload /dev/null || true
         rm -f "$backup" "$vlog"
         log_error "Caddy контейнера «${CADDY_CONTAINER}» не принял конфигурацию — откатил, остальные сайты работают как раньше."
         return 1
     fi
-    rm -f "$backup" "$vlog"
+    rm -f "$backup" "$vlog" "${CADDY_CFG_BACKUP:-}"; CADDY_CFG_BACKUP=""
     log_success "✔ конфигурация добавлена в Caddy контейнера «${CADDY_CONTAINER}»."
 }
 
@@ -1027,9 +1085,8 @@ EOF
     # /api сам узнаёт проект по домену. Конкретные сайты выше важнее этого общего.
     local any_addr="https://"
     [[ "$HTTPS_PORT" == "443" ]] || any_addr="https://:${HTTPS_PORT}"
-    # чужой Caddy в Docker: глобального on_demand_tls { ask … } у него нет, а без него on_demand не запустится —
-    # мини-приложения проектов ставятся на свои серверы (панель → «Проекты»)
-    caddy_is_docker || cat >> "$tmp" <<EOF
+    # чужой Caddy в Docker: блок нужен только с on_demand_tls { ask … } в его Caddyfile (caddy_docker_on_demand)
+    { ! caddy_is_docker || [[ "$CADDY_ON_DEMAND" == "1" ]]; } && cat >> "$tmp" <<EOF
 
 # мини-приложения проектов на этом сервере (панель → «Проекты» → «Сервер панели»)
 ${any_addr} {
@@ -1260,6 +1317,7 @@ caddy_proxy_up() {
     while read -r _xd; do [[ -n "$_xd" ]] && domains+=("$_xd"); done < <(extra_project_domains)
     caddy_detect_docker || return 1
     if caddy_is_docker; then
+        caddy_docker_on_demand
         apply_bot_proxy "$mini" "$panel" && caddy_wait_https "${domains[@]}"
         return
     fi
