@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.31-2"
+INSTALLER_VERSION="2026.10.31-3"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -455,6 +455,138 @@ _caddy_admin_line() {
 
 _ver_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]; }
 
+# ── Caddy в Docker (например, /opt/remnawave/caddy с network_mode: host) ──
+# если 80/443 уже держит такой контейнер, своих сайтов у listvpn нет — кладём blinvpn.caddy в его папку
+# сайтов (import …/*.caddy) и перезагружаем контейнер. Режим хранится в .env: CADDY_CONTAINER, CADDY_SITES_DIR.
+CADDY_CONTAINER=""
+CADDY_DOCKER_CONFIG="/etc/caddy/Caddyfile"
+
+caddy_is_docker() { [[ -n "$CADDY_CONTAINER" ]]; }
+
+caddy_load_mode() {
+    local f="${1:-.env}" c dir cfg
+    c="$(get_env_var CADDY_CONTAINER "$f" 2>/dev/null || true)"
+    dir="$(get_env_var CADDY_SITES_DIR "$f" 2>/dev/null || true)"
+    [[ -n "$c" && -n "$dir" ]] || return 0
+    cfg="$(get_env_var CADDY_CONTAINER_CONFIG "$f" 2>/dev/null || true)"
+    CADDY_CONTAINER="$c"
+    CADDY_SITES="${dir%/}"
+    CADDY_SITE="${CADDY_SITES}/blinvpn.caddy"
+    CADDY_DOCKER_CONFIG="${cfg:-/etc/caddy/Caddyfile}"
+}
+
+# имя контейнера, процесс которого слушает 80 или порт HTTPS (Caddy с network_mode: host)
+_docker_caddy_on_ports() {
+    command -v docker >/dev/null 2>&1 || return 1
+    local pids id pid
+    pids="$(sudo ss -ltnpH 2>/dev/null | awk -v re="80|${HTTPS_PORT}" '$4 ~ ("[:.](" re ")$")' \
+        | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+    [[ -n "$pids" ]] || return 1
+    while read -r id; do
+        [[ -n "$id" ]] || continue
+        pid="$(sudo docker inspect -f '{{.State.Pid}}' "$id" 2>/dev/null || true)"
+        if [[ -n "$pid" ]] && grep -qx "$pid" <<<"$pids"; then
+            sudo docker exec "$id" caddy version >/dev/null 2>&1 || return 1
+            sudo docker inspect -f '{{.Name}}' "$id" | sed 's#^/##'
+            return 0
+        fi
+    done < <(sudo docker ps -q 2>/dev/null)
+    return 1
+}
+
+# Caddyfile внутри контейнера: --config из аргументов, иначе стандартный
+_docker_caddy_config() {
+    local args
+    args="$(sudo docker inspect -f '{{range .Config.Cmd}}{{.}}{{"\n"}}{{end}}{{range .Args}}{{.}}{{"\n"}}{{end}}' "$1" 2>/dev/null || true)"
+    local cfg; cfg="$(awk 'prev=="--config"{print; exit} {prev=$0}' <<<"$args")"
+    printf '%s' "${cfg:-/etc/caddy/Caddyfile}"
+}
+
+# папка сайтов на хосте: import <папка>/*.caddy из Caddyfile контейнера + том, в котором она лежит
+_docker_caddy_sites_dir() {
+    local c="$1" cfg="$2" dir src dst best="" bestlen=0 host=""
+    while read -r dir; do
+        [[ -n "$dir" ]] || continue
+        while IFS='|' read -r src dst; do
+            [[ -n "$dst" ]] || continue
+            if [[ "$dir" == "$dst" || "$dir" == "$dst"/* ]] && (( ${#dst} > bestlen )); then
+                bestlen=${#dst}; best="$dst"; host="${src}${dir#"$dst"}"
+            fi
+        done < <(sudo docker inspect -f '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' "$c" 2>/dev/null)
+        [[ -n "$host" ]] && { printf '%s' "${host%/}"; return 0; }
+    done < <(sudo docker exec "$c" cat "$cfg" 2>/dev/null \
+        | sed -nE 's#^[[:space:]]*import[[:space:]]+([^[:space:]]+)/\*\.caddy[[:space:]]*$#\1#p')
+    return 1
+}
+
+# порты 80/443 у Caddy в контейнере → предложить подключиться к нему. 0 — режим выбран или не нужен
+caddy_detect_docker() {
+    if caddy_is_docker; then
+        if sudo docker inspect "$CADDY_CONTAINER" >/dev/null 2>&1; then return 0; fi
+        log_error "Контейнер Caddy «${CADDY_CONTAINER}» (CADDY_CONTAINER в .env) не найден."
+        hint "Запустите его или удалите CADDY_CONTAINER и CADDY_SITES_DIR из .env, чтобы listvpn поставил свой Caddy."
+        return 1
+    fi
+    local c cfg dir wd
+    c="$(_docker_caddy_on_ports)" || return 0
+    cfg="$(_docker_caddy_config "$c")"
+    wd="$(sudo docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null || true)"
+    log_warn "Порты 80/${HTTPS_PORT} занимает Caddy в Docker-контейнере «${c}»${wd:+ (${wd})}."
+    if ! dir="$(_docker_caddy_sites_dir "$c" "$cfg")"; then
+        log_error "В Caddy контейнера «${c}» нет папки сайтов с хоста, куда listvpn мог бы положить свой конфиг."
+        hint "Добавьте в его docker-compose том  - /etc/caddy/sites:/etc/caddy/sites"
+        hint "и в конец ${cfg} строку  import /etc/caddy/sites/*.caddy , перезапустите контейнер и запустите установку снова."
+        return 1
+    fi
+    hint "Сайты listvpn можно добавить в этот Caddy: файл ${dir}/blinvpn.caddy, остальные его сайты не меняются."
+    confirm "Подключить listvpn к Caddy контейнера «${c}»? (y/n): " || {
+        log_error "Без этого порты 80/${HTTPS_PORT} заняты — установка невозможна."
+        return 1
+    }
+    CADDY_CONTAINER="$c"
+    CADDY_SITES="$dir"
+    CADDY_SITE="${dir}/blinvpn.caddy"
+    CADDY_DOCKER_CONFIG="$cfg"
+    if [[ -f .env ]]; then
+        set_env_var CADDY_CONTAINER "$c"
+        set_env_var CADDY_SITES_DIR "$dir"
+        set_env_var CADDY_CONTAINER_CONFIG "$cfg"
+    fi
+    # свой Caddy на хосте больше не нужен: он бы спорил за порты
+    if sudo systemctl list-unit-files caddy.service >/dev/null 2>&1; then
+        sudo systemctl disable --now caddy >/dev/null 2>&1 || true
+    fi
+    sudo rm -f /etc/caddy/sites/blinvpn.caddy 2>/dev/null || true
+    log_success "✔ listvpn использует Caddy контейнера «${c}»."
+}
+
+_caddy_docker_reload() {
+    sudo docker exec "$CADDY_CONTAINER" caddy reload --adapter caddyfile --config "$CADDY_DOCKER_CONFIG" >"$1" 2>&1 \
+        || sudo docker restart "$CADDY_CONTAINER" >>"$1" 2>&1
+}
+
+# применить сайт в Caddy контейнера: проверка → reload, при ошибке — откат
+caddy_apply_site_docker() {
+    local src="$1" backup="" vlog
+    sudo mkdir -p "$CADDY_SITES"
+    if sudo test -f "$CADDY_SITE"; then
+        backup="$(mktemp)"; sudo cp -p "$CADDY_SITE" "$backup"
+    fi
+    sudo install -m 644 -o root -g root "$src" "$CADDY_SITE"
+    vlog="$(mktemp)"
+    if ! sudo docker exec "$CADDY_CONTAINER" caddy validate --adapter caddyfile --config "$CADDY_DOCKER_CONFIG" >"$vlog" 2>&1 \
+       || ! _caddy_docker_reload "$vlog"; then
+        sed 's/^/   /' "$vlog" | grep -v '^   *$' | tail -n 15
+        if [[ -n "$backup" ]]; then sudo install -m 644 -o root -g root "$backup" "$CADDY_SITE"; else sudo rm -f "$CADDY_SITE"; fi
+        _caddy_docker_reload /dev/null || true
+        rm -f "$backup" "$vlog"
+        log_error "Caddy контейнера «${CADDY_CONTAINER}» не принял конфигурацию — откатил, остальные сайты работают как раньше."
+        return 1
+    fi
+    rm -f "$backup" "$vlog"
+    log_success "✔ конфигурация добавлена в Caddy контейнера «${CADDY_CONTAINER}»."
+}
+
 caddy_version() { caddy version 2>/dev/null | awk '{print $1}' | sed 's/^v//'; }
 
 # официальный apt-репозиторий Caddy; если недоступен — бинарник с GitHub (с проверкой sha512)
@@ -620,6 +752,7 @@ rollback_to_nginx() {
 
 # применить файл сайта: проверка конфигурации, при ошибке — откат
 caddy_apply_site() {
+    caddy_is_docker && { caddy_apply_site_docker "$@"; return; }
     local src="$1" backup=""
     sudo mkdir -p "$CADDY_SITES"
     if sudo test -f "$CADDY_SITE"; then
@@ -657,7 +790,11 @@ caddy_wait_https() {
             sleep 3
         done
         log_error "Caddy не получил сертификат для ${d}."
-        sudo journalctl -u caddy --no-pager -n 60 2>/dev/null | grep -iE 'error|acme|challenge|certificate' | tail -n 8 | sed 's/^/   /' || true
+        if caddy_is_docker; then
+            sudo docker logs --tail 80 "$CADDY_CONTAINER" 2>&1 | grep -iE 'error|acme|challenge|certificate' | tail -n 8 | sed 's/^/   /' || true
+        else
+            sudo journalctl -u caddy --no-pager -n 60 2>/dev/null | grep -iE 'error|acme|challenge|certificate' | tail -n 8 | sed 's/^/   /' || true
+        fi
         hint "Проверьте: A-запись ${d} указывает на этот сервер, порты 80 и ${HTTPS_PORT} открыты, домен не проксируется через Cloudflare."
         return 1
     done
@@ -890,7 +1027,9 @@ EOF
     # /api сам узнаёт проект по домену. Конкретные сайты выше важнее этого общего.
     local any_addr="https://"
     [[ "$HTTPS_PORT" == "443" ]] || any_addr="https://:${HTTPS_PORT}"
-    cat >> "$tmp" <<EOF
+    # чужой Caddy в Docker: глобального on_demand_tls { ask … } у него нет, а без него on_demand не запустится —
+    # мини-приложения проектов ставятся на свои серверы (панель → «Проекты»)
+    caddy_is_docker || cat >> "$tmp" <<EOF
 
 # мини-приложения проектов на этом сервере (панель → «Проекты» → «Сервер панели»)
 ${any_addr} {
@@ -1119,6 +1258,11 @@ caddy_proxy_up() {
     [[ -f .env ]] && { ensure_env_var MINIAPP_GATEWAY_SECRET "$(gen_secret_hex)" .env || true; }
     local _xd
     while read -r _xd; do [[ -n "$_xd" ]] && domains+=("$_xd"); done < <(extra_project_domains)
+    caddy_detect_docker || return 1
+    if caddy_is_docker; then
+        apply_bot_proxy "$mini" "$panel" && caddy_wait_https "${domains[@]}"
+        return
+    fi
     install_caddy || return 1
     caddy_prepare_main "$email" || return 1
     free_ports_for_caddy || return 1
@@ -2400,6 +2544,9 @@ NGINX_CONF="/etc/nginx/sites-available/${PROJECT_DIR}.conf"
 NGINX_LINK="/etc/nginx/sites-enabled/${PROJECT_DIR}.conf"
 
 log_success "--- Установка / обновление listvpn (BatmanVPN, FGN …) ---"
+
+# сайты listvpn в Caddy чужого контейнера (CADDY_CONTAINER в .env) — конфиг лежит в его папке
+caddy_load_mode "$PROJECT_DIR/.env"
 
 # обновление существующей установки
 # установка до перехода на Caddy определяется по конфигу nginx
