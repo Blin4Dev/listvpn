@@ -2,15 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import { useSmartBack } from "../utils/navigation";
-import {
-  SUPPORT_PREFILL_KEY,
-  appFetch,
-  fetchAppLink,
-  fetchConfig,
-  fetchTraffic,
-  formatBytesRu,
-  type TrafficInfo,
-} from "../utils/api";
+import { appFetch, fetchAppLink } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
 import { copyText } from "../components/SubLinkBox";
@@ -44,31 +36,6 @@ function useNow(intervalMs: number) {
   return now;
 }
 
-// «без лимита» / «12,4 ГБ из 200 ГБ»
-function trafficValue(used: number | null | undefined, limit: number | undefined): string {
-  const l = Number(limit || 0);
-  if (l <= 0) return "без лимита";
-  return `${formatBytesRu(Math.max(0, Number(used || 0)))} из ${formatBytesRu(l)}`;
-}
-
-function TrafficRow({ label, value, warn, last }: { label: string; value: string; warn?: boolean; last?: boolean }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-        minHeight: 48,
-        borderBottom: last ? "none" : `1px solid ${N.divider}`,
-      }}
-    >
-      <span style={{ fontSize: 16.5, color: N.text }}>{label}</span>
-      <span style={{ fontSize: 16.5, fontWeight: 500, color: warn ? N.redText : N.text, textAlign: "right" }}>{value}</span>
-    </div>
-  );
-}
-
 export default function ManageSubscription() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -79,18 +46,15 @@ export default function ManageSubscription() {
   const [expiredAt, setExpiredAt] = useState<string | null>(null);
   const [deleteAt, setDeleteAt] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [trafficResetPrice, setTrafficResetPrice] = useState(0);
   // продление запрещено админом
   const [noRenew, setNoRenew] = useState(false);
   // пробная: доп. устройства не купить
   const [isTrial, setIsTrial] = useState(false);
-  const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
 
   const [sheet, setSheet] = useState<null | "setup" | "qr" | "key">(null);
 
-  useEffect(() => { void fetchTraffic().then(setTraffic); }, []);
   useEffect(() => {
     appFetch<DevicesResponse>("/devices").then(setDevices).catch(() => { /* нет данных */ });
   }, []);
@@ -107,11 +71,6 @@ export default function ManageSubscription() {
 
   useEffect(() => {
     void (async () => {
-      try {
-        const cfg = await fetchConfig();
-        const p = Number((cfg as { trafficResetPrice?: number }).trafficResetPrice ?? 0);
-        if (Number.isFinite(p)) setTrafficResetPrice(p);
-      } catch { /* без цены */ }
       try {
         const data = await appFetch<SubResponse>("/subscription");
         if (data.status === "expired") {
@@ -155,15 +114,6 @@ export default function ManageSubscription() {
   }, [msLeft]);
   const soon = msLeft < 3 * 86_400_000;
 
-  const requestTrafficReset = () => {
-    if (trafficResetPrice > 0) {
-      navigate("/payment?type=traffic_reset");
-      return;
-    }
-    try { sessionStorage.setItem(SUPPORT_PREFILL_KEY, "Здравствуйте! Прошу сбросить трафик по моей подписке."); } catch { /* ignore */ }
-    navigate("/support");
-  };
-
   const shareWithFriend = async () => {
     try {
       const r = await fetchAppLink("other");
@@ -200,8 +150,6 @@ export default function ManageSubscription() {
   const used = devices?.used ?? 0;
   const free = Math.max(0, limit - used);
   const canBuyDevices = !isTrial && (devices?.can_buy ?? true);
-  const mainTraffic = traffic?.available ? trafficValue(traffic.used_bytes, traffic.limit_bytes) : "без лимита";
-  const mainOver = !!(traffic?.available && traffic.limit_bytes && (traffic.used_bytes || 0) >= traffic.limit_bytes);
 
   // плавное появление блоков
   const rise = (i: number): React.CSSProperties => ({
@@ -259,20 +207,7 @@ export default function ManageSubscription() {
         </NoirCard>
       </div>
 
-      <div style={rise(2)}>
-        <NoirSection>Трафик</NoirSection>
-        <NoirCard style={{ padding: "4px 18px" }}>
-          <TrafficRow label="VPN" value={mainTraffic} warn={mainOver} last />
-        </NoirCard>
-        <div style={{ marginTop: 12 }}>
-          <NoirRow title="Сбросить трафик" onClick={requestTrafficReset} />
-        </div>
-        <div style={{ marginTop: 10, fontSize: 14, color: N.muted }}>
-          {trafficResetPrice > 0 ? `Сброс платный — ${trafficResetPrice} ₽.` : "Сброс по заявке в поддержку."}
-        </div>
-      </div>
-
-      <div style={{ ...rise(3), display: "flex", flexDirection: "column", gap: 12, marginTop: 26 }}>
+      <div style={{ ...rise(2), display: "flex", flexDirection: "column", gap: 12, marginTop: 26 }}>
         <NoirButton primary icon="download" onClick={() => setSheet("setup")}>Добавить подписку</NoirButton>
         {!noRenew ? (
           <NoirButton green icon="shopping_bag" onClick={() => navigate("/subscription/extend")}>Купить подписку</NoirButton>
