@@ -206,7 +206,14 @@ def build_router(core: Any) -> APIRouter:
         body = body or TokenIn()
         init_data = (body.init_data or x_telegram_init_data or "").strip()
         if init_data:
-            data = core.validate_webapp_init_data(init_data)  # подпись бота + срок
+            try:
+                data = core.validate_webapp_init_data(init_data)  # подпись бота + срок
+            except core.InitDataExpired:
+                raise _err(401, "initData устарел — откройте приложение заново", "init_data_expired")
+            except HTTPException as e:
+                d = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+                code = "bot_not_configured" if e.status_code == 503 else "init_data_invalid"
+                raise HTTPException(e.status_code, detail={**d, "code": d.get("code") or code})
             try:
                 auth_date = int(dict(parse_qsl(init_data)).get("auth_date") or 0)
             except ValueError:
@@ -564,7 +571,8 @@ def build_router(core: Any) -> APIRouter:
             res = core.app_payment_create(body, request, fresh)
         except HTTPException as e:
             d = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
-            raise HTTPException(e.status_code, detail={**d, "code": d.get("code") or "payment_error"})
+            code = d.get("code") or ("payments_unavailable" if e.status_code == 503 else "payment_error")
+            raise HTTPException(e.status_code, detail={**d, "code": code})
         paid = bool(res.get("paid"))
         if not paid and not res.get("pay_url"):
             raise _err(502, "Не удалось создать платёж", "payment_error")
