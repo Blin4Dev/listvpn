@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -56,8 +57,17 @@ EMOJI_KEY = _env("EMOJI_KEY", default="6005570495603282482")
 EMOJI_CHAT = _env("EMOJI_CHAT", default="5994297722574737553")
 
 
+# последняя ошибка Telegram в этом потоке: (код, описание) — чтобы polling мог сказать, почему не получает апдейты
+_tl = threading.local()
+
+
+def last_error() -> Optional[tuple[int, str]]:
+    return getattr(_tl, "err", None)
+
+
 def api(method: str, payload: Optional[dict[str, Any]] = None, *, timeout: float = 35.0,
         _retries: int = 1) -> Any:
+    _tl.err = None
     url = f"{API_BASE}/bot{P().bot_token}/{method}"
     data = json.dumps(payload or {}).encode("utf-8")
     req = urllib.request.Request(
@@ -71,6 +81,7 @@ def api(method: str, payload: Optional[dict[str, Any]] = None, *, timeout: float
         try:
             body = json.loads(raw)
         except json.JSONDecodeError:
+            _tl.err = (e.code, raw[:200] or str(e.reason))
             return None
         # 429: один retry по retry_after
         if e.code == 429 and _retries > 0:
@@ -80,9 +91,14 @@ def api(method: str, payload: Optional[dict[str, Any]] = None, *, timeout: float
                 ra = 1.0
             time.sleep(min(ra, 30) + 0.1)
             return api(method, payload, timeout=timeout, _retries=_retries - 1)
-    except urllib.error.URLError:
+    except urllib.error.URLError as e:
+        _tl.err = (0, f"нет связи с Telegram: {e.reason}")
+        return None
+    except (TimeoutError, OSError) as e:
+        _tl.err = (0, f"нет связи с Telegram: {e}")
         return None
     if not body.get("ok"):
+        _tl.err = (int(body.get("error_code") or 0), str(body.get("description") or "ошибка Telegram"))
         return None
     return body.get("result")
 
@@ -499,9 +515,29 @@ def _poll(pid: str, token: str) -> None:
                                             "description": P().bot_text("command_description", f"Запустить {P().name}")}]})
         offset = 0
         allowed = ["message", "edited_message", "callback_query", "pre_checkout_query"]
+        reported = ""
         while P().bot_token == token and P().active:
             try:
                 updates = api("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": allowed}, timeout=40)
+                if updates is None:
+                    # getUpdates не прошёл: раньше молча крутились в цикле и бот «молчал»
+                    code, desc = last_error() or (0, "нет ответа")
+                    msg = desc
+                    if code == 409:
+                        msg = ("этот токен уже опрашивает другая программа (другой бот/сервер с тем же токеном) "
+                               "или ей выставлен webhook — остановите её или выпустите боту новый токен в @BotFather")
+                    elif code == 401:
+                        msg = "токен недействителен — обновите его в панели (Настройки → Проект)"
+                    if msg != reported:
+                        print(f"[bot:{pid}] не получает сообщения: {msg} ({code or '—'}: {desc})", flush=True)
+                        reported = msg
+                    time.sleep(5 if code == 409 else 3)
+                    if code == 409:
+                        api("deleteWebhook", {"drop_pending_updates": False})
+                    continue
+                if reported:
+                    print(f"[bot:{pid}] снова получает сообщения", flush=True)
+                    reported = ""
                 if not updates or P().bot_token != token or not P().active:
                     continue
                 for upd in updates:
@@ -518,7 +554,6 @@ SUPERVISE_SEC = 10
 
 def run() -> None:
     """бот всех проектов сети. Токены — в панели (Настройки → Проект), подхватываются без перезапуска."""
-    import threading
 
     db.init_db()
     # фоновые напоминания — одни на всю сеть; каждое сообщение уходит ботом проекта пользователя
