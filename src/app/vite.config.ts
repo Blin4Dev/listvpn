@@ -28,6 +28,8 @@ const BRAND = {
   channelUrl: String(CFG.channel?.url || (CFG.channel?.id ? `https://t.me/${String(CFG.channel.id).replace(/^@/, "")}` : "")),
   version: String(CFG.app_version || "1.0"),
   features: Object.fromEntries(Object.entries(CFG.features || {}).map(([k, v]) => [k, !!v])),
+  // свои названия реферальных уровней (у BatmanVPN — FRESHMAN…); сервер присылает те же, это запасные
+  refLevelNames: Object.fromEntries(Object.entries(CFG.ref_level_names || {}).map(([k, v]) => [k, String(v)])),
 };
 
 const MIME: Record<string, string> = {

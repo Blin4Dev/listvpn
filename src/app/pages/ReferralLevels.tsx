@@ -3,16 +3,17 @@ import { useSmartBack } from "../utils/navigation";
 import { loadReferral, peekReferral } from "../utils/referral";
 import { btnReset } from "../components/ui";
 import { N, NoirBack, NoirCard, NoirScreen } from "../components/noir";
+import { levelName } from "../utils/brand";
 
 type Level = { key: string; name: string; min: number; rate: number; gifts: number; self_free_from: number };
 
 // на случай, если сервер не ответил
 const FALLBACK: Level[] = [
-  { key: "starter", name: "FRESHMAN", min: 0, rate: 20, gifts: 0, self_free_from: 5 },
-  { key: "spreader", name: "LOYAL", min: 30, rate: 25, gifts: 1, self_free_from: 0 },
-  { key: "special", name: "PERSON", min: 50, rate: 30, gifts: 2, self_free_from: 0 },
-  { key: "greater", name: "GOTHAM BOSS", min: 100, rate: 35, gifts: 3, self_free_from: 0 },
-  { key: "gen_s", name: "BRUCE WAYNE", min: 1000, rate: 50, gifts: 10, self_free_from: 0 },
+  { key: "starter", name: levelName("starter", "Starter"), min: 0, rate: 20, gifts: 0, self_free_from: 5 },
+  { key: "spreader", name: levelName("spreader", "Spreader"), min: 30, rate: 25, gifts: 1, self_free_from: 0 },
+  { key: "special", name: levelName("special", "Special"), min: 50, rate: 30, gifts: 2, self_free_from: 0 },
+  { key: "greater", name: levelName("greater", "Greater"), min: 100, rate: 35, gifts: 3, self_free_from: 0 },
+  { key: "gen_s", name: levelName("gen_s", "Gen S"), min: 1000, rate: 50, gifts: 10, self_free_from: 0 },
 ];
 
 function plural(n: number, one: string, few: string, many: string) {

@@ -17,11 +17,11 @@ except ImportError:
 
 # ключ, название, от скольки активных, % с платежей, подарков в месяц, бесплатная подписка себе
 LEVELS: list[dict[str, Any]] = [
-    {"key": "starter", "name": "FRESHMAN", "min": 0, "rate": 20, "gifts": 0, "self_free_from": 5},
-    {"key": "spreader", "name": "LOYAL", "min": 30, "rate": 25, "gifts": 1, "self_free_from": 0},
-    {"key": "special", "name": "PERSON", "min": 50, "rate": 30, "gifts": 2, "self_free_from": 0},
-    {"key": "greater", "name": "GOTHAM BOSS", "min": 100, "rate": 35, "gifts": 3, "self_free_from": 0},
-    {"key": "gen_s", "name": "BRUCE WAYNE", "min": 1000, "rate": 50, "gifts": 10, "self_free_from": 0},
+    {"key": "starter", "name": "Starter", "min": 0, "rate": 20, "gifts": 0, "self_free_from": 5},
+    {"key": "spreader", "name": "Spreader", "min": 30, "rate": 25, "gifts": 1, "self_free_from": 0},
+    {"key": "special", "name": "Special", "min": 50, "rate": 30, "gifts": 2, "self_free_from": 0},
+    {"key": "greater", "name": "Greater", "min": 100, "rate": 35, "gifts": 3, "self_free_from": 0},
+    {"key": "gen_s", "name": "Gen S", "min": 1000, "rate": 50, "gifts": 10, "self_free_from": 0},
 ]
 
 # награды раз в 30 дней (скользящее окно)
@@ -141,16 +141,32 @@ def invited_referrals(user_id: int) -> int:
     return int((row or {}).get("c") or 0)
 
 
+def level_name(key: str) -> str:
+    """название уровня: своё у проекта (project.json → ref_level_names, у BatmanVPN — FRESHMAN…), иначе общее."""
+    try:
+        own = (db.projects.current().cfg.get("ref_level_names") or {}).get(key)
+    except Exception:  # noqa: BLE001
+        own = None
+    if own:
+        return str(own)
+    return next((str(lv["name"]) for lv in LEVELS if lv["key"] == key), key)
+
+
+def _named(lv: dict[str, Any]) -> dict[str, Any]:
+    return {**lv, "name": level_name(lv["key"])}
+
+
 def level_for(active: int) -> dict[str, Any]:
     cur = LEVELS[0]
     for lv in LEVELS:
         if active >= lv["min"]:
             cur = lv
-    return cur
+    return _named(cur)
 
 
 def next_level(active: int) -> Optional[dict[str, Any]]:
-    return next((lv for lv in LEVELS if lv["min"] > active), None)
+    nxt = next((lv for lv in LEVELS if lv["min"] > active), None)
+    return _named(nxt) if nxt else None
 
 
 def self_free_eligible(level: dict[str, Any], active: int) -> bool:
@@ -339,7 +355,7 @@ def create_gift(user: dict[str, Any]) -> dict[str, Any]:
     uid = int(user["id"])
     st = rewards_state(user)["gifts"]
     if st["per_month"] <= 0:
-        raise RewardError("Подарки доступны с уровня LOYAL (30 активных друзей)")
+        raise RewardError(f"Подарки доступны с уровня {level_name('spreader')} (30 активных друзей)")
     if st["left"] <= 0:
         raise RewardError("Лимит подарков на этот месяц исчерпан")
     code = GIFT_PREFIX + secrets.token_hex(4).upper()
@@ -516,7 +532,7 @@ def gift_preview(code: str) -> Optional[dict[str, Any]]:
 
 def levels_public() -> list[dict[str, Any]]:
     return [
-        {"key": lv["key"], "name": lv["name"], "min": lv["min"], "rate": lv["rate"],
+        {"key": lv["key"], "name": level_name(lv["key"]), "min": lv["min"], "rate": lv["rate"],
          "gifts": lv["gifts"], "self_free_from": lv["self_free_from"]}
         for lv in LEVELS
     ]

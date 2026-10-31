@@ -15,5 +15,12 @@
   "theme_color": "#05050A",
   "features": {
     "intro_static": true
+  },
+  "ref_level_names": {
+    "starter": "FRESHMAN",
+    "spreader": "LOYAL",
+    "special": "PERSON",
+    "greater": "GOTHAM BOSS",
+    "gen_s": "BRUCE WAYNE"
   }
 }

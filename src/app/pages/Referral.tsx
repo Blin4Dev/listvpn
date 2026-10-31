@@ -6,7 +6,7 @@ import { formatDateRu } from "../utils/date";
 import { copyText } from "../components/SubLinkBox";
 import { MSIcon, btnReset } from "../components/ui";
 import { N, NoirBack, NoirButton, NoirCard, NoirScreen, NoirSheet } from "../components/noir";
-import { BRAND_NAME } from "../utils/brand";
+import { BRAND_NAME, levelName } from "../utils/brand";
 import { loadReferral, patchReferral, peekReferral, type ReferralData } from "../utils/referral";
 
 type Sheet = null | "withdraw" | "requests" | "free" | "gift";
@@ -419,7 +419,7 @@ function GiftSheet({ data, onClose, onCreated, onBuy }: { data: ReferralData; on
     <NoirSheet title="Подарить подписку" onClose={onClose}>
       <div style={{ fontSize: 15, lineHeight: 1.5, color: N.muted, marginBottom: 16 }}>
         {!g || g.per_month <= 0
-          ? `Подарки открываются с уровня LOYAL — нужно 30 активных друзей, у вас ${Number(data.active_count || 0)}.`
+          ? `Подарки открываются с уровня ${levelName("spreader", "Spreader")} — нужно 30 активных друзей, у вас ${Number(data.active_count || 0)}.`
           : g.left > 0
             ? `Можно подарить другу месяц подписки. Осталось в этом месяце: ${g.left} из ${g.per_month}.`
             : `Подарки на этот месяц закончились. Новые — ${g.next_at ? formatDateRu(g.next_at) : "через месяц"}.`}
