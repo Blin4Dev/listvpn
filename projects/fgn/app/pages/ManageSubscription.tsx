@@ -5,6 +5,7 @@ import { useSmartBack } from "../utils/navigation";
 import { appFetch, fetchTraffic, formatBytesRu, type TrafficInfo } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
+import ReissueKey from "../components/ReissueKey";
 import { C, FgnDialog, FgnHeader, FgnIcon, FgnPage, fgnButton } from "../components/fgn";
 
 type SubResponse = {
@@ -151,6 +152,7 @@ export default function ManageSubscription() {
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
+  const [reissue, setReissue] = useState(false);
   const [setup, setSetup] = useState(false);
   const [limitDlg, setLimitDlg] = useState(false);
   const [family, setFamily] = useState<{ ownerName: string } | null>(null);
@@ -315,10 +317,13 @@ export default function ManageSubscription() {
             subtitle={devices ? `${used} подключено` : undefined}
             onClick={() => navigate("/subscription/devices")}
           />
+          {/* ключ общий для семьи — сбрасывает только владелец */}
+          {!family ? <ActionRow tone="gray" icon="key" title="Сбросить ключ" onClick={() => setReissue(true)} /> : null}
         </div>
       </div>
 
       {setup ? <SetupSheet onClose={closeSetup} /> : null}
+      {reissue ? <ReissueKey onClose={() => setReissue(false)} /> : null}
       {limitDlg ? (
         <FgnDialog
           text={canBuyDevices ? "Вы достигли лимит устройств вы можете докупить устройства" : "Вы достигли лимит устройств"}

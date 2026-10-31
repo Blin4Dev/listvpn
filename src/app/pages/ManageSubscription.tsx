@@ -5,6 +5,7 @@ import { useSmartBack } from "../utils/navigation";
 import { appFetch, fetchAppLink } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
+import ReissueKey from "../components/ReissueKey";
 import { copyText } from "../components/SubLinkBox";
 import { MSIcon } from "../components/ui";
 import { N, NoirBack, NoirButton, NoirCard, NoirRow, NoirScreen, NoirSection, NoirSheet } from "../components/noir";
@@ -53,7 +54,7 @@ export default function ManageSubscription() {
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
 
-  const [sheet, setSheet] = useState<null | "setup" | "qr" | "key">(null);
+  const [sheet, setSheet] = useState<null | "setup" | "qr" | "key" | "reissue">(null);
 
   useEffect(() => {
     appFetch<DevicesResponse>("/devices").then(setDevices).catch(() => { /* нет данных */ });
@@ -218,12 +219,14 @@ export default function ManageSubscription() {
           <NoirRow icon="smartphone" title="Купить устройства" onClick={() => navigate("/subscription/increase")} />
         ) : null}
         <NoirRow icon="desktop_windows" title="Управление устройствами" onClick={() => navigate("/subscription/devices")} />
+        <NoirRow icon="key" title="Сбросить ключ" onClick={() => setSheet("reissue")} />
         <NoirRow icon="chat_bubble" title="Как вставить ключ" onClick={() => setSheet("key")} />
       </div>
 
       {sheet === "setup" && <SetupSheet onClose={closeSheet} />}
       {sheet === "qr" && <QrSheet onClose={closeSheet} />}
       {sheet === "key" && <KeySheet onClose={closeSheet} />}
+      {sheet === "reissue" && <ReissueKey onClose={closeSheet} />}
     </NoirScreen>
   );
 }

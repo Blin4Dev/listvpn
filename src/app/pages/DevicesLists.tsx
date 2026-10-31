@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch, reissueKey, revokeDevice } from "../utils/api";
-import { copyText } from "../components/SubLinkBox";
+import { appFetch, revokeDevice } from "../utils/api";
+import ReissueKey from "../components/ReissueKey";
 import { btnReset } from "../components/ui";
 import { N, NoirBack, NoirButton, NoirScreen, NoirSheet } from "../components/noir";
 
@@ -30,8 +30,7 @@ export default function DevicesLists() {
   const [loading, setLoading] = useState(true);
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmDev, setConfirmDev] = useState<{ id: string; title: string } | null>(null);
-  const [reissue, setReissue] = useState<null | "confirm" | "busy" | { link: string } | { error: string }>(null);
-  const [copied, setCopied] = useState(false);
+  const [reissue, setReissue] = useState(false);
 
   const load = async () => {
     try {
@@ -55,18 +54,6 @@ export default function DevicesLists() {
     if (ok) setDevices((list) => list.filter((d) => String(d.id ?? "") !== id));
     setRemoving(null);
     if (ok) void load();
-  };
-
-  const doReissue = async () => {
-    setReissue("busy");
-    try {
-      const r = await reissueKey();
-      setReissue({ link: r.subscription_url || "" });
-      setDevices([]);
-      void load();
-    } catch (e) {
-      setReissue({ error: e instanceof Error ? e.message : "Не удалось перевыпустить ключ. Попробуйте позже." });
-    }
   };
 
   const rise = (i: number): React.CSSProperties => ({ animation: `blinvpnRise 0.55s var(--ease-out) ${0.04 * i}s both` });
@@ -141,7 +128,7 @@ export default function DevicesLists() {
       )}
 
       <div style={{ ...rise(devices.length + 1), marginTop: 32 }}>
-        <NoirButton onClick={() => setReissue("confirm")}>Перевыпустить ключ</NoirButton>
+        <NoirButton onClick={() => setReissue(true)}>Сбросить ключ</NoirButton>
       </div>
 
       {confirmDev ? (
@@ -156,66 +143,7 @@ export default function DevicesLists() {
         </NoirSheet>
       ) : null}
 
-      {reissue === "confirm" || reissue === "busy" ? (
-        <NoirSheet title="Перевыпустить ключ?" onClose={() => { if (reissue !== "busy") setReissue(null); }}>
-          <div style={{ fontSize: 15, lineHeight: 1.5, color: N.muted, marginBottom: 20 }}>
-            Старый ключ перестанет работать, а все устройства отвяжутся. Новый ключ нужно будет заново добавить в приложение на каждом устройстве.
-            <br />
-            <br />
-            Делайте это, если ключ попал к посторонним.
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <NoirButton primary disabled={reissue === "busy"} onClick={() => void doReissue()}>
-              {reissue === "busy" ? "Перевыпускаем…" : "Перевыпустить"}
-            </NoirButton>
-            <NoirButton disabled={reissue === "busy"} onClick={() => setReissue(null)}>Отмена</NoirButton>
-          </div>
-        </NoirSheet>
-      ) : null}
-
-      {reissue && typeof reissue === "object" ? (
-        <NoirSheet title={"error" in reissue ? "Не получилось" : "Ключ перевыпущен"} onClose={() => { setReissue(null); setCopied(false); }}>
-          {"error" in reissue ? (
-            <>
-              <div style={{ fontSize: 15, lineHeight: 1.5, color: N.muted, marginBottom: 20 }}>{reissue.error}</div>
-              <NoirButton onClick={() => setReissue(null)}>Закрыть</NoirButton>
-            </>
-          ) : (
-            <>
-              <div style={{ fontSize: 15, lineHeight: 1.5, color: N.muted, marginBottom: 14 }}>
-                Старый ключ больше не работает. Скопируйте новый и добавьте его в приложение.
-              </div>
-              {reissue.link ? (
-                <div
-                  style={{
-                    background: "rgba(255,255,255,0.05)",
-                    border: `1px solid ${N.cardBorder}`,
-                    borderRadius: 16,
-                    padding: "12px 14px",
-                    fontSize: 13,
-                    lineHeight: 1.45,
-                    color: N.muted,
-                    wordBreak: "break-all",
-                    userSelect: "all",
-                    WebkitUserSelect: "all",
-                    marginBottom: 14,
-                  }}
-                >
-                  {reissue.link}
-                </div>
-              ) : null}
-              <NoirButton
-                primary
-                disabled={!reissue.link}
-                icon={copied ? "check" : "content_copy"}
-                onClick={() => { void copyText(reissue.link).then((ok) => ok && setCopied(true)); }}
-              >
-                {copied ? "Скопировано" : "Скопировать ключ"}
-              </NoirButton>
-            </>
-          )}
-        </NoirSheet>
-      ) : null}
+      {reissue ? <ReissueKey onClose={() => setReissue(false)} onDone={() => { setDevices([]); void load(); }} /> : null}
     </NoirScreen>
   );
 }
