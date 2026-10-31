@@ -7100,10 +7100,23 @@ def _family_tg_notify(u: Optional[dict[str, Any]], text: str) -> None:
         print(f"[family] не удалось отправить сообщение: {exc}", flush=True)
 
 
+def family_keeps_key(owner: Optional[dict[str, Any]]) -> bool:
+    """features.family_keep_key в project.json проекта владельца (у FGN): при выходе/удалении гостя
+    ключ владельца НЕ сбрасывается и устройства не отвязываются."""
+    try:
+        return bool(owner) and bool(projects.get(projects.of(owner)).feature("family_keep_key"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _family_revoke_owner_key(owner: Optional[dict[str, Any]], who: str) -> None:
     """участник ушёл из семьи, но ссылка подписки владельца у него осталась в VPN-клиенте:
-    перевыпускаем ключ владельца, чтобы старая ссылка перестала работать."""
+    перевыпускаем ключ владельца, чтобы старая ссылка перестала работать
+    (кроме проектов с features.family_keep_key — там только уведомление владельцу)."""
     if not owner:
+        return
+    if family_keeps_key(owner):
+        _family_tg_notify(owner, f"{_esc_html(who)} больше не в вашей семье.")
         return
     try:
         reset_user_subscription(owner)

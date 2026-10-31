@@ -711,6 +711,9 @@ def build_router(core: Any) -> APIRouter:
         """гость ушёл/удалён: ключ владельца перевыпускается, все устройства отвязываются (как в мини-приложении)."""
         if not owner:
             return
+        if core.family_keeps_key(owner):  # FGN: ключ и устройства не трогаем, только уведомление владельцу
+            core._family_revoke_owner_key(owner, who)
+            return
         old = db.fetchone("SELECT short_uuid FROM subscriptions WHERE user_id = ? AND status = 'Active' "
                           "ORDER BY id DESC LIMIT 1", (int(owner["id"]),))
         core._family_revoke_owner_key(owner, who)
