@@ -1126,8 +1126,13 @@ def build_router(core: Any):
 
     @r.get("/api/internal/miniapp/route")
     def local_route(request: Request) -> Response:
-        """forward_auth: проект статики по домену → X-Project для контейнера мини-приложений."""
-        _loopback(request)
+        """forward_auth: проект статики по домену → X-Project для контейнера мини-приложений.
+        Проверку «запрос с 127.0.0.1» здесь делать нельзя: forward_auth Caddy передаёт X-Forwarded-For
+        пользователя, uvicorn (--forwarded-allow-ips 127.0.0.1) подставляет его IP — и каждый пользователь
+        получал 404 вместо мини-приложения. Снаружи /api/internal* закрыт в Caddy (respond 404), а сам ответ —
+        только id проекта по домену. Требуем заголовки, которые ставит forward_auth."""
+        if not (request.headers.get("x-forwarded-method") and request.headers.get("x-forwarded-uri")):
+            _loopback(request)
         host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
         pid = local_domains().get(norm_domain(host))
         if not pid:
