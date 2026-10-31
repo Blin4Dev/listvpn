@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { markEntered } from "../utils/homeIntro";
-import { BRAND_NAME } from "../utils/brand";
+import { BRAND_NAME, hasFeature } from "../utils/brand";
 import { useTgBack } from "./noir";
 import { acceptTerms, fetchLegal } from "../utils/api";
 import { MSIcon } from "./ui";
@@ -10,6 +10,8 @@ const VIDEO_MP4 = "/assets/intro.mp4";
 // запасной вариант для webview без H.264 (напр. Telegram Desktop на Linux)
 const VIDEO_WEBM = "/assets/intro.webm";
 const POSTER_SRC = "/assets/intro-poster.jpg";
+// features.intro_static в project.json: вместо видео — статичная картинка intro-poster.jpg проекта
+const STATIC_INTRO = hasFeature("intro_static");
 // сколько длится растворение экрана после касания
 const LEAVE_MS = 520;
 
@@ -48,7 +50,7 @@ function haptic(kind: "impact" | "success") {
 }
 
 /**
- * Стартовый экран: видео на фоне + «Коснитесь, чтобы войти».
+ * Стартовый экран: видео на фоне (или статичная картинка — features.intro_static) + «Коснитесь, чтобы войти».
  * Касание → если оферта не принята, поверх видео выезжает приветствие;
  * иначе экран растворяется и открывается главная.
  */
@@ -63,6 +65,10 @@ export default function EnterScreen({ terms, onAccepted }: { terms: EnterTerms; 
   const [hintOn, setHintOn] = useState(false);
 
   useEffect(() => {
+    if (STATIC_INTRO) {
+      const t = window.setTimeout(() => setHintOn(true), 500);
+      return () => window.clearTimeout(t);
+    }
     const v = videoRef.current;
     if (!v) return;
     // iOS / Telegram WebView: автоплей только muted + playsInline, выставляем явно
@@ -135,7 +141,7 @@ export default function EnterScreen({ terms, onAccepted }: { terms: EnterTerms; 
         fontFamily: C.font,
       }}
     >
-      <video
+      {STATIC_INTRO ? null : <video
         ref={videoRef}
         poster={POSTER_SRC}
         autoPlay
@@ -157,7 +163,7 @@ export default function EnterScreen({ terms, onAccepted }: { terms: EnterTerms; 
       >
         <source src={VIDEO_MP4} type="video/mp4" />
         <source src={VIDEO_WEBM} type="video/webm" />
-      </video>
+      </video>}
 
       {/* затемнение снизу: короткое под подписью, высокое под приветствием */}
       <div

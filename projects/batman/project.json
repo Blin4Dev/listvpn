@@ -13,5 +13,7 @@
     "open_app_text": "🚀 Открыть BatmanVPN"
   },
   "theme_color": "#05050A",
-  "features": {}
+  "features": {
+    "intro_static": true
+  }
 }
