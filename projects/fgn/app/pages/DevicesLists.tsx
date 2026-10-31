@@ -15,7 +15,7 @@ const TEXT = "#F4F4F5";
 const RED = "#FF6B6B";
 
 type Device = { id?: string | number; name?: string; platform?: string };
-type DevicesResponse = { devices?: Device[]; used?: number; limit?: number; can_buy?: boolean };
+type DevicesResponse = { devices?: Device[]; used?: number; limit?: number; can_buy?: boolean; can_delete?: boolean };
 
 /** «iOS · iPhone 15» → заголовок «iPhone 15», подпись «iOS» */
 function deviceText(d: Device, idx: number): { title: string; subtitle: string } {
@@ -69,6 +69,8 @@ export default function DevicesLists() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [limit, setLimit] = useState<number | null>(null);
   const [canBuy, setCanBuy] = useState(false);
+  // гость семьи: устройства видит, отвязывает только владелец
+  const [canDelete, setCanDelete] = useState(true);
   const [loading, setLoading] = useState(true);
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmDev, setConfirmDev] = useState<{ id: string; title: string } | null>(null);
@@ -79,6 +81,7 @@ export default function DevicesLists() {
       setDevices(Array.isArray(data?.devices) ? data.devices : []);
       if (data?.limit != null) setLimit(Number(data.limit));
       setCanBuy(!!data?.can_buy);
+      setCanDelete(data?.can_delete !== false);
     } catch {
       setDevices([]);
     } finally {
@@ -150,7 +153,7 @@ export default function DevicesLists() {
                     </div>
                   ) : null}
                 </div>
-                <button
+                {canDelete ? <button
                   type="button"
                   disabled={!id || busy}
                   onClick={() => setConfirmDev({ id, title })}
@@ -170,7 +173,7 @@ export default function DevicesLists() {
                   }}
                 >
                   {busy ? "Отвязываем…" : "Отвязать"}
-                </button>
+                </button> : null}
               </div>
             );
           })}

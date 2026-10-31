@@ -31,10 +31,13 @@ export default function DevicesLists() {
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmDev, setConfirmDev] = useState<{ id: string; title: string } | null>(null);
   const [reissue, setReissue] = useState(false);
+  // гость семьи видит устройства общей подписки, но отвязывает их только владелец
+  const [canDelete, setCanDelete] = useState(true);
 
   const load = async () => {
     try {
-      const data = await appFetch<{ devices?: Device[]; used?: number; limit?: number }>("/devices");
+      const data = await appFetch<{ devices?: Device[]; used?: number; limit?: number; can_delete?: boolean }>("/devices");
+      setCanDelete(data?.can_delete !== false);
       setDevices(Array.isArray(data?.devices) ? data.devices : []);
       if (data?.limit != null) setLimit(Number(data.limit));
     } catch {
@@ -103,7 +106,7 @@ export default function DevicesLists() {
                 <span style={{ flex: 1, minWidth: 0, fontSize: 17, color: N.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {title}
                 </span>
-                <button
+                {canDelete ? <button
                   type="button"
                   disabled={!id || busy}
                   onClick={() => setConfirmDev({ id, title })}
@@ -120,7 +123,7 @@ export default function DevicesLists() {
                   }}
                 >
                   {busy ? "Удаляем…" : "Удалить"}
-                </button>
+                </button> : null}
               </div>
             );
           })}
@@ -128,7 +131,13 @@ export default function DevicesLists() {
       )}
 
       <div style={{ ...rise(devices.length + 1), marginTop: 32 }}>
-        <NoirButton onClick={() => setReissue(true)}>Сбросить ключ</NoirButton>
+        {canDelete ? (
+          <NoirButton onClick={() => setReissue(true)}>Сбросить ключ</NoirButton>
+        ) : (
+          <div style={{ fontSize: 14.5, lineHeight: 1.5, color: N.muted }}>
+            Устройства общие для семьи — отвязывает их владелец подписки. Докупить слот можно и вам.
+          </div>
+        )}
       </div>
 
       {confirmDev ? (

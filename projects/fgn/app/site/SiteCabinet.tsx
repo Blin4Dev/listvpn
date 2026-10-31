@@ -407,7 +407,7 @@ function Subscription({ nav }: { nav: CabNav }) {
         <Tile
           icon={Ic.phone()}
           title="Купить устройства"
-          sub={d && !d.can_buy ? (member ? "Докупает владелец подписки" : "Доступно с платной подпиской") : undefined}
+          sub={d && !d.can_buy ? "Доступно с платной подпиской" : undefined}
           disabled={!!d && !d.can_buy}
           onClick={() => nav.go("/cabinet/devices/buy")}
         />

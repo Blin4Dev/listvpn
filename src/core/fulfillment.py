@@ -682,11 +682,22 @@ def grant_subscription(
     if purpose == "devices" and subscription_id:
         # добавить устройства, срок не трогаем
         sub = db.fetchone(
-            "SELECT * FROM subscriptions WHERE id = ? AND user_id = ? AND status = 'Active'",
-            (subscription_id, user["id"]),
+            "SELECT * FROM subscriptions WHERE id = ? AND status = 'Active'", (subscription_id,),
         )
         if not sub:
             raise ValueError("subscription_not_found")
+        if int(sub["user_id"]) != int(user["id"]):
+            # докупку оплатил гость семьи: слоты — в подписку владельца, Remnawave — тоже владельца
+            guest = db.fetchone(
+                "SELECT 1 FROM family_members WHERE owner_id = ? AND member_id = ? AND status = 'active'",
+                (int(sub["user_id"]), int(user["id"])),
+            )
+            if not guest:
+                raise ValueError("subscription_not_found")
+            user = get_user(int(sub["user_id"])) or user
+            telegram_id = int(user["telegram_id"]) if user.get("telegram_id") else None
+            username = user.get("username")
+            email = user.get("email")
         new_devices = int(sub.get("devices_limit") or 1) + max(1, int(extra_devices or 1))
         expire_dt = parse_iso(sub.get("expires_at")) or (utcnow() + timedelta(days=added_days))
         prov = provisioning.provision(

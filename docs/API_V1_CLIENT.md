@@ -320,7 +320,7 @@ POST {BASE}/auth/logout?all_sessions=true  → {"ok": true, "revoked": 3}
 
 ### POST /purchases/hwid-slot/create
 
-Докупить слоты устройств к своей активной **платной** подписке.
+Докупить слоты устройств к активной **платной** подписке. Гость семьи тоже может — слоты добавятся в общую подписку владельца.
 
 ```json
 {"count": 1, "months": 1}
@@ -328,7 +328,7 @@ POST {BASE}/auth/logout?all_sessions=true  → {"ok": true, "revoked": 3}
 
 `count` — 1–10 слотов; `months` — 1, 3, 6 или 12. Ответ — как у `/purchases/yookassa/create`. После оплаты растёт `hwid_limit` (см. `/family`).
 
-Ошибки: `403 family_member` (докупает владелец), `409 no_subscription`, `422 bad_months`, плюс ошибки оплаты выше.
+Ошибки: `409 no_subscription`, `422 bad_months`, плюс ошибки оплаты выше.
 
 ### GET /purchases/{purchase_id}/status
 
@@ -389,7 +389,7 @@ POST {BASE}/auth/logout?all_sessions=true  → {"ok": true, "revoked": 3}
 | `used_hwids` / `hwid_limit` | занято / всего слотов на подписку |
 | `devices[].id` | HWID устройства — его передают в `DELETE /family/devices/{id}` |
 | `devices[].user_id` | чьё устройство (владелец или гость) |
-| `devices[].can_delete` | может ли текущий пользователь его отвязать |
+| `devices[].can_delete` | может ли текущий пользователь его отвязать: `true` только у владельца подписки |
 | `devices_available` | `false` — список устройств сейчас не получить (панель не ответила) |
 | `max_members` | максимум человек в семье |
 | `can_invite`, `invite` | только у владельца с платной подпиской; `invite.link` может быть `null`, если у проекта не задан адрес |
@@ -426,9 +426,9 @@ POST {BASE}/auth/logout?all_sessions=true  → {"ok": true, "revoked": 3}
 
 ### DELETE /family/devices/{device_id}
 
-Отвязать устройство и освободить слот. Владелец — любое, гость — только своё. Ответ — как `GET /family`.
+Отвязать устройство и освободить слот. Только владелец подписки; гость семьи устройства не отвязывает, но может докупить слот. Ответ — как `GET /family`.
 
-Ошибки: `403 not_your_device`, `404 device_not_found`, `503 devices_unavailable`, `502 device_delete_failed`.
+Ошибки: `403 family_member`, `404 device_not_found`, `503 devices_unavailable`, `502 device_delete_failed`.
 
 ---
 
@@ -541,7 +541,7 @@ POST {BASE}/auth/logout?all_sessions=true  → {"ok": true, "revoked": 3}
 
 **Покупка:** `GET /tariffs` → `POST /purchases/yookassa/create` → открыть `payment_url` → вернуться в приложение → опрашивать `GET /purchases/{id}/status` до `succeeded` → опрашивать `GET /subscription` до `active`.
 
-**Не хватает слотов (`hwid_limit_reached`):** показать `GET /family` → пользователь отвязывает устройство (`DELETE /family/devices/{id}`) или докупает слот (`POST /purchases/hwid-slot/create`) → снова `GET /subscription`.
+**Не хватает слотов (`hwid_limit_reached`):** показать `GET /family` → владелец отвязывает устройство (`DELETE /family/devices/{id}`) или любой участник докупает слот (`POST /purchases/hwid-slot/create`) → снова `GET /subscription`.
 
 **«Ключ не работает»:** `POST /subscription/resync` → опрашивать `GET /subscription` до `active`.
 

@@ -989,6 +989,12 @@ def serialize_app_user(u: dict[str, Any], source: Optional[str] = None) -> dict[
     }
 
 
+def devices_target_user_id(u: dict[str, Any]) -> int:
+    """чью подписку пополняет докупка устройств: гость семьи — владельца, остальные — свою."""
+    owner = family_owner_for(u)
+    return int(owner["id"]) if owner is not None else int(u["id"])
+
+
 def family_owner_for(u: dict[str, Any]) -> Optional[dict[str, Any]]:
     """владелец семьи, чья подписка действует для этого аккаунта (иначе None).
 
@@ -3914,7 +3920,8 @@ def _revoke_subscription_for_payment(payment: dict[str, Any]) -> None:
             return
         sub_id = plan.get("sub_id") or payment.get("subscription_id")
         sub = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,)) if sub_id else None
-        user = get_user(int(payment["user_id"]))
+        # докупку устройств мог оплатить гость семьи — в Remnawave меняем подписку её владельца
+        user = get_user(int(sub["user_id"] if sub and sub.get("user_id") else payment["user_id"]))
         if not sub or not user:
             return
         client, rw = _rw_find_user(user)
@@ -7737,7 +7744,7 @@ def _rw_device_limit(rw: Optional[dict[str, Any]]) -> Optional[int]:
 def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     fresh = get_user(int(user["id"]))
     assert fresh is not None
-    # участник семьи видит устройства общей подписки; покупать/удалять их может только владелец
+    # участник семьи видит устройства общей подписки и может докупать слоты; удалять — только владелец
     owner = family_owner_for(fresh)
     view = owner or fresh
     meta = get_plans_meta()
@@ -7746,8 +7753,8 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         (view["id"],),
     )
     limit = max((int(k.get("devices_limit") or 0) for k in keys), default=1)
-    # докупка устройств только к платной и только владельцу подписки
-    can_buy = owner is None and any(str(k.get("type") or "") != "trial" for k in keys)
+    # докупка устройств — к платной подписке; и владельцу, и гостям семьи
+    can_buy = any(str(k.get("type") or "") != "trial" for k in keys)
 
     # реальные hwid из remnawave
     devices: list[dict[str, Any]] = []
@@ -7776,7 +7783,7 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     active_sub = db.fetchone(
         "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' ORDER BY id DESC LIMIT 1", (view["id"],))
     addons = fulfillment.device_addons_for((active_sub or {}).get("id"))
-    return {"devices": devices, "used": len(devices), "limit": limit, "can_buy": can_buy,
+    return {"devices": devices, "used": len(devices), "limit": limit, "can_buy": can_buy, "can_delete": owner is None,
             "extra_device_price": float(meta["extra_device_price"]),
             "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
             "addon_months": list(fulfillment.DEVICE_ADDON_MONTHS),
@@ -7870,11 +7877,13 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         # доп. устройства со своим сроком: цена × кол-во × месяцы
         if extra <= 0:
             raise HTTPException(400, detail={"message": "Не указано число устройств"})
+        # гость семьи докупает слоты к общей подписке — подписке владельца
+        sub_uid = devices_target_user_id(user)
         sub = None
         if body.subscription_id:
             sub = db.fetchone(
                 "SELECT id, expires_at, type, devices_limit FROM subscriptions WHERE id = ? AND user_id = ? AND status = 'Active'",
-                (body.subscription_id, user["id"]),
+                (body.subscription_id, sub_uid),
             )
             if not sub:
                 raise HTTPException(400, detail={"message": "Подписка не найдена или не активна"})
@@ -7882,7 +7891,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             sub = db.fetchone(
                 "SELECT id, expires_at, type, devices_limit FROM subscriptions WHERE user_id = ? AND status = 'Active' "
                 "ORDER BY id DESC LIMIT 1",
-                (user["id"],),
+                (sub_uid,),
             )
         if not sub:
             raise HTTPException(400, detail={"message": "Нет активной подписки для докупки устройств"})
@@ -8054,11 +8063,11 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
     months = q["months"]
     extra = q["extra"]
 
-    # докупка без subscription_id: берём активную
+    # докупка без subscription_id: берём активную (у гостя семьи — подписку владельца)
     if q["purpose"] == "devices" and not body.subscription_id:
         s = db.fetchone(
             "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' "
-            "ORDER BY id DESC LIMIT 1", (user["id"],))
+            "ORDER BY id DESC LIMIT 1", (devices_target_user_id(user),))
         if s:
             body.subscription_id = int(s["id"])
 

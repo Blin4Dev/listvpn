@@ -600,14 +600,13 @@ def build_router(core: Any) -> APIRouter:
 
     @r.post("/purchases/hwid-slot/create", status_code=201)
     def purchase_slot(body: SlotIn, request: Request, user: dict = Depends(auth_channel)) -> JSONResponse:
-        """докупка слотов устройств (hwid_limit) к своей платной подписке, на 1/3/6/12 мес."""
+        """докупка слотов устройств (hwid_limit) к платной подписке, на 1/3/6/12 мес.
+        Гость семьи тоже может — слоты добавятся в общую подписку владельца."""
         fresh = _fresh(user)
-        if core.family_owner_for(fresh) is not None:
-            raise _err(403, "Слоты докупает владелец семейной подписки", "family_member")
         if int(body.months) not in core.fulfillment.DEVICE_ADDON_MONTHS:
             raise _err(422, "Срок: 1, 3, 6 или 12 месяцев", "bad_months")
         sub = db.fetchone("SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' AND type != 'trial' "
-                          "ORDER BY id DESC LIMIT 1", (int(fresh["id"]),))
+                          "ORDER BY id DESC LIMIT 1", (core.devices_target_user_id(fresh),))
         if not sub:
             raise _err(409, "Слоты докупаются к активной платной подписке", "no_subscription")
         req = core.CreatePaymentBody(months=int(body.months), purpose="devices", extra_devices=int(body.count),
@@ -674,7 +673,7 @@ def build_router(core: Any) -> APIRouter:
                 devices_ok = False
         for d in devices:
             d["is_mine"] = d["user_id"] == uid
-            d["can_delete"] = role == "owner" or d["is_mine"]
+            d["can_delete"] = role == "owner"
         rows = db.fetchall(
             "SELECT f.member_id, f.accepted_at, f.created_at AS invited_at, u.* FROM family_members f "
             "JOIN users u ON u.id = f.member_id WHERE f.owner_id = ? AND f.status = 'active' ORDER BY f.id",
@@ -797,12 +796,14 @@ def build_router(core: Any) -> APIRouter:
     @r.delete("/family/devices/{device_id}")
     def family_device_delete(device_id: str = Path(..., min_length=1, max_length=256),
                              user: dict = Depends(auth)) -> dict[str, Any]:
-        """отвязать устройство: владелец — любое, гость — только своё."""
+        """отвязать устройство: только владелец подписки (гость семьи — нет)."""
         fresh = _fresh(user)
         uid = int(fresh["id"])
         _limit(f"v1devdel:{uid}", DEVICE_DEL_LIMIT)
         owner = core.family_owner_for(fresh)
-        view = owner or fresh
+        if owner is not None:
+            raise _err(403, "Устройства отвязывает владелец семейной подписки", "family_member")
+        view = fresh
         client, rw = _rw(view)
         if not client or not isinstance(rw, dict):
             raise _err(503, "Устройства сейчас недоступны, попробуйте позже", "devices_unavailable")
@@ -813,8 +814,6 @@ def build_router(core: Any) -> APIRouter:
             raise _err(503, "Устройства сейчас недоступны, попробуйте позже", "devices_unavailable")
         if not present:
             raise _err(404, "Устройство не найдено", "device_not_found")
-        if owner is not None and appx.device_owners(int(view["id"])).get(device_id) != uid:
-            raise _err(403, "Это устройство другого участника — отвязать его может владелец", "not_your_device")
         try:
             client.delete_hwid_device({"userId": rw_id, "hwid": device_id})
         except Exception as exc:  # noqa: BLE001
