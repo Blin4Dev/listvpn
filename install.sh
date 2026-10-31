@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # версия установщика: пункты меню 2–4 работают с кодом в папке проекта — он должен быть той же версии
-INSTALLER_VERSION="2026.10.31-1"
+INSTALLER_VERSION="2026.10.31-2"
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
@@ -422,9 +422,35 @@ ask_https_port() {
     fi
 }
 
-# кто держит порт 80 и порт HTTPS
+# PID нашего Caddy (systemd caddy.service); 0 — не запущен
+_our_caddy_pid() {
+    local pid
+    pid="$(sudo systemctl show -p MainPID --value caddy 2>/dev/null || true)"
+    echo "${pid:-0}"
+}
+
+# кто держит порты (по умолчанию 80 и порт HTTPS), кроме нашего Caddy.
+# чужой Caddy (например, из docker-compose Remnawave с network_mode: host) — тоже чужой
 _port_owners() {
-    sudo ss -ltnpH 2>/dev/null | awk -v p="$HTTPS_PORT" '$4 ~ ("[:.](80|" p ")$") {print "   " $4 "  " $6}' || true
+    local re="${1:-80|${HTTPS_PORT}}" our
+    our="$(_our_caddy_pid)"
+    sudo ss -ltnpH 2>/dev/null | awk -v re="$re" -v our="$our" '
+        $4 ~ ("[:.](" re ")$") {
+            if (our != "0" && $0 ~ ("pid=" our ",")) next
+            print "   " $4 "  " $6
+        }' || true
+}
+
+# адрес admin API Caddy: 2019 занят чужим процессом (другой Caddy) — берём свободный порт
+_caddy_admin_line() {
+    [[ -z "$(_port_owners 2019)" ]] && return 0
+    local p
+    for p in $(seq 2020 2099); do
+        if [[ -z "$(sudo ss -ltnH "sport = :${p}" 2>/dev/null)" ]]; then
+            printf '\tadmin localhost:%s\n' "$p"
+            return 0
+        fi
+    done
 }
 
 _ver_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]; }
@@ -526,12 +552,15 @@ caddy_prepare_main() {
         hint "Перенесите свои сайты в ${CADDY_SITES}/<имя>.caddy (без глобального блока { }) и удалите ${CADDY_MAIN}, затем запустите установку снова."
         return 1
     fi
-    local tmp; tmp="$(mktemp)"
+    local tmp admin_line; tmp="$(mktemp)"
+    admin_line="$(_caddy_admin_line)"
+    [[ -n "$admin_line" ]] && log_warn "Порт 2019 (служебный порт Caddy) занят другой программой — наш Caddy возьмёт ${admin_line##* }."
     cat > "$tmp" <<EOF
 ${CADDY_MARKER}
 # Главный файл Caddy. Сайты — в ${CADDY_SITES}/*.caddy (BatmanVPN: blinvpn.caddy).
 {
 	email ${email}
+${admin_line}
 	servers {
 		protocols h1 h2
 	}
@@ -565,11 +594,16 @@ free_ports_for_caddy() {
         NGINX_STOPPED_BY_US=1
     fi
     local owners
-    owners="$(_port_owners | grep -v '"caddy"' || true)"
+    owners="$(_port_owners)"
     if [[ -n "$owners" ]]; then
         log_error "Порты 80/${HTTPS_PORT} заняты другим процессом:"
         echo "$owners"
-        hint "Остановите его (например: sudo systemctl disable --now apache2) и запустите установку снова."
+        if grep -qE '"(caddy|docker-proxy|nginx)"' <<<"$owners" && sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -qi remnawave; then
+            hint "Похоже, это прокси Remnawave на этом же сервере. Панели listvpn нужны свои порты 80 и ${HTTPS_PORT}:"
+            hint "поставьте её на отдельный сервер или перенесите сайты Remnawave в Caddy этой установки (${CADDY_SITES}/)."
+        else
+            hint "Остановите его (например: sudo systemctl disable --now apache2) и запустите установку снова."
+        fi
         return 1
     fi
 }
