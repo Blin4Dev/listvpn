@@ -114,8 +114,10 @@ function projectAssets(): Plugin {
       return html.replace(/%LISTVPN_BRAND%/g, BRAND.name);
     },
     closeBundle() {
-      // redirect.html для deep link incy/happ (tg не открывает эти схемы) — с названием проекта
-      const redirectSrc = path.resolve(REPO, "src/site/redirect.html");
+      // redirect.html для deep link incy/happ (tg не открывает эти схемы) — с названием проекта;
+      // свой дизайн проекта — projects/<id>/site/redirect.html (у FGN — сетка, частицы, белая кнопка)
+      const ownRedirect = path.join(PROJECT_DIR, "site", "redirect.html");
+      const redirectSrc = fs.existsSync(ownRedirect) ? ownRedirect : path.resolve(REPO, "src/site/redirect.html");
       if (fs.existsSync(redirectSrc)) {
         const html = fs.readFileSync(redirectSrc, "utf8").replace(/BatmanVPN/g, BRAND.name);
         fs.writeFileSync(path.join(OUT_DIR, "redirect.html"), html);
