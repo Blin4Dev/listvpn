@@ -65,6 +65,11 @@ def _money(value: float) -> str:
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}$")
 
 
+def _host(value: Optional[str]) -> str:
+    """домен из «example.com», «https://example.com:8443/path» и т.п."""
+    return re.sub(r"^[a-z]+://", "", (value or "").strip(), flags=re.I).split("/", 1)[0].split(":", 1)[0].lower()
+
+
 def _customer_email(*candidates: Optional[str]) -> str:
     """ЮKassa принимает только чистый email, не «Имя <addr>» и не MAIL_FROM без @."""
     for raw in candidates:
@@ -243,11 +248,13 @@ class YooKassaClient:
                 retry = {k: v for k, v in body.items() if k != "receipt"}
                 suffix = "-nr"
             else:
-                extra = self._receipt(amount, receipt_email, receipt_item)
+                # магазин сам требует чек — собираем его даже при YOOKASSA_RECEIPT=0 (так ставит установщик):
+                # флаг лишь отключает чек «заранее», но не должен ломать оплату в магазине с 54-ФЗ
+                extra = self._receipt(amount, receipt_email, receipt_item, force=True)
                 if not extra:
                     raise YooKassaError(
                         "Магазин ЮKassa требует чек, а email для чека не найден: укажите YOOKASSA_RECEIPT_EMAIL "
-                        "или установите мини-приложение проекта (письма no-reply@домен)",
+                        "в .env или домен мини-приложения проекта (письма no-reply@домен)",
                         status=exc.status, payload=exc.payload) from exc
                 retry = {**body, "receipt": extra}
                 suffix = "-r"
@@ -271,17 +278,26 @@ class YooKassaClient:
             cands.append(mailer.mail_from())
         except Exception:  # noqa: BLE001
             pass
-        for dom_key in ("MINIAPP_DOMAIN", "PANEL_DOMAIN"):
-            dom = re.sub(r"^[a-z]+://", "", _env(dom_key), flags=re.I).split("/", 1)[0].split(":", 1)[0]
+        # домены текущего проекта, затем общие домены установки (панель, вебхуки, API)
+        for key in ("MINIAPP_DOMAIN", "MINIAPP_URL", "SITE_DOMAIN", "SITE_URL",
+                    "PANEL_DOMAIN", "WEBHOOK_DOMAIN", "API_DOMAIN"):
+            dom = _host(_env(key))
             if dom:
                 cands.append(f"no-reply@{dom}")
-        url = _env("MINIAPP_URL")
-        if url:
-            cands.append("no-reply@" + re.sub(r"^[a-z]+://", "", url, flags=re.I).split("/", 1)[0].split(":", 1)[0])
+        # последний вариант — домен основного проекта: у нового проекта сети своего домена может ещё не быть
+        if _projects is not None:
+            try:
+                for key in ("MINIAPP_DOMAIN", "MINIAPP_URL"):
+                    dom = _host(_projects.env(key, project=_projects.DEFAULT))
+                    if dom:
+                        cands.append(f"no-reply@{dom}")
+            except Exception:  # noqa: BLE001
+                pass
         return _customer_email(*cands)
 
-    def _receipt(self, amount: float, email: Optional[str], item: Optional[str]) -> Optional[dict[str, Any]]:
-        if not self.receipts_enabled():
+    def _receipt(self, amount: float, email: Optional[str], item: Optional[str],
+                 *, force: bool = False) -> Optional[dict[str, Any]]:
+        if not force and not self.receipts_enabled():
             return None
         contact = self._receipt_contact(email)
         if not contact:
