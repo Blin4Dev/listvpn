@@ -512,7 +512,7 @@ function GiftSheet({ data, onClose, onCreated, onBuy }: { data: ReferralData; on
     <FgnSheet title="Подарить подписку" onClose={onClose} dim={SHEET_DIM}>
       <div style={rewardText}>
         {!g || g.per_month <= 0
-          ? `Подарки открываются с уровня Spreader — нужно 30 активных друзей, у вас ${Number(data.active_count || 0)}.`
+          ? `Подарки открываются с уровня LOYAL — нужно 30 активных друзей, у вас ${Number(data.active_count || 0)}.`
           : g.left > 0
             ? `Можно подарить другу месяц подписки (ВПН + обход). Осталось в этом месяце: ${g.left} из ${g.per_month}.`
             : `Подарки на этот месяц закончились. Новые — ${g.next_at ? formatDateRu(g.next_at) : "через месяц"}.`}

@@ -17,11 +17,11 @@ except ImportError:
 
 # ключ, название, от скольки активных, % с платежей, подарков в месяц, бесплатная подписка себе
 LEVELS: list[dict[str, Any]] = [
-    {"key": "starter", "name": "Starter", "min": 0, "rate": 20, "gifts": 0, "self_free_from": 5},
-    {"key": "spreader", "name": "Spreader", "min": 30, "rate": 25, "gifts": 1, "self_free_from": 0},
-    {"key": "special", "name": "Special", "min": 50, "rate": 30, "gifts": 2, "self_free_from": 0},
-    {"key": "greater", "name": "Greater", "min": 100, "rate": 35, "gifts": 3, "self_free_from": 0},
-    {"key": "gen_s", "name": "Gen S", "min": 1000, "rate": 50, "gifts": 10, "self_free_from": 0},
+    {"key": "starter", "name": "FRESHMAN", "min": 0, "rate": 20, "gifts": 0, "self_free_from": 5},
+    {"key": "spreader", "name": "LOYAL", "min": 30, "rate": 25, "gifts": 1, "self_free_from": 0},
+    {"key": "special", "name": "PERSON", "min": 50, "rate": 30, "gifts": 2, "self_free_from": 0},
+    {"key": "greater", "name": "GOTHAM BOSS", "min": 100, "rate": 35, "gifts": 3, "self_free_from": 0},
+    {"key": "gen_s", "name": "BRUCE WAYNE", "min": 1000, "rate": 50, "gifts": 10, "self_free_from": 0},
 ]
 
 # награды раз в 30 дней (скользящее окно)
@@ -339,7 +339,7 @@ def create_gift(user: dict[str, Any]) -> dict[str, Any]:
     uid = int(user["id"])
     st = rewards_state(user)["gifts"]
     if st["per_month"] <= 0:
-        raise RewardError("Подарки доступны с уровня Spreader (30 активных друзей)")
+        raise RewardError("Подарки доступны с уровня LOYAL (30 активных друзей)")
     if st["left"] <= 0:
         raise RewardError("Лимит подарков на этот месяц исчерпан")
     code = GIFT_PREFIX + secrets.token_hex(4).upper()

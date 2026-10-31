@@ -17,11 +17,11 @@ type Level = { key: string; name: string; min: number; rate: number; gifts: numb
 
 // на случай, если сервер не ответил
 const FALLBACK: Level[] = [
-  { key: "starter", name: "Starter", min: 0, rate: 20, gifts: 0, self_free_from: 5 },
-  { key: "spreader", name: "Spreader", min: 30, rate: 25, gifts: 1, self_free_from: 0 },
-  { key: "special", name: "Special", min: 50, rate: 30, gifts: 2, self_free_from: 0 },
-  { key: "greater", name: "Greater", min: 100, rate: 35, gifts: 3, self_free_from: 0 },
-  { key: "gen_s", name: "Gen S", min: 1000, rate: 50, gifts: 10, self_free_from: 0 },
+  { key: "starter", name: "FRESHMAN", min: 0, rate: 20, gifts: 0, self_free_from: 5 },
+  { key: "spreader", name: "LOYAL", min: 30, rate: 25, gifts: 1, self_free_from: 0 },
+  { key: "special", name: "PERSON", min: 50, rate: 30, gifts: 2, self_free_from: 0 },
+  { key: "greater", name: "GOTHAM BOSS", min: 100, rate: 35, gifts: 3, self_free_from: 0 },
+  { key: "gen_s", name: "BRUCE WAYNE", min: 1000, rate: 50, gifts: 10, self_free_from: 0 },
 ];
 
 function plural(n: number, one: string, few: string, many: string) {
