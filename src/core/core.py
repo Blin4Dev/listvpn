@@ -9176,8 +9176,21 @@ def app_support_send(body: SupportMessageBody, user: dict = Depends(_app_user_fr
         raise HTTPException(429, detail={"message": f"Слишком много сообщений. Повторите через {retry} сек."})
     chat = support.chat_for_user(int(u["id"]))
     msg = _sup(support.send_message, chat, "user", None, body.text or "", body.files, str(u["id"]), body.reply_to)
-    _notify_support_forum(u, chat, msg)
+    # уведомление команде (Telegram, push) — в фоне: иначе ответ ждал Telegram до 30 с на каждого админа,
+    # и поле ввода в мини-приложении «зависало» с текстом после первого сообщения
+    _support_notify_async(u, chat, msg)
     return _for_user([msg])[0]
+
+
+def _support_notify_async(user: dict[str, Any], chat: dict[str, Any], msg: dict[str, Any]) -> None:
+    import threading
+    pid = projects.current_id()
+
+    def _run() -> None:
+        with projects.use(pid):
+            _notify_support_forum(user, chat, msg)
+
+    threading.Thread(target=_run, name="support-notify", daemon=True).start()
 
 
 class SupportCloseBody(BaseModel):

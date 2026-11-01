@@ -333,16 +333,19 @@ export default function Support() {
 
   const send = async () => {
     if (!canSend) return;
+    const body = text.trim();
     setSending(true);
     setError("");
+    // поле очищаем сразу; при ошибке текст вернётся
+    setText("");
+    if (taRef.current) taRef.current.style.height = "auto";
     try {
-      const m = await sendSupportMessage(text.trim(), ready.map((p) => p.id as string), reply?.id);
+      const m = await sendSupportMessage(body, ready.map((p) => p.id as string), reply?.id);
       stick.current = true;
       if (!state?.chat) setState((s) => (s ? { ...s, chat: { id: 0, unread: 0 } } : s));
       // any reply clears «ещё помочь?» prompt
       setState((s) => (s ? { ...s, messages: s.messages.map((x) => (x.action_active ? { ...x, action_active: false } : x)) } : s));
       merge([m]);
-      setText("");
       setReply(null);
       // first msg after close opens ticket; «нет, спасибо» closes
       if (state?.ticket?.status !== "open" || m.ticket_closed) reload();
@@ -350,6 +353,7 @@ export default function Support() {
       setPending((p) => p.filter((x) => x.error));
       if (taRef.current) taRef.current.style.height = "auto";
     } catch (e) {
+      setText((cur) => (cur ? cur : body));
       setError((e as Error).message || "Не удалось отправить");
     } finally {
       setSending(false);

@@ -272,20 +272,23 @@ export default function Support() {
 
   const send = async () => {
     if (!canSend) return;
+    const body = text.trim();
     setSending(true);
     setError("");
+    // поле очищаем сразу — можно печатать следующее, пока уходит это; при ошибке текст вернётся
+    setText("");
+    if (taRef.current) taRef.current.style.height = "";
     try {
-      const m = await sendSupportMessage(text.trim(), []);
+      const m = await sendSupportMessage(body, []);
       stick.current = true;
       if (!state?.chat) setState((s) => (s ? { ...s, chat: { id: 0, unread: 0 } } : s));
       // любой ответ снимает вопрос «ещё помочь?»
       setState((s) => (s ? { ...s, messages: s.messages.map((x) => (x.action_active ? { ...x, action_active: false } : x)) } : s));
       merge([m]);
-      setText("");
       // первое сообщение после закрытия открывает тикет
       if (state?.ticket?.status !== "open" || m.ticket_closed) reload();
-      if (taRef.current) taRef.current.style.height = "";
     } catch (e) {
+      setText((cur) => (cur ? cur : body));
       setError((e as Error).message || "Не удалось отправить");
     } finally {
       setSending(false);

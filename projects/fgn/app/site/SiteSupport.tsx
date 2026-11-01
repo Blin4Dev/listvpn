@@ -265,17 +265,20 @@ export default function SiteSupport({ bot, authed, loginHref, onLogin, onBack, o
 
   const send = async () => {
     if (!canSend) return;
+    const body = text.trim();
     setSending(true);
     setError("");
+    // поле очищаем сразу; при ошибке текст вернётся
+    setText("");
+    if (taRef.current) taRef.current.style.height = "";
     try {
-      const m = await sendSupportMessage(text.trim(), []);
+      const m = await sendSupportMessage(body, []);
       stick.current = true;
       setState((s) => (s ? { ...s, chat: s.chat || { id: 0, unread: 0 }, messages: s.messages.map((x) => (x.action_active ? { ...x, action_active: false } : x)) } : s));
       merge([m]);
-      setText("");
       if (state?.ticket?.status !== "open" || m.ticket_closed) reload();
-      if (taRef.current) taRef.current.style.height = "";
     } catch (e) {
+      setText((cur) => (cur ? cur : body));
       fail(e, "Не удалось отправить");
     } finally {
       setSending(false);
