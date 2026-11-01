@@ -64,7 +64,7 @@ export default function GiftBuy() {
               onClick={() => choose(p.months)}
               style={{ animation: `fgnFade 0.35s ease ${0.04 * i}s both` }}
               title={periodTitle(p.months)}
-              subtitle={`${p.days} ${daysWord(p.days)}$`}
+              subtitle={`${p.days} ${daysWord(p.days)}`}
               right={
                 <span style={{ display: "flex", alignItems: "baseline", gap: 8, flexShrink: 0 }}>
                   {final < full ? (
