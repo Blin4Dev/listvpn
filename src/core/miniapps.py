@@ -751,6 +751,16 @@ def mail_route(pid: Optional[str] = None) -> Optional[dict[str, Any]]:
     except Exception:  # noqa: BLE001
         return None
     dom, sid = cfg.get("MINIAPP_DOMAIN", ""), cfg.get("MINIAPP_SERVER", "")
+    if not dom and not sid:
+        # старая установка: мини-приложение на сервере панели, домен — в .env (ID__MINIAPP_DOMAIN / MINIAPP_URL)
+        try:
+            p = projects.get(pid)
+            legacy = (p.env("MINIAPP_DOMAIN") or urlparse(p.miniapp_url).hostname or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            legacy = ""
+        if legacy:
+            return {"domain": legacy, "server_id": 0, "ip": panel_ip(), "local": True, "legacy": True}
+        return None
     if not dom or not sid:
         return None
     if sid == LOCAL:  # мини-приложение на сервере панели: письма уходят прямо отсюда
