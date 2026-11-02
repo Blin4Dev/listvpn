@@ -116,7 +116,7 @@ def _parse_ts(value: Any):
         return None
 
 
-def collect_active_ips(client, log=print) -> Optional[dict[int, set[str]]]:
+def collect_active_ips(client, log=print) -> Optional[dict[int, dict[str, tuple[str, str]]]]:
     import time
     from datetime import datetime, timedelta, timezone
 
@@ -144,7 +144,9 @@ def collect_active_ips(client, log=print) -> Optional[dict[int, set[str]]]:
         return None
 
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=IP_ACTIVE_MINUTES)
-    out: dict[int, set[str]] = {}
+    node_name = {str(n["uuid"]): str(n.get("name") or n.get("address") or "")[:40] for n in nodes}
+    # userId → {ip: (нода, lastSeen)} — для числа IP и для подробностей админам
+    out: dict[int, dict[str, tuple[str, str]]] = {}
     got_any = False
     deadline = time.time() + NODE_JOB_TIMEOUT
     pending = dict(jobs)
@@ -173,19 +175,81 @@ def collect_active_ips(client, log=print) -> Optional[dict[int, set[str]]]:
                     ip = str((entry or {}).get("ip") or "").strip()
                     seen = _parse_ts((entry or {}).get("lastSeen"))
                     if ip and (seen is None or seen >= cutoff):
-                        out.setdefault(uid, set()).add(ip)
+                        out.setdefault(uid, {})[ip] = (node_name.get(node_uuid, ""), str((entry or {}).get("lastSeen") or ""))
     if pending:
         log(f"[antiabuse] не дождались ответа от нод: {len(pending)}")
     return out if got_any else None
 
 
+# ── подробности нарушения для админов: устройства (HWID + user-agent) или IP ──
+EVIDENCE_MAX = 15
+
+
+def _short_time(v: Any) -> str:
+    """время по Москве для уведомления админам."""
+    dt = _parse_ts(v)
+    if not dt:
+        return ""
+    from datetime import timedelta, timezone
+    return dt.astimezone(timezone(timedelta(hours=3))).strftime("%d.%m %H:%M")  # МСК = UTC+3 круглый год
+
+
+def device_lines(devices: list[dict[str, Any]]) -> list[str]:
+    """HWID-устройства Remnawave → строки «HWID · платформа · модель · UA · когда»."""
+    out: list[str] = []
+    for d in devices[:EVIDENCE_MAX]:
+        if not isinstance(d, dict):
+            continue
+        hwid = str(d.get("hwid") or "?")
+        parts = [hwid if len(hwid) <= 40 else hwid[:37] + "…"]
+        plat = " ".join(str(x) for x in (d.get("platform"), d.get("osVersion") or d.get("os_version")) if x)
+        model = d.get("deviceModel") or d.get("device_model")
+        ua = str(d.get("userAgent") or d.get("user_agent") or "")
+        if plat:
+            parts.append(plat)
+        if model:
+            parts.append(str(model))
+        parts.append(f"UA: {ua[:120] or '—'}")
+        first, last = _short_time(d.get("createdAt") or d.get("created_at")), _short_time(d.get("updatedAt") or d.get("updated_at"))
+        if first or last:
+            parts.append(f"с {first}" + (f", посл. {last}" if last and last != first else ""))
+        out.append(" · ".join(parts))
+    if len(devices) > EVIDENCE_MAX:
+        out.append(f"… и ещё {len(devices) - EVIDENCE_MAX}")
+    return out
+
+
+def ip_lines(ips: dict[str, tuple[str, str]]) -> list[str]:
+    """активные IP → строки «IP · нода · последний раз»."""
+    items = sorted(ips.items(), key=lambda kv: kv[1][1], reverse=True)
+    out = [" · ".join(x for x in (ip, node, _short_time(seen)) if x) for ip, (node, seen) in items[:EVIDENCE_MAX]]
+    if len(items) > EVIDENCE_MAX:
+        out.append(f"… и ещё {len(items) - EVIDENCE_MAX}")
+    return out
+
+
+def _evidence_html(title: str, lines: list[str]) -> str:
+    if not lines:
+        return ""
+    body = "\n".join(forum._esc(x) for x in lines)
+    return f"\n\n<b>{forum._esc(title)}:</b>\n<pre>{body}</pre>"
+
+
+def _evidence(kind: str, devices: list[dict[str, Any]], ips: Optional[dict[str, tuple[str, str]]]) -> tuple[str, list[str]]:
+    """заголовок и строки подробностей по типу нарушения."""
+    if kind == "ip":
+        return "Активные IP (IP · нода · последний раз, МСК)", ip_lines(ips or {})
+    return "Устройства (HWID · система · модель · user-agent · подключения, МСК)", device_lines(devices)
+
+
 def _ban(sub: dict[str, Any], client, rw_id: Optional[int], reason: str,
-         log) -> None:
+         log, evidence: tuple[str, list[str]] = ("", [])) -> None:
     sub_id = sub["id"]
     full = f"Анти-абуз: {reason}"
     db.execute("UPDATE subscriptions SET status = 'Banned', ban_reason = ?, banned_at = ? WHERE id = ?",
                (full, db.utcnow_iso(), sub_id))
-    moderation.log(int(sub["user_id"]), "aa_ban", reason, sub_id=int(sub_id), actor="antiabuse", actor_name="Анти-абуз")
+    moderation.log(int(sub["user_id"]), "aa_ban", reason, sub_id=int(sub_id), actor="antiabuse", actor_name="Анти-абуз",
+                   details={"evidence": evidence[1]} if evidence[1] else None)
     if client and rw_id is not None:
         try:
             client.disable_user(rw_id)
@@ -196,17 +260,19 @@ def _ban(sub: dict[str, Any], client, rw_id: Optional[int], reason: str,
         forum.send(
             "errors",
             f"🚫 <b>Анти-абуз</b>: заблокирована подписка "
-            f"{forum.user_link(int(sub['user_id']))} — {forum._esc(reason)}",
+            f"{forum.user_link(int(sub['user_id']))} — {forum._esc(reason)}" + _evidence_html(*evidence),
         )
     except Exception:  # noqa: BLE001
         pass
 
 
-def _warn(sub: dict[str, Any], kind: str, count: int, limit: int, notify, log) -> None:
+def _warn(sub: dict[str, Any], kind: str, count: int, limit: int, notify, log,
+          evidence: tuple[str, list[str]] = ("", [])) -> None:
     db.execute("UPDATE subscriptions SET aa_warned_at = ? WHERE id = ?", (db.utcnow_iso(), sub["id"]))
     what = "устройств (HWID)" if kind == "hwid" else "IP-адресов"
     moderation.log(int(sub["user_id"]), "aa_warn", f"{count} {what} при лимите {limit}", sub_id=int(sub["id"]),
-                   details={"kind": kind, "count": count, "limit": limit}, actor="antiabuse", actor_name="Анти-абуз")
+                   details={"kind": kind, "count": count, "limit": limit, "evidence": evidence[1]},
+                   actor="antiabuse", actor_name="Анти-абуз")
     log(f"[antiabuse] предупреждение подписке #{sub['id']} (user {sub.get('user_id')}): {kind} {count}, лимит {limit}")
     if notify and sub.get("telegram_id"):
         try:
@@ -220,7 +286,7 @@ def _warn(sub: dict[str, Any], kind: str, count: int, limit: int, notify, log) -
         forum.send(
             "errors",
             f"⚠️ <b>Анти-абуз</b>: предупреждение {forum.user_link(int(sub['user_id']))} — "
-            f"{count} {what} при лимите {limit}. Бан, если нарушение повторится через 24 ч.",
+            f"{count} {what} при лимите {limit}. Бан, если нарушение повторится через 24 ч." + _evidence_html(*evidence),
         )
     except Exception:  # noqa: BLE001
         pass
@@ -281,11 +347,13 @@ def scan_once(log=print, notify=None) -> dict[str, Any]:
             continue
         kind, count, reason = violation
         decision = _decide(sub)
+        if decision in ("warn", "ban"):
+            ev = _evidence(kind, devices, (active_ips or {}).get(rw_id) if active_ips is not None else None)
         if decision == "warn":
-            _warn(sub, kind, count, limit, notify, log)
+            _warn(sub, kind, count, limit, notify, log, ev)
             warned += 1
         elif decision == "ban":
-            _ban(sub, client, rw_id, reason + " — повторно после предупреждения", log)
+            _ban(sub, client, rw_id, reason + " — повторно после предупреждения", log, ev)
             banned += 1
         # игнор в период grace после предупреждения
     if banned or warned:
@@ -309,7 +377,8 @@ def _paid_user_ids(user_ids: list[int]) -> set[int]:
     return {int(r["user_id"]) for r in rows}
 
 
-def _ban_account_trial(uid: int, hwid: str, count: int, limit: int, log) -> None:
+def _ban_account_trial(uid: int, hwid: str, count: int, limit: int, log,
+                       device: Optional[dict[str, Any]] = None, accounts: Optional[list[int]] = None) -> None:
     user = db.fetchone("SELECT id, telegram_id, email, is_banned FROM users WHERE id = ?", (uid,))
     if not user:
         return
@@ -322,7 +391,10 @@ def _ban_account_trial(uid: int, hwid: str, count: int, limit: int, log) -> None
                (reason, db.utcnow_iso(), uid))
     db.execute("UPDATE subscriptions SET status = 'Banned', ban_reason = ?, banned_at = ? "
                "WHERE user_id = ? AND type = 'trial' AND status = 'Active'", (reason, db.utcnow_iso(), uid))
-    moderation.log(uid, "aa_ban", reason, details={"kind": "trial_hwid", "count": count, "limit": limit},
+    lines = device_lines([device or {"hwid": hwid}])
+    if accounts:
+        lines.append("Аккаунты на этом устройстве: " + ", ".join(f"id{a}" for a in accounts[:EVIDENCE_MAX]))
+    moderation.log(uid, "aa_ban", reason, details={"kind": "trial_hwid", "count": count, "limit": limit, "evidence": lines},
                    actor="antiabuse", actor_name="Анти-абуз")
     if user.get("telegram_id"):
         try:
@@ -332,7 +404,8 @@ def _ban_account_trial(uid: int, hwid: str, count: int, limit: int, log) -> None
     log(f"[antiabuse] БАН аккаунта #{uid}: пробные на одном HWID ({count} > {limit})")
     try:
         forum.send("errors", f"🚫 <b>Анти-абуз</b>: заблокирован {forum.user_link(uid)} — "
-                             f"{count} пробных на одном устройстве (можно {limit})")
+                             f"{count} пробных на одном устройстве (можно {limit})"
+                             + _evidence_html("Устройство (HWID · система · модель · user-agent · подключения, МСК)", lines))
     except Exception:  # noqa: BLE001
         pass
 
@@ -360,6 +433,7 @@ def _scan_trial_hwids_project(log=print) -> dict[str, Any]:
         "WHERE s.type = 'trial' AND s.status = 'Active' AND COALESCE(u.is_banned, 0) = 0 AND u.project_id = ? "
         "ORDER BY s.id DESC LIMIT ?", (db.pid(), MAX_PER_RUN))
     touched: set[str] = set()
+    dev_info: dict[str, dict[str, Any]] = {}
     now = db.utcnow_iso()
     for sub in subs:
         rw_id = _rw_num_id_for(sub, client)
@@ -369,6 +443,7 @@ def _scan_trial_hwids_project(log=print) -> dict[str, Any]:
             hwid = str((d or {}).get("hwid") or "").strip()[:128] if isinstance(d, dict) else ""
             if not hwid:
                 continue
+            dev_info.setdefault(hwid, d)
             db.execute("INSERT OR IGNORE INTO trial_hwids (hwid, user_id, seen_at) VALUES (?, ?, ?)",
                        (hwid, int(sub["user_id"]), now))
             touched.add(hwid)
@@ -395,6 +470,6 @@ def _scan_trial_hwids_project(log=print) -> dict[str, Any]:
         for _, _, uid in order[limit:]:
             if uid in already:
                 continue
-            _ban_account_trial(uid, hwid, len(order), limit, log)
+            _ban_account_trial(uid, hwid, len(order), limit, log, dev_info.get(hwid), [o[2] for o in order])
             banned += 1
     return {"checked": len(subs), "banned": banned}
