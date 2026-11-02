@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover
     import database as db  # type: ignore
     import projects  # type: ignore
 
-AGENT_VERSION = "1.1"  # = VERSION в miniapp_agent.py; другая у агента → он сам скачает новую
+AGENT_VERSION = "1.2"  # = VERSION в miniapp_agent.py; другая у агента → он сам скачает новую
 CODE_TTL = 30 * 60
 ONLINE_SEC = 75           # агент опрашивает панель каждые ≤25 с
 POLL_HOLD = 25.0          # long-poll

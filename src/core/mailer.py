@@ -257,6 +257,12 @@ def _resolve_mx(dom: str) -> list[str]:
     return hosts
 
 
+def _mx_reply(host: str, code: int, msg: object) -> str:
+    """ответ MX целиком: по тексту видно причину отказа (SPF/DKIM/PTR, чёрный список, нет такого ящика)."""
+    text = msg.decode("utf-8", "replace") if isinstance(msg, (bytes, bytearray)) else str(msg or "")
+    return f"MX {host} ответил {code}: {' '.join(text.split())[:300]}"
+
+
 def _ehlo_name() -> str:
     d = domain()
     return f"mail.{d}" if d else (socket.getfqdn() or "localhost")
@@ -268,8 +274,11 @@ def _resolve_public_ip(host: str) -> Optional[str]:
     и прочие зарезервированные адреса отбрасываются — защита от SMTP-SSRF
     (чтобы по MX-записи нельзя было заставить сервер стучаться во внутреннюю сеть).
     """
+    # только IPv4: в SPF записан IPv4 сервера (ip4:…), а по IPv6 у сервера нет ни SPF, ни PTR.
+    # Раньше у MX с AAAA-записью (Gmail, Outlook, Яндекс…) письмо иногда уходило по IPv6 и получало 550
+    # «не прошло SPF/PTR» — «время от времени, на разные почты».
     try:
-        infos = socket.getaddrinfo(host, 25, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, 25, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
     except OSError:
         return None
     for info in infos:
@@ -369,17 +378,26 @@ def send(to: str, subject: str, *, html: Optional[str] = None, text: Optional[st
                         server.ehlo(ehlo)
                 except (smtplib.SMTPException, ssl.SSLError):
                     pass  # без tls если mx не умеет
-                server.mail(sender)
-                server.rcpt(to)
-                code, _ = server.data(message)
+                code, msg = server.mail(sender)
+                if code >= 400:
+                    last_err = _mx_reply(host, code, msg)
+                    continue
+                code, msg = server.rcpt(to)
+                if code >= 400:
+                    last_err = _mx_reply(host, code, msg)
+                    continue
+                code, msg = server.data(message)
                 if 200 <= code < 300:
                     return True, ""
-                last_err = f"MX {host} ответил кодом {code}"
+                last_err = _mx_reply(host, code, msg)
             finally:
                 try:
                     server.quit()
                 except Exception:  # noqa: BLE001
                     pass
+        except smtplib.SMTPResponseException as exc:
+            last_err = _mx_reply(host, exc.smtp_code, exc.smtp_error)
+            continue
         except Exception as exc:  # noqa: BLE001
             last_err = f"{host}: {type(exc).__name__}: {exc}"
             if isinstance(exc, (TimeoutError, socket.timeout, ConnectionRefusedError, OSError)) and not isinstance(exc, smtplib.SMTPException):

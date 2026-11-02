@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "1.1"  # = AGENT_VERSION в miniapps.py
+VERSION = "1.2"  # = AGENT_VERSION в miniapps.py
 CONF = "/etc/blin-agent.json"
 STATE_DIR = "/var/lib/blin-agent"
 STATUS = os.path.join(STATE_DIR, "status.json")
@@ -610,6 +610,8 @@ class Agent:
         ctx.verify_mode = ssl.CERT_NONE
         last, blocked = "нет MX", False
         for ip in p.get("mx") or []:
+            if ":" in str(ip):
+                continue  # IPv6: в SPF только IPv4 сервера — письмо по IPv6 получит 550
             try:
                 srv = smtplib.SMTP(ip, 25, timeout=20, local_hostname=p.get("ehlo") or None)
                 try:
