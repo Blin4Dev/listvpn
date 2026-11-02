@@ -27,10 +27,11 @@ function Btn({ children, onClick, disabled, style }: { children: React.ReactNode
   );
 }
 import { fetchAppLink, openDeepLink } from "../utils/api";
+import { copyText } from "./SubLinkBox";
 import { APP_META, DEVICE_TITLE, KOALA_GUIDE, appSub, appsFor, detectDeviceKind, installOptions, isRecommended, type AppKind, type DeviceKind } from "../utils/apps";
 
 // pick → install → add → done; «другое» → link
-type Step = "pick" | "device" | "install" | "add" | "link" | "done";
+type Step = "pick" | "device" | "install" | "add" | "link" | "region" | "done";
 
 const DEVICES: DeviceKind[] = ["ios", "android", "windows", "macos", "linux", "android_tv"];
 
@@ -53,6 +54,78 @@ function TextButton({ children, onClick }: { children: React.ReactNode; onClick:
     >
       {children}
     </button>
+  );
+}
+
+// смена региона App Store на США — Incy/Happ нет в российском App Store
+const US_ADDRESS: [string, string][] = [
+  ["Улица", "1 Apple Park Way"],
+  ["Город", "Cupertino"],
+  ["Штат", "California"],
+  ["Индекс", "95014"],
+  ["Телефон", "408 996 1010"],
+];
+
+const stepNum: React.CSSProperties = {
+  width: 24, height: 24, borderRadius: 12, background: T.surfaceRaised, color: T.orange, fontSize: 13, fontWeight: 700,
+  display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+};
+const strong: React.CSSProperties = { color: T.text, fontWeight: 600 };
+
+function RegionSteps() {
+  const [copied, setCopied] = useState("");
+  const copy = async (v: string) => {
+    if (await copyText(v)) {
+      setCopied(v);
+      window.setTimeout(() => setCopied((c) => (c === v ? "" : c)), 1400);
+    }
+  };
+  const steps: React.ReactNode[] = [
+    <>Настройки → нажмите на <b style={strong}>своё имя</b> вверху</>,
+    <><b style={strong}>Информация об аккаунте</b>, платежи и настройки</>,
+    <><b style={strong}>Страна или регион</b> → Изменить страну или регион</>,
+    <>Выберите <b style={strong}>Соединённые Штаты</b> → примите условия</>,
+    <>Способ оплаты — <b style={strong}>«Нет»</b></>,
+    <>Адрес — любой из США, например (нажмите, чтобы скопировать):</>,
+    <>Нажмите <b style={strong}>«Далее»</b> — готово!</>,
+  ];
+  return (
+    <>
+      <div style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.45 }}>
+        Если приложения нет в App Store — смените регион Apple ID на США. Подписки и покупки останутся.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4 }}>
+        {steps.map((t, i) => (
+          <React.Fragment key={i}>
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+              <span style={stepNum}>{i + 1}</span>
+              <span style={{ fontSize: 14, color: T.textMuted, lineHeight: 1.45, paddingTop: 2 }}>{t}</span>
+            </div>
+            {i === 5 ? (
+              <div style={{ marginLeft: 36, borderRadius: 14, border: `1px solid ${T.border}`, background: T.surface, overflow: "hidden" }}>
+                {US_ADDRESS.map(([k, v], j) => (
+                  <button
+                    key={k}
+                    type="button"
+                    className="blin-press"
+                    onClick={() => void copy(v)}
+                    style={{
+                      ...btnReset, width: "100%", padding: "10px 14px", display: "flex", alignItems: "center", gap: 10,
+                      border: "none", borderTop: j ? `1px solid ${T.border}` : "none", background: "transparent", color: T.text,
+                      fontSize: 14, lineHeight: "20px", textAlign: "left", cursor: "pointer",
+                    }}
+                  >
+                    <span style={{ width: 62, flexShrink: 0, fontSize: 12.5, color: T.textDim }}>{k}</span>
+                    <span style={{ flex: 1, minWidth: 0 }}>{v}</span>
+                    <MSIcon name={copied === v ? "check" : "content_copy"} style={{ fontSize: 16, color: copied === v ? T.orange : T.textDim }} />
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </React.Fragment>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -130,16 +203,17 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
   const title = step === "device" ? "Добавить подписку"
     : step === "pick" ? "Приложение"
     : step === "link" ? "Ссылка на подписку"
+    : step === "region" ? "Регион App Store"
     : step === "done" ? "" : step === "install" && device === "android_tv" ? "Happ" : APP_META[app || "incy"].title;
 
   // android tv: только инструкция (happ + вставка ссылки)
   const tvGuide = step === "install" && device === "android_tv";
 
   const isTv = device === "android_tv";
-  const back = step === "pick" || step === "install" || step === "add" || step === "link";
+  const back = step === "pick" || step === "install" || step === "add" || step === "link" || step === "region";
   const goBack = () => {
     setErr("");
-    if (step === "add") setStep("install");
+    if (step === "add" || step === "region") setStep("install");
     else if (step === "install") setStep(isTv ? "device" : "pick");
     else if (step === "link") setStep("pick");
     else setStep("device");
@@ -150,7 +224,7 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
   const stepTotal = isTv ? 2 : app === "other" && (step === "link" || step === "pick") ? 3 : 4;
   const stepNo = step === "device" ? 1
     : step === "pick" ? 2
-    : step === "install" ? (isTv ? 2 : 3)
+    : step === "install" || step === "region" ? (isTv ? 2 : 3)
     : step === "add" ? 4
     : step === "link" ? 3 : 0;
 
@@ -175,6 +249,8 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
         style={{
           width: "100%",
           maxWidth: 402,
+          maxHeight: "90%",
+          overflowY: "auto",
           background: T.bg,
           borderTop: `1px solid ${T.border}`,
           borderRadius: "26px 26px 0 0",
@@ -379,6 +455,22 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
                   <TextButton key={o.url} onClick={() => open(o.url)}>{o.label}</TextButton>
                 ))}
                 <TextButton onClick={() => { setErr(""); setStep("add"); }}>Далее</TextButton>
+                {device === "ios" ? (
+                  <button
+                    type="button"
+                    className="blin-press"
+                    onClick={() => setStep("region")}
+                    style={{
+                      ...btnReset, width: "100%", padding: "12px 14px", display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+                      border: `1px dashed ${T.border}`, borderRadius: 14, background: "transparent", color: T.textMuted,
+                      fontSize: 13.5, lineHeight: "19px", cursor: "pointer",
+                    }}
+                  >
+                    <MSIcon name="public" style={{ fontSize: 20 }} />
+                    <span style={{ flex: 1, minWidth: 0 }}><b style={strong}>Нет в App Store?</b> Как сменить регион на США</span>
+                    <MSIcon name="chevron_right" style={{ fontSize: 18, color: T.textDim }} />
+                  </button>
+                ) : null}
               </>
             ) : null}
           </>
@@ -403,6 +495,13 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
                 <NoirLinkBox link={link} loading={linkLoading} error={err} />
               </>
             ) : null}
+          </>
+        )}
+
+        {step === "region" && (
+          <>
+            <RegionSteps />
+            <Btn onClick={() => setStep("install")} style={{ marginTop: 6 }}>Регион сменил — к установке</Btn>
           </>
         )}
 
