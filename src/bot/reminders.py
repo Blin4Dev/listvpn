@@ -269,7 +269,9 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
             if str(row.get("sub_type") or "vpn") != "trial":
                 sent += _notify_family(api, int(row["owner_id"]), stage, remaining)
         else:
-            log(f"[reminders] не удалось отправить {stage} для подписки {sub_id}")
+            err = getattr(api, "last_error", lambda: None)()
+            why = f": {err[0]} {err[1]}" if err else ""
+            log(f"[reminders] не удалось отправить {stage} для подписки {sub_id}{why}")
         time.sleep(0.05)  # ~20 msg/s
 
     if sent:

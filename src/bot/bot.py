@@ -619,6 +619,7 @@ def run() -> None:
 
     db.init_db()
     # фоновые напоминания — одни на всю сеть; каждое сообщение уходит ботом проекта пользователя
+    api.last_error = last_error  # type: ignore[attr-defined]  # причина отказа Telegram — в логах рассыльщика
     reminders.start_background(api, log=lambda m: print(m, flush=True))
 
     running: dict[str, tuple[str, threading.Thread]] = {}
