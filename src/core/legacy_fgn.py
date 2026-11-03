@@ -936,6 +936,12 @@ def cmd_relink(args: argparse.Namespace) -> int:
             new_rw = _rw_by_id(client, sub["rw_id"])
             if new_rw is None:
                 res["новый batman_ уже удалён в Remnawave"] += 1
+        elif live:
+            # база перенесена заново, а batman_<id> от прошлого прогона в Remnawave остался (id те же)
+            try:
+                new_rw = remnawave.RemnawaveAPI._unwrap_user(client.get_user_by_username(provisioning.rw_username(uid))) or None
+            except remnawave.RemnawaveError:
+                new_rw = None
             if new_rw and str(new_rw.get("username")) == provisioning.rw_username(uid):
                 if _rw_used(client, new_rw):
                     res["новый batman_ уже подключали — оставлен"] += 1
