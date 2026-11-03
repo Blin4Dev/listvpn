@@ -746,6 +746,23 @@ def _rw_used(client: Any, u: dict[str, Any]) -> bool:
         return True
 
 
+def _rw_by_id(client: Any, rid: Any) -> Optional[dict[str, Any]]:
+    """пользователь панели по числовому id: в Remnawave 3.x — POST /api/users/resolve, GET /api/users/<id> — 404."""
+    import remnawave  # type: ignore
+    try:
+        rid = int(str(rid))
+    except (TypeError, ValueError):
+        return None
+    for call in (lambda: client.resolve_user(id=rid), lambda: client.get(f"/api/users/{rid}")):
+        try:
+            u = remnawave.RemnawaveAPI._unwrap_user(call())
+        except remnawave.RemnawaveError:
+            continue
+        if u and str(u.get("id")) == str(rid):
+            return u
+    return None
+
+
 def cmd_relink(args: argparse.Namespace) -> int:
     import provisioning  # type: ignore
     import remnawave  # type: ignore
@@ -810,8 +827,7 @@ def cmd_relink(args: argparse.Namespace) -> int:
         new_rw = None
         if live and sub.get("rw_id"):
             # у живой подписки уже новый batman_ (выдал provision) — убираем его, только если им не пользовались
-            new_rw = remnawave.RemnawaveAPI._unwrap_user(client.get(f"/api/users/{int(sub['rw_id'])}")) \
-                if str(sub["rw_id"]).isdigit() else None
+            new_rw = _rw_by_id(client, sub["rw_id"])
             if new_rw and str(new_rw.get("username")) == provisioning.rw_username(uid):
                 if _rw_used(client, new_rw):
                     res["новый batman_ уже подключали — оставлен"] += 1
@@ -840,7 +856,7 @@ def cmd_relink(args: argparse.Namespace) -> int:
             if exp > now():
                 patch["status"] = "ACTIVE"
             client.update_user(**patch)
-            fresh = remnawave.RemnawaveAPI._unwrap_user(client.get(f"/api/users/{int(pick['id'])}")) or pick
+            fresh = _rw_by_id(client, pick["id"]) or pick
             db.execute("UPDATE subscriptions SET rw_id = ?, short_uuid = ?, key_config = COALESCE(?, key_config), "
                        "key_uuid = COALESCE(?, key_uuid), expires_at = ?, devices_limit = ?, sync_state = NULL, "
                        "status = ? WHERE id = ?",
