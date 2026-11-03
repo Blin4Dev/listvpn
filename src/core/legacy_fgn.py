@@ -794,9 +794,12 @@ def _relink_live(client: Any, sub: dict[str, Any], pick: dict[str, Any]) -> None
     except (TypeError, ValueError):
         hw = 0
     dev = max(int(sub["devices_limit"] or 1), hw, 1)
-    patch: dict[str, Any] = {"id": int(pick["id"]), "expire_at": exp, "hwid_device_limit": dev}
+    patch: dict[str, Any] = {"id": int(pick["id"]), "hwid_device_limit": dev}
     if exp > now():
+        patch["expire_at"] = exp
         patch["status"] = "ACTIVE"
+    # срок уже прошёл: Remnawave не принимает дату в прошлом («Expiration date cannot be in the past») —
+    # срок не трогаем (там он тоже истёк), при оплате платформа выставит новый
     client.update_user(**patch)
     fresh = _rw_by_id(client, pick["id"]) or pick
     db.execute("UPDATE subscriptions SET rw_id = ?, short_uuid = ?, key_config = COALESCE(?, key_config), "
