@@ -328,7 +328,9 @@ def _limited_user_ids(log: Callable[[str], None]) -> set[int]:
             # только свои batman_<id>: id пользователя бота — из имени, чужих пользователей панели не берём
             if not remnawave.is_own_username(u.get("username")):
                 continue
-            desc_ids.add(int(str(u["username"])[len(provisioning.USERNAME_PREFIX):]))
+            oid = provisioning.own_user_id(u.get("username"))
+            if oid:
+                desc_ids.add(oid)
         start += size
         total = page.get("total") if isinstance(page, dict) else None
         if (total is not None and start >= int(total)) or len(users) < size:

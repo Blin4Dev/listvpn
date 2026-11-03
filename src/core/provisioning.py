@@ -114,13 +114,66 @@ def _by_username(client: Any, username: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def _db():
+    try:
+        from . import database as db  # type: ignore
+    except ImportError:
+        import database as db  # type: ignore
+    return db
+
+
+# ── перенесённые из старых ботов (rw_legacy_users): имя в панели прежнее, привязка — по id и имени ──
+
+def legacy_for_user(user_id: Optional[int]) -> Optional[dict[str, Any]]:
+    if not user_id:
+        return None
+    try:
+        return _db().fetchone("SELECT * FROM rw_legacy_users WHERE user_id = ?", (int(user_id),))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _legacy_names() -> list[str]:
+    return [str(r["username"]) for r in _db().fetchall("SELECT username FROM rw_legacy_users")]
+
+
+def own_user_id(username: Any) -> Optional[int]:
+    """id пользователя бота по имени в панели: batman_<id> или перенесённый (rw_legacy_users)."""
+    name = str(username or "")
+    if name.startswith(USERNAME_PREFIX) and name[len(USERNAME_PREFIX):].isdigit():
+        return int(name[len(USERNAME_PREFIX):])
+    if not name:
+        return None
+    try:
+        r = _db().fetchone("SELECT user_id FROM rw_legacy_users WHERE username = ?", (name,))
+    except Exception:  # noqa: BLE001
+        return None
+    return int(r["user_id"]) if r else None
+
+
+def _legacy_map() -> dict[str, int]:
+    try:
+        return {str(r["username"]): int(r["user_id"]) for r in _db().fetchall("SELECT username, user_id FROM rw_legacy_users")}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+if remnawave is not None:
+    remnawave.set_own_alias_loader(_legacy_names)
+
+
 def _owned(u: dict[str, Any], *, user_id: Optional[int], telegram_id: Optional[int] = None,
            email: Optional[str] = None) -> bool:
-    """свой пользователь панели — ТОЛЬКО с именем ровно batman_<id пользователя бота>.
-    Никаких поисков по telegramId / email / старым user_…: на панели могут быть чужие проекты."""
+    """свой пользователь панели — ТОЛЬКО с именем ровно batman_<id пользователя бота>
+    или перенесённый из старого бота строго по привязке rw_legacy_users (id в панели + имя).
+    Никаких поисков по telegramId / email: на панели могут быть чужие проекты."""
     if not isinstance(u, dict) or _num_id(u) is None or not user_id:
         return False
-    return str(u.get("username") or "") == rw_username(int(user_id))
+    name = str(u.get("username") or "")
+    if name == rw_username(int(user_id)):
+        return True
+    leg = legacy_for_user(user_id)
+    return bool(leg) and name == str(leg["username"]) and _num_id(u) == int(leg["rw_id"])
 
 
 def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[int] = None,
@@ -134,6 +187,11 @@ def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[
     rw = _by_username(client, rw_username(int(user_id)))
     if rw and _owned(rw, user_id=user_id):
         return rw
+    leg = legacy_for_user(user_id)
+    if leg:
+        rw = _by_username(client, str(leg["username"]))
+        if rw and _owned(rw, user_id=user_id):
+            return rw
     return None
 
 
@@ -152,6 +210,7 @@ def own_panel_users(client: Any, project: Optional[str] = None) -> list[dict[str
     except Exception:  # noqa: BLE001
         return []
     out: list[dict[str, Any]] = []
+    legacy = _legacy_map()
     start, size = 0, 250
     while True:
         page = client.get_users(start=start, size=size)
@@ -162,6 +221,8 @@ def own_panel_users(client: Any, project: Optional[str] = None) -> list[dict[str
             name = str(u.get("username") or "")
             if name.startswith(USERNAME_PREFIX) and name[len(USERNAME_PREFIX):].isdigit() \
                     and int(name[len(USERNAME_PREFIX):]) in local and _num_id(u) is not None:
+                out.append(u)
+            elif name in legacy and legacy[name] in local and _num_id(u) is not None:
                 out.append(u)
         start += size
         total = (page.get("response") or page).get("total") if isinstance(page, dict) else None
@@ -337,7 +398,9 @@ def backfill_descriptions(tg_to_user_id: dict[int, int]) -> dict[str, Any]:
     try:
         client = remnawave.get_client()  # type: ignore[union-attr]
         for u in own_panel_users(client):
-            uid = str(u.get("username") or "")[len(USERNAME_PREFIX):]
+            uid = str(own_user_id(u.get("username")) or "")
+            if not uid:
+                continue
             if str(u.get("description") or "") == uid:
                 continue
             try:

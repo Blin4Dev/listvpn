@@ -187,6 +187,23 @@ def recover_after_restart() -> None:
 
 # ── чтение Remnawave ──
 
+def _is_own(name: str) -> bool:
+    try:
+        import remnawave  # type: ignore
+        return bool(remnawave.is_own_username(name))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _legacy_prefix(p: str) -> bool:
+    """префикс, под которым живут перенесённые пользователи старого бота FGN — это не ресейлер"""
+    try:
+        return db.fetchone("SELECT 1 FROM rw_legacy_users WHERE username LIKE ? ESCAPE '\\' LIMIT 1",
+                           (p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",)) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def prefix_of(username: Any) -> Optional[str]:
     """«dnet_123» → «dnet_»; свои batman_<id> и имена без «_» — None."""
     m = _PREFIX_RE.match(str(username or ""))
@@ -230,6 +247,8 @@ def _page(data: Any) -> tuple[list[dict[str, Any]], Optional[int]]:
 
 def _slim(u: dict[str, Any]) -> Optional[dict[str, Any]]:
     name = str(u.get("username") or "")
+    if _is_own(name):
+        return None  # свои: batman_<id> и перенесённые из старого бота FGN (rw_legacy_users)
     p = prefix_of(name)
     if not p:
         return None
@@ -433,7 +452,8 @@ def _progress(read: int, total: Optional[int]) -> None:
 
 def _save_scan(users: list[dict[str, Any]], read: int, total: Optional[int]) -> dict[str, Any]:
     now = _now()
-    prefixes = sorted({u["prefix"] for u in users} | set(KNOWN_PREFIXES))
+    # префиксы перенесённых пользователей старого бота FGN — не ресейлеры, в сводку не попадают
+    prefixes = sorted(p for p in ({u["prefix"] for u in users} | set(KNOWN_PREFIXES)) if not _legacy_prefix(p))
     groups = [_group_summary(users, p, now) for p in prefixes]
     # известные ресейлеры первыми, дальше — по числу подписок
     groups.sort(key=lambda g: (0 if g["known"] else 1, -g["subs"], g["prefix"]))
@@ -465,6 +485,8 @@ def normalize_prefix(raw: Any) -> str:
         p += "_"
     if not _PREFIX_RE.fullmatch(p) or p == provisioning.USERNAME_PREFIX:
         raise ResaleError("Неверный префикс группы")
+    if _legacy_prefix(p):
+        raise ResaleError(f"{p} — пользователи старого бота FGN, они уже перенесены в FGN. Это не ресейлер")
     return p
 
 

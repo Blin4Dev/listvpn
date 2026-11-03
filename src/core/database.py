@@ -965,6 +965,17 @@ CREATE TABLE IF NOT EXISTS family_codes (
     FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
 );
 -- разовые уведомления пользователю (не подключил подписку и т.п.)
+-- пользователи Remnawave старых ботов (перенос базы FGN): имя в панели не batman_<id> и не меняется,
+-- но платформа ведёт их как своих — строго по этой привязке (id в Remnawave + имя)
+CREATE TABLE IF NOT EXISTS rw_legacy_users (
+    user_id INTEGER PRIMARY KEY,
+    rw_id INTEGER NOT NULL UNIQUE,
+    username TEXT NOT NULL UNIQUE,
+    short_uuid TEXT,
+    source TEXT NOT NULL DEFAULT 'fgn',
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS user_notices (
     user_id INTEGER NOT NULL,
     kind TEXT NOT NULL,

@@ -9,6 +9,7 @@ import os
 import re
 import ssl
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,8 +23,47 @@ API_CONTRACT = "3.4.4"
 OWN_USERNAME_RE = re.compile(r"^batman_[0-9]+$")
 
 
+# старые пользователи перенесённых ботов (таблица rw_legacy_users): имя в панели осталось прежним.
+# Список отдаёт provisioning (у клиента нет доступа к базе); кэш на минуту.
+_alias_loader: Any = None
+_alias_cache: tuple[float, frozenset] = (0.0, frozenset())
+_alias_lock = threading.Lock()
+ALIAS_TTL = 60.0
+
+
+def set_own_alias_loader(fn: Any) -> None:
+    global _alias_loader
+    _alias_loader = fn
+    invalidate_own_aliases()
+
+
+def invalidate_own_aliases() -> None:
+    global _alias_cache
+    _alias_cache = (0.0, frozenset())
+
+
+def own_aliases() -> frozenset:
+    global _alias_cache
+    if _alias_loader is None:
+        return frozenset()
+    ts, names = _alias_cache
+    if time.monotonic() - ts < ALIAS_TTL and ts:
+        return names
+    with _alias_lock:
+        ts, names = _alias_cache
+        if time.monotonic() - ts < ALIAS_TTL and ts:
+            return names
+        try:
+            names = frozenset(str(x) for x in (_alias_loader() or ()) if x)
+        except Exception:  # noqa: BLE001 — база недоступна: только batman_<id>
+            names = frozenset()
+        _alias_cache = (time.monotonic(), names)
+        return names
+
+
 def is_own_username(name: Any) -> bool:
-    return bool(OWN_USERNAME_RE.match(str(name or "")))
+    s = str(name or "")
+    return bool(OWN_USERNAME_RE.match(s)) or (bool(s) and s in own_aliases())
 
 
 class RemnawaveError(Exception):
@@ -339,30 +379,6 @@ class RemnawaveAPI:
             if u and str(u.get("shortUuid") or u.get("short_uuid") or "") == short:
                 return u
         return None
-
-    def adopt_foreign_user(self, *, id: int, short_uuid: str, new_username: str,
-                           description: Optional[str] = None, telegram_id: Optional[int] = None) -> dict[str, Any]:
-        """ТОЛЬКО перенос старой базы (legacy_fgn.py adopt): пользователь старого бота становится batman_<id>,
-        ключ (shortUuid) не меняется. Заново читаем по shortUuid и сверяем id — переименовать чужого по ошибке нельзя.
-        После PATCH перечитываем: панель обязана вернуть новое имя, иначе ошибка."""
-        if not is_own_username(new_username):
-            raise RemnawaveForeignUserError(f"отказ: новое имя {new_username!r} не batman_<id>")
-        cur = self.find_user_by_short_uuid(short_uuid)
-        if not cur or str(cur.get("id")) != str(id):
-            raise RemnawaveForeignUserError(f"отказ: по ключу {short_uuid!r} найден не пользователь id={id}")
-        if is_own_username(cur.get("username")) and cur.get("username") != new_username:
-            raise RemnawaveForeignUserError(f"отказ: пользователь уже {cur.get('username')!r}")
-        body: dict[str, Any] = {"id": int(id), "username": new_username}
-        if description is not None:
-            body["description"] = description
-        if telegram_id:
-            body["telegramId"] = int(telegram_id)
-        self.patch("/api/users/", json_body=body)
-        after = self.find_user_by_short_uuid(short_uuid)
-        if not after or after.get("username") != new_username:
-            raise RemnawaveError(f"панель не переименовала пользователя (сейчас {after and after.get('username')!r})")
-        self._remember_own(after)
-        return after
 
     def create_user(
         self,

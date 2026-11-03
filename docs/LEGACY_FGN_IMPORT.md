@@ -17,7 +17,7 @@ docker exec -it blinvpn-api python legacy_fgn.py import --old /app/data/bot2.db 
 docker exec -it blinvpn-api python legacy_fgn.py verify --old /app/data/bot2.db            # сверка: «ВСЁ СХОДИТСЯ»
 
 docker exec -it blinvpn-api python legacy_fgn.py adopt --dry-run      # что будет с ключами в Remnawave
-docker exec -it blinvpn-api python legacy_fgn.py adopt --limit 1      # один человек: проверить, что ключ работает
+docker exec -it blinvpn-api python legacy_fgn.py adopt --limit 1      # один человек: проверить, что ключ работает (в Remnawave ничего не меняется)
 docker exec -it blinvpn-api python legacy_fgn.py adopt                # остальные (можно прерывать и запускать снова)
 docker exec -it blinvpn-api python legacy_fgn.py provision            # живым подпискам без ключа — новый ключ
 docker exec -it blinvpn-api python legacy_fgn.py verify --old /app/data/bot2.db
@@ -45,3 +45,11 @@ docker compose start bot webhook
 Не сработают на перенесённых: онбординг новичков, «оплатил, но не подключился», «давно не виделись — дарим дни»
 (для уже истёкших; `--winback` при import — не гасить). Работают как у всех: напоминания об окончании (3/2/1 день),
 предупреждения «подписка удалится» и удаление через 7 дней после окончания.
+
+## Привязка к Remnawave (adopt)
+
+Имена пользователей в Remnawave **не меняются** (панель не даёт переименовать, и не нужно). `adopt` находит
+пользователя по shortUuid ключа, проверяет Telegram ID и записывает привязку в `rw_legacy_users`
+(id пользователя платформы ↔ id и имя в Remnawave). Дальше платформа ведёт его как своего — продление, устройства,
+сброс ключа, удаление после окончания — строго по этой привязке; чужие пользователи панели по-прежнему недоступны.
+Перенесённые не показываются в «Ресейле», и перенести их группу через ресейл нельзя.

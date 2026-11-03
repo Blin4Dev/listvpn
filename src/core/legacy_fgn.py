@@ -626,24 +626,32 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             issues.append(f"sub {r['sid']} user {uid}: в Remnawave telegramId {rw_tg}, в базе {tg} — пропущено")
             continue
         name = str(u.get("username") or "")
-        if remnawave.is_own_username(name) and name != want:
+        try:
+            rw_num = int(u.get("id"))
+        except (TypeError, ValueError):
+            res["нет числового id в Remnawave"] += 1
+            issues.append(f"sub {r['sid']} user {uid}: у пользователя {name!r} нет числового id — пропущено")
+            continue
+        # имя в панели НЕ меняем: привязываем как есть (rw_legacy_users). Занято кем-то — пропуск.
+        if name.startswith(provisioning.USERNAME_PREFIX) and name != want:
             res["уже batman_ другого"] += 1
             issues.append(f"sub {r['sid']} user {uid}: в Remnawave уже {name} — пропущено")
+            continue
+        other = db.fetchone("SELECT user_id FROM rw_legacy_users WHERE (rw_id = ? OR username = ?) AND user_id != ?",
+                            (rw_num, name, uid))
+        if other:
+            res["ключ уже привязан к другому"] += 1
+            issues.append(f"sub {r['sid']} user {uid}: {name} уже привязан к user {other['user_id']} — пропущено")
             continue
         if args.dry_run:
             res["будет привязан"] += 1
             continue
         if name != want:
-            try:
-                u = client.adopt_foreign_user(id=int(u["id"]), short_uuid=short, new_username=want,
-                                              description=str(uid), telegram_id=tg if rw_tg in (None, "") else None)
-            except Exception as exc:  # noqa: BLE001
-                res["ошибка переименования"] += 1
-                issues.append(f"sub {r['sid']} user {uid}: переименование: {exc}")
-                if res["ошибка переименования"] >= 3 and res["привязан"] == 0:
-                    log("! Три ошибки подряд и ни одной удачи — останавливаюсь, проверьте Remnawave")
-                    break
-                continue
+            db.execute("INSERT INTO rw_legacy_users (user_id, rw_id, username, short_uuid, source, created_at) "
+                       "VALUES (?, ?, ?, ?, 'fgn', ?) ON CONFLICT(user_id) DO UPDATE SET rw_id = excluded.rw_id, "
+                       "username = excluded.username, short_uuid = excluded.short_uuid",
+                       (uid, rw_num, name, short, iso(now())))
+            remnawave.invalidate_own_aliases()
         exp_rw = parse_old(_rw_field(u, "expireAt", "expire_at"))
         exp_db = parse_old(r["exp"])
         new_exp = exp_rw or exp_db
