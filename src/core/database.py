@@ -43,9 +43,14 @@ def connect() -> sqlite3.Connection:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        # busy_timeout: ждать до 5с вместо database is locked
+        # busy_timeout ДО смены режима: иначе, пока другой процесс пишет, переход в WAL падает сразу
+        # («database is locked») — например, если база подложена файлом не в WAL
         conn.execute("PRAGMA busy_timeout = 5000")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError as exc:
+            # база занята: работаем в текущем режиме, WAL включит следующее подключение
+            print(f"[db] journal_mode=WAL отложен: {exc}", flush=True)
         # проект текущего запроса/задачи — для триггеров, проставляющих project_id новым записям
         conn.create_function("current_project", 0, projects.current_id)
         _local.conn = conn
