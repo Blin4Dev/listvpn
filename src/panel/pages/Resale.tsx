@@ -433,7 +433,7 @@ export const ResalePage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => 
                     <td><div style={{ fontWeight: 600 }}>{m.old_name}</div><div className="mono faint" style={{ fontSize: 12 }}>{m.prefix}</div>
                       {m.info_url ? <a href={m.info_url} target="_blank" rel="noreferrer noopener" className="faint"
                         style={{ fontSize: 11, display: 'block', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.info_url}</a>
-                        : m.status === 'active' && <div style={{ fontSize: 11, color: 'var(--danger, #e5484d)' }}>нет ссылки — бот не пишет</div>}</td>
+                        : m.status === 'active' && <div style={{ fontSize: 11, color: 'var(--danger, #e5484d)', whiteSpace: 'nowrap' }}>нет ссылки — бот не пишет</div>}</td>
                     <td><span className={`badge ${MIG_STATUS[m.status].cls}`}>{MIG_STATUS[m.status].label}</span>
                       {m.error && <div className="faint" style={{ fontSize: 11, marginTop: 2, maxWidth: 260 }}>{m.error}</div>}</td>
                     <td>{m.status === 'running' ? '—' : <>{people(m.people)}
