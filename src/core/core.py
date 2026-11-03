@@ -6050,6 +6050,11 @@ class ResaleMigrateBody(BaseModel):
     prefix: str = Field(..., min_length=2, max_length=40)
     name: str = Field(..., min_length=1, max_length=80)
     confirm: str = Field(..., max_length=40)  # повтор префикса — последнее подтверждение
+    info_url: str = Field(..., min_length=1, max_length=500)  # ссылка с объяснением — в сообщении бота при /start
+
+
+class ResaleInfoUrlBody(BaseModel):
+    info_url: str = Field(..., min_length=1, max_length=500)
 
 
 class ResaleCancelBody(BaseModel):
@@ -6081,7 +6086,7 @@ def panel_resale_migrate(body: ResaleMigrateBody, request: Request, p: dict = De
         prefix = resale.normalize_prefix(body.prefix)
         if (body.confirm or "").strip() not in (prefix, prefix[:-1]):
             raise resale.ResaleError(f"Для подтверждения введите {prefix}")
-        mid = resale.start_migration(prefix, body.name, p.get("username") or p.get("actor") or "owner")
+        mid = resale.start_migration(prefix, body.name, p.get("username") or p.get("actor") or "owner", body.info_url)
     except resale.ResaleError as exc:
         raise _resale_http(exc)
     audit(p.get("actor") or "owner", p.get("name"), f"resale_migrate {prefix} #{mid}", 200, _client_ip(request))
@@ -6093,6 +6098,17 @@ def panel_resale_migration_users(mid: int, status: str = Query("", max_length=16
                                  limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
                                  p: dict = Depends(require_owner)) -> dict[str, Any]:
     return resale.migration_users(mid, status, q, limit, offset)
+
+
+@app.post("/api/panel/resale/migrations/{mid}/info-url")
+def panel_resale_info_url(mid: int, body: ResaleInfoUrlBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    """поменять ссылку с объяснением у действующего переноса (уже отправленные сообщения не переотправляются)."""
+    try:
+        url = resale.set_info_url(mid, body.info_url)
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    audit(p.get("actor") or "owner", p.get("name"), f"resale_info_url #{mid}", 200, _client_ip(request))
+    return {"success": True, "info_url": url}
 
 
 @app.post("/api/panel/resale/migrations/{mid}/cancel")

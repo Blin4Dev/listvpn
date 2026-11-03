@@ -1,7 +1,7 @@
 // FGN: перенос из старого VPN (ресейл). Человек из проекта, переданного под управление FGN,
 // при входе видит «<старый VPN> теперь FGN» и кнопку «Заменить ключ»: сервер выдаёт перенесённый срок
 // (≤ 30 дней, к своей подписке или новой), затем — «Куда добавить» (SetupSheet), чтобы поставить новый ключ.
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { C, FGN_DIM, FgnIcon, fgnButton } from "./fgn";
 import { useTgBack } from "./noir";
 import SetupSheet from "./SetupSheet";
@@ -24,7 +24,25 @@ function haptic() {
   } catch { /* ignore */ }
 }
 
-function MigrationDialog({ info, onClaimed, onClose }: { info: MigrationPending; onClaimed: (note: string) => void; onClose: () => void }) {
+/** кнопка «Перенести ключ» в сообщении бота открывает мини-приложение с ?migrate=1 — подписку выдаём сразу */
+function takeMigrateFlag(): boolean {
+  try {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("migrate") !== "1") return false;
+    url.searchParams.delete("migrate");
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// читаем при загрузке, до интро и переходов роутера
+const MIGRATE_FLAG = takeMigrateFlag();
+
+function MigrationDialog({ info, auto, onClaimed, onClose }: {
+  info: MigrationPending; auto?: boolean; onClaimed: (note: string) => void; onClose: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   useTgBack(busy ? () => { /* ждём ответа */ } : onClose);
@@ -38,14 +56,21 @@ function MigrationDialog({ info, onClaimed, onClose }: { info: MigrationPending;
       haptic();
       notifySubscriptionChanged();
       const until = r.expires_at ? formatDateRu(r.expires_at) : "";
-      onClaimed(until ? `Подписка ${r.target || info.target} действует до ${until}. Добавьте новый ключ на устройство.`
-        : `Подписка ${r.target || info.target} готова. Добавьте новый ключ на устройство.`);
+      onClaimed(until ? `Вам выдана подписка ${r.target || info.target} до ${until}. Добавьте новый ключ на устройство.`
+        : `Вам выдана подписка ${r.target || info.target}. Добавьте новый ключ на устройство.`);
     } catch (e) {
       setErr(e instanceof Error && e.message ? e.message : "Не удалось заменить ключ, попробуйте ещё раз");
     } finally {
       setBusy(false);
     }
   };
+  const autoRan = useRef(false);
+  useEffect(() => {
+    if (!auto || autoRan.current) return;
+    autoRan.current = true;
+    void replace();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto]);
 
   return (
     <div
@@ -127,6 +152,7 @@ function MigrationDialog({ info, onClaimed, onClose }: { info: MigrationPending;
 export default function MigrationPrompt() {
   const [info, setInfo] = useState<MigrationPending | null>(null);
   const [setupNote, setSetupNote] = useState<string | null>(null);
+  const [auto] = useState(() => MIGRATE_FLAG);
   useEffect(() => {
     let alive = true;
     void fetchMigration().then((m) => { if (alive) setInfo(m); });
@@ -140,6 +166,7 @@ export default function MigrationPrompt() {
   return (
     <MigrationDialog
       info={info}
+      auto={auto}
       onClose={() => setInfo(null)}
       onClaimed={(note) => { setInfo(null); setSetupNote(note); }}
     />

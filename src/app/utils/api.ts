@@ -804,7 +804,7 @@ export async function claimDayGift(id: number): Promise<{ days: number; expires_
 }
 
 // перенос из старого VPN (ресейл): «<name> теперь <target>», кнопка «Заменить ключ»
-export type MigrationPending = { name: string; target: string; days: number };
+export type MigrationPending = { name: string; target: string; days: number; info_url?: string };
 export type MigrationClaim = {
   success: boolean;
   already?: boolean;

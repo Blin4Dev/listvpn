@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRightLeft, Ban, CheckCircle2, Clock, List, RefreshCw, Search, Users } from 'lucide-react';
+import { AlertTriangle, ArrowRightLeft, Ban, CheckCircle2, Clock, Link2, List, RefreshCw, Search, Users } from 'lucide-react';
 import { Modal, PageHead, Segmented, Spinner, Stat } from '../components/ui';
 import { apiFetch, parseApiErr } from '../lib/api';
 import { fmtDateTime, fmtInt } from '../lib/format';
@@ -22,7 +22,7 @@ type Job = { kind: 'scan' | 'migrate' | null; running: boolean; read: number; to
 type Migration = {
   id: number; prefix: string; old_name: string; target_project: string; status: 'running' | 'active' | 'failed' | 'cancelled';
   snapshot_at: string | null; scanned: number; no_tg: number; expired: number; capped: number; skipped_claimed: number;
-  people: number; error: string | null; created_by: string | null; created_at: string; finished_at: string | null;
+  people: number; error: string | null; info_url: string | null; created_by: string | null; created_at: string; finished_at: string | null;
   cancelled_at: string | null; counts: { pending: number; claiming: number; claimed: number; cancelled: number };
 };
 type Overview = { target: { id: string; name: string }; rules: { max_days: number; min_days: number };
@@ -44,6 +44,21 @@ const plural = (n: number, one: string, few: string, many: string) => {
 };
 const people = (n: number) => `${fmtInt(n)} ${plural(n, 'человек', 'человека', 'человек')}`;
 
+// ссылка с объяснением переноса (telegra.ph и т.п.) — бот присылает её один раз при /start
+const INFO_URL_RE = /^https:\/\/[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d{1,5})?(?:[/?#][^\s<>"']*)?$/;
+const infoUrlOk = (u: string) => u.length <= 500 && INFO_URL_RE.test(u);
+
+const BotNotice: React.FC<{ target: string; url: string }> = ({ target, url }) => (
+  <div className="card" style={{ padding: 16 }}>
+    <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Бот пришлёт один раз вместе с приветствием на /start:</div>
+    <div style={{ fontSize: 14, lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+      <b>Ваши подписки переезжают в {target}!</b>{'\n\n'}Подробная информация: <span style={{ color: 'var(--accent, #4ea1ff)' }}>{url || 'ссылка'}</span>
+      {'\n\n'}Пожалуйста, ознакомьтесь с данной информацией!
+    </div>
+    <div style={{ marginTop: 12 }}><span className="badge solid">Перенести ключ</span></div>
+  </div>
+);
+
 const Num: React.FC<{ v: number; dim?: boolean }> = ({ v, dim }) => (
   <span className="tabular-nums" style={{ color: dim && !v ? 'var(--faint)' : undefined }}>{fmtInt(v)}</span>
 );
@@ -53,11 +68,13 @@ const MigrateModal: React.FC<{ g: Group; scan: Scan; target: string; rules: Over
   onStarted: () => void; onToast: Toast }> = ({ g, scan, target, rules, onClose, onStarted, onToast }) => {
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
+  const [infoUrl, setInfoUrl] = useState('');
   const [checked, setChecked] = useState(false);
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const clean = name.replace(/\s+/g, ' ').trim();
-  const nameOk = clean.length >= 1 && clean.length <= 40 && !/[<>]/.test(clean);
+  const url = infoUrl.trim();
+  const nameOk = clean.length >= 1 && clean.length <= 40 && !/[<>]/.test(clean) && infoUrlOk(url);
   const confirmOk = confirm.trim() === g.prefix;
 
   const submit = async () => {
@@ -66,7 +83,7 @@ const MigrateModal: React.FC<{ g: Group; scan: Scan; target: string; rules: Over
       `Людям с Telegram ID из этой группы при входе в ${target} покажется окно «${clean} теперь ${target}».`)) return;
     setBusy(true);
     try {
-      await apiFetch('/panel/resale/migrate', { method: 'POST', body: JSON.stringify({ prefix: g.prefix, name: clean, confirm: confirm.trim() }) });
+      await apiFetch('/panel/resale/migrate', { method: 'POST', body: JSON.stringify({ prefix: g.prefix, name: clean, confirm: confirm.trim(), info_url: url }) });
       onToast('Перенос запущен', `Читаем Remnawave и сохраняем группу ${g.prefix} — это займёт до пары минут`, 'success');
       onStarted();
     } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось запустить перенос'), 'error'); } finally { setBusy(false); }
@@ -95,6 +112,15 @@ const MigrateModal: React.FC<{ g: Group; scan: Scan; target: string; rules: Over
               onKeyDown={(e) => { if (e.key === 'Enter' && nameOk) setStep(2); }} placeholder="Например, DNET VPN" />
             <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>Так его видели клиенты — это название будет в окне при входе</div>
           </div>
+          <div>
+            <label className="field-label">Ссылка с объяснением</label>
+            <input className="input mono" maxLength={500} value={infoUrl} onChange={(e) => setInfoUrl(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && nameOk) setStep(2); }} placeholder="https://telegra.ph/…" />
+            <div className="faint" style={{ fontSize: 12, marginTop: 4, color: url && !infoUrlOk(url) ? 'var(--danger, #e5484d)' : undefined }}>
+              {url && !infoUrlOk(url) ? 'Нужна ссылка, начинающаяся с https://' : 'Обязательно. Её бот пришлёт клиенту при /start'}
+            </div>
+          </div>
+          <BotNotice target={target} url={url} />
           <div className="card" style={{ padding: 16 }}>
             <div className="faint" style={{ fontSize: 12, marginBottom: 8 }}>Клиент увидит при входе в {target}:</div>
             <div style={{ fontSize: 17, fontWeight: 700 }}>{clean || 'Название'} теперь {target}</div>
@@ -113,6 +139,7 @@ const MigrateModal: React.FC<{ g: Group; scan: Scan; target: string; rules: Over
           </div>
           <div className="sub" style={{ fontSize: 13.5, lineHeight: 1.6 }}>
             <div>Группа <b style={{ color: 'var(--text)' }}>{g.prefix}</b> · «{clean}» · подписок в Remnawave: {fmtInt(g.subs)}</div>
+            <div style={{ wordBreak: 'break-all' }}>Ссылка с объяснением: <a href={url} target="_blank" rel="noreferrer noopener">{url}</a></div>
             <div>Остаток до 7 дней: {fmtInt(g.buckets.d1_7)} · 8–14: {fmtInt(g.buckets.d8_14)} · 15–30: {fmtInt(g.buckets.d15_30)} ·
               больше 30 (получат 30): {fmtInt(g.buckets.over30)}</div>
             {g.no_tg > 0 && <div>Без Telegram ID (их не перенести): {fmtInt(g.no_tg)}</div>}
@@ -147,6 +174,35 @@ const MigrateModal: React.FC<{ g: Group; scan: Scan; target: string; rules: Over
           </div>
         </div>
       )}
+    </Modal>
+  );
+};
+
+const InfoUrlModal: React.FC<{ m: Migration; target: string; onClose: () => void; onDone: () => void; onToast: Toast }> = ({ m, target, onClose, onDone, onToast }) => {
+  const [value, setValue] = useState(m.info_url || '');
+  const [busy, setBusy] = useState(false);
+  const url = value.trim();
+  const ok = infoUrlOk(url) && url !== (m.info_url || '');
+  const submit = async () => {
+    if (!ok || busy) return;
+    setBusy(true);
+    try {
+      await apiFetch(`/panel/resale/migrations/${m.id}/info-url`, { method: 'POST', body: JSON.stringify({ info_url: url }) });
+      onToast('Ссылка сохранена', 'Новая ссылка придёт тем, кому бот ещё не писал', 'success');
+      onDone();
+    } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось сохранить'), 'error'); } finally { setBusy(false); }
+  };
+  return (
+    <Modal onClose={() => !busy && onClose()} title={`Ссылка с объяснением · «${m.old_name}»`} icon={Link2} width={540} footer={
+      <><button className="btn" onClick={onClose} disabled={busy}>Отмена</button>
+        <button className="btn solid" disabled={!ok || busy} onClick={() => void submit()}>{busy ? <Spinner size={15} /> : <Link2 size={15} />} Сохранить</button></>
+    }>
+      <div className="flex flex-col gap-3">
+        <input className="input mono" autoFocus maxLength={500} value={value} onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') void submit(); }} placeholder="https://telegra.ph/…" />
+        <div className="faint" style={{ fontSize: 12 }}>Бот пишет каждому один раз — кому уже отправил, повторно не пришлёт.</div>
+        <BotNotice target={target} url={url} />
+      </div>
     </Modal>
   );
 };
@@ -247,6 +303,7 @@ export const ResalePage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => 
   const [migrating, setMigrating] = useState<Group | null>(null);
   const [cancelling, setCancelling] = useState<Migration | null>(null);
   const [viewing, setViewing] = useState<Migration | null>(null);
+  const [editingUrl, setEditingUrl] = useState<Migration | null>(null);
   const autoScan = useRef(false);
   const wasRunning = useRef(false);
   // onToast из App пересоздаётся на каждый рендер — держим в ref, чтобы не перезапрашивать
@@ -373,7 +430,10 @@ export const ResalePage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => 
               <tbody>
                 {data.migrations.map((m) => (
                   <tr key={m.id} style={{ opacity: m.status === 'cancelled' || m.status === 'failed' ? 0.6 : 1 }}>
-                    <td><div style={{ fontWeight: 600 }}>{m.old_name}</div><div className="mono faint" style={{ fontSize: 12 }}>{m.prefix}</div></td>
+                    <td><div style={{ fontWeight: 600 }}>{m.old_name}</div><div className="mono faint" style={{ fontSize: 12 }}>{m.prefix}</div>
+                      {m.info_url ? <a href={m.info_url} target="_blank" rel="noreferrer noopener" className="faint"
+                        style={{ fontSize: 11, display: 'block', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.info_url}</a>
+                        : m.status === 'active' && <div style={{ fontSize: 11, color: 'var(--danger, #e5484d)' }}>нет ссылки — бот не пишет</div>}</td>
                     <td><span className={`badge ${MIG_STATUS[m.status].cls}`}>{MIG_STATUS[m.status].label}</span>
                       {m.error && <div className="faint" style={{ fontSize: 11, marginTop: 2, maxWidth: 260 }}>{m.error}</div>}</td>
                     <td>{m.status === 'running' ? '—' : <>{people(m.people)}
@@ -385,6 +445,7 @@ export const ResalePage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => 
                     <td className="sub" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{fmtDateTime(m.snapshot_at || m.created_at).slice(0, 16)}
                       {m.cancelled_at && <div className="faint">отменён {fmtDateTime(m.cancelled_at).slice(0, 16)}</div>}</td>
                     <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      {m.status === 'active' && <button className="btn sm ghost" onClick={() => setEditingUrl(m)}><Link2 size={14} /> Ссылка</button>}
                       {m.status !== 'running' && m.people > 0 && <button className="btn sm ghost" onClick={() => setViewing(m)}><List size={14} /> Список</button>}
                       {(m.status === 'active' || m.status === 'failed') && <button className="btn sm danger" style={{ marginLeft: 6 }} onClick={() => setCancelling(m)}><Ban size={14} /> Отменить</button>}
                     </td>
@@ -399,6 +460,8 @@ export const ResalePage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => 
       {migrating && sc && <MigrateModal g={migrating} scan={sc} target={target.name} rules={data.rules} onToast={onToast}
         onClose={() => setMigrating(null)} onStarted={() => { setMigrating(null); wasRunning.current = true; void load(); }} />}
       {cancelling && <CancelModal m={cancelling} onToast={onToast} onClose={() => setCancelling(null)} onDone={() => { setCancelling(null); void load(); }} />}
+      {editingUrl && <InfoUrlModal m={editingUrl} target={target.name} onToast={onToast} onClose={() => setEditingUrl(null)}
+        onDone={() => { setEditingUrl(null); void load(); }} />}
       {viewing && <UsersModal m={viewing} onToast={onToast} onClose={() => setViewing(null)} onOpenUser={(id) => { setViewing(null); onOpenUser(id); }} />}
     </div>
   );

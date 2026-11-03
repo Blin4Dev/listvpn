@@ -26,6 +26,7 @@ import services  # type: ignore
 import forum  # type: ignore
 import blacklist  # type: ignore
 import names  # type: ignore
+import resale  # type: ignore
 
 API_BASE = "https://api.telegram.org"
 
@@ -177,6 +178,51 @@ def _send_welcome(chat_id: int) -> None:
     })
 
 
+def _with_query(url: str, key: str, value: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    q = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    q = [(k, v) for k, v in q if k != key] + [(key, value)]
+    return urllib.parse.urlunsplit(parts._replace(path=parts.path or "/", query=urllib.parse.urlencode(q)))
+
+
+def _send_migration_notice(chat_id: int, user: Optional[dict[str, Any]]) -> None:
+    """FGN, перенос ресейла: один раз вместе с приветствием — «Ваши подписки переезжают» + ссылка
+    из переноса и кнопка «Перенести ключ» (мини-приложение с ?migrate=1 сразу выдаёт подписку)."""
+    if P().id != resale.TARGET_PROJECT or not user:
+        return
+    try:
+        notice = resale.take_start_notice(user)
+    except Exception as exc:  # noqa: BLE001 — приветствие не ломаем
+        print(f"[resale] уведомление о переносе {user.get('id')}: {type(exc).__name__}: {exc}", flush=True)
+        return
+    if not notice:
+        return
+    segments: list[tuple[str, Optional[dict[str, Any]]]] = [
+        (f"Ваши подписки переезжают в {notice['target']}!", {"type": "bold"}),
+        (f"\n\nПодробная информация: {notice['info_url']}\n\nПожалуйста, ознакомьтесь с данной информацией!", None),
+    ]
+    text, entities, offset = "", [], 0
+    for chunk, ent in segments:
+        length = _utf16_len(chunk)
+        if ent:
+            entities.append({**ent, "offset": offset, "length": length})
+        text += chunk
+        offset += length
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "entities": entities}
+    if _miniapp_url():
+        payload["reply_markup"] = {"inline_keyboard": [[{
+            "text": "Перенести ключ", "style": "success", "icon_custom_emoji_id": EMOJI_KEY,
+            "web_app": {"url": _with_query(_miniapp_url(), "migrate", "1")},
+        }]]}
+    ok = False
+    try:
+        ok = api("sendMessage", payload) is not None
+    except Exception as exc:  # noqa: BLE001
+        print(f"[resale] уведомление о переносе {user.get('id')}: {type(exc).__name__}: {exc}", flush=True)
+    if not ok:
+        resale.release_start_notice(notice["ids"])
+
+
 def _send_banned(chat_id: int) -> None:
     """заблокированному: сообщение о блокировке вместо приветствия."""
     text = "⛔️ Ваш аккаунт заблокирован за нарушение правил сервиса."
@@ -236,6 +282,7 @@ def handle_start(message: dict[str, Any]) -> None:
         return
 
     _send_welcome(chat_id)
+    _send_migration_notice(chat_id, user)
 
 
 def _send_gift(chat_id: int, raw: str) -> bool:

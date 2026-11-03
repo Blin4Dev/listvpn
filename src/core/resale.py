@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS resale_migrations (
     skipped_claimed INTEGER NOT NULL DEFAULT 0, -- уже получили в прошлом переносе этой группы
     people INTEGER NOT NULL DEFAULT 0,        -- перенесено людей (уникальных Telegram ID)
     error TEXT,
+    info_url TEXT,                            -- ссылка с объяснением (telegra.ph): в сообщении бота при /start
     created_by TEXT,
     created_at TEXT NOT NULL,
     finished_at TEXT,
@@ -110,6 +111,7 @@ CREATE TABLE IF NOT EXISTS resale_migration_users (
     claimed_user_id INTEGER,
     claimed_at TEXT,
     granted_until TEXT,
+    notified_at TEXT,                         -- когда бот один раз прислал «Ваши подписки переезжают»
     UNIQUE (migration_id, telegram_id)
 );
 CREATE INDEX IF NOT EXISTS idx_resale_users_tg ON resale_migration_users(telegram_id, status);
@@ -128,6 +130,11 @@ def ensure_schema() -> None:
             return
         conn = db.connect()
         conn.executescript(SCHEMA)
+        # старые базы: новые столбцы
+        for table, col in (("resale_migrations", "info_url"), ("resale_migration_users", "notified_at")):
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
         # первый вызов в процессе: фоновых задач ещё нет (uvicorn — один процесс). Перенос, оборванный
         # перезапуском, иначе навсегда остался бы «Выполняется» и блокировал группу — помечаем ошибкой.
         conn.execute("UPDATE resale_migrations SET status = 'failed', error = 'Прервано перезапуском сервера — запустите перенос заново', "
@@ -437,13 +444,40 @@ def target_name() -> str:
         return "FGN"
 
 
-def start_migration(prefix: str, name: str, actor: str) -> int:
+INFO_URL_MAX = 500
+_INFO_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d{1,5})?(?:[/?#][^\s<>\"']*)?$")
+
+
+def normalize_info_url(raw: Any) -> str:
+    """ссылка с объяснением переноса: только https, без пробелов и кавычек."""
+    url = str(raw or "").strip()
+    if not url:
+        raise ResaleError("Укажите ссылку с объяснением переноса")
+    if len(url) > INFO_URL_MAX or not _INFO_URL_RE.match(url):
+        raise ResaleError("Ссылка должна начинаться с https:// — например, https://telegra.ph/…")
+    return url
+
+
+def set_info_url(mid: int, raw: Any) -> str:
+    ensure_schema()
+    url = normalize_info_url(raw)
+    m = db.fetchone("SELECT status FROM resale_migrations WHERE id = ?", (int(mid),))
+    if not m:
+        raise ResaleError("Перенос не найден", 404)
+    if m["status"] not in ("running", "active"):
+        raise ResaleError("Перенос уже не действует")
+    db.execute("UPDATE resale_migrations SET info_url = ? WHERE id = ?", (url, int(mid)))
+    return url
+
+
+def start_migration(prefix: str, name: str, actor: str, info_url: Any = "") -> int:
     """запуск переноса в фоне: свежее чтение Remnawave → снимок → записи «ждёт замены ключа»."""
     ensure_schema()
     if not projects.exists(TARGET_PROJECT):
         raise ResaleError("Проект FGN не найден в сети", 500)
     prefix = normalize_prefix(prefix)
     name = normalize_name(name)
+    info_url = normalize_info_url(info_url)
     busy = db.fetchone("SELECT id FROM resale_migrations WHERE prefix = ? AND status IN ('running', 'active') LIMIT 1",
                        (prefix,))
     if busy:
@@ -453,9 +487,9 @@ def start_migration(prefix: str, name: str, actor: str) -> int:
     _job_lock.release()
     try:
         db.execute(
-            "INSERT INTO resale_migrations (prefix, old_name, target_project, status, created_by, created_at) "
-            "VALUES (?, ?, ?, 'running', ?, ?)",
-            (prefix, name, TARGET_PROJECT, (actor or "")[:60], _iso(_now())),
+            "INSERT INTO resale_migrations (prefix, old_name, target_project, status, info_url, created_by, created_at) "
+            "VALUES (?, ?, ?, 'running', ?, ?, ?)",
+            (prefix, name, TARGET_PROJECT, info_url, (actor or "")[:60], _iso(_now())),
         )
     except sqlite3.IntegrityError:
         raise ResaleError(f"Группа {prefix} уже переносится или перенесена", 409) from None
@@ -611,7 +645,7 @@ def _eligible_user(user: Optional[dict[str, Any]]) -> bool:
 
 def _pending_rows(telegram_id: int) -> list[dict[str, Any]]:
     return db.fetchall(
-        "SELECT u.*, m.old_name FROM resale_migration_users u JOIN resale_migrations m ON m.id = u.migration_id "
+        "SELECT u.*, m.old_name, m.info_url FROM resale_migration_users u JOIN resale_migrations m ON m.id = u.migration_id "
         "WHERE u.telegram_id = ? AND u.status = 'pending' AND m.status = 'active' AND m.target_project = ? "
         "ORDER BY u.grant_seconds DESC, u.id ASC",
         (int(telegram_id), TARGET_PROJECT))
@@ -630,7 +664,37 @@ def pending_for(user: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         "name": top["old_name"],
         "target": target_name(),
         "days": int(int(top["grant_seconds"]) // DAY),
+        "info_url": top.get("info_url") or "",
     }
+
+
+def take_start_notice(user: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """/start в FGN: один раз сообщить «Ваши подписки переезжают» со ссылкой переноса.
+    Строки сразу помечаются отправленными (два /start подряд не дадут два сообщения);
+    не удалось отправить — release_start_notice(ids)."""
+    if not _eligible_user(user):
+        return None
+    ensure_schema()
+    rows = [r for r in _pending_rows(int(user["telegram_id"])) if r.get("info_url")]  # type: ignore[index]
+    fresh = [r for r in rows if not r.get("notified_at")]
+    if not fresh:
+        return None
+    now = _iso(_now())
+    ids = []
+    for r in fresh:
+        cur = db.execute("UPDATE resale_migration_users SET notified_at = ? WHERE id = ? AND notified_at IS NULL",
+                         (now, int(r["id"])))
+        if cur.rowcount == 1:
+            ids.append(int(r["id"]))
+    if not ids:
+        return None
+    top = next(r for r in fresh if int(r["id"]) in ids)
+    return {"ids": ids, "target": target_name(), "name": top["old_name"], "info_url": top["info_url"]}
+
+
+def release_start_notice(ids: list[int]) -> None:
+    for i in ids:
+        db.execute("UPDATE resale_migration_users SET notified_at = NULL WHERE id = ?", (int(i),))
 
 
 def _end_grace(user_id: int) -> None:
