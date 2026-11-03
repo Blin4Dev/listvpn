@@ -19,7 +19,9 @@ docker exec -it blinvpn-api python legacy_fgn.py verify --old /app/data/bot2.db 
 docker exec -it blinvpn-api python legacy_fgn.py adopt --dry-run      # что будет с ключами в Remnawave
 docker exec -it blinvpn-api python legacy_fgn.py adopt --limit 1      # один человек: проверить, что ключ работает (в Remnawave ничего не меняется)
 docker exec -it blinvpn-api python legacy_fgn.py adopt                # остальные (можно прерывать и запускать снова)
-docker exec -it blinvpn-api python legacy_fgn.py provision            # живым подпискам без ключа — новый ключ
+docker exec -it blinvpn-api python legacy_fgn.py relink --dry-run     # старые user_… по Telegram ID: что будет
+docker exec -it blinvpn-api python legacy_fgn.py relink               # привязать (и убрать неиспользованные новые batman_)
+docker exec -it blinvpn-api python legacy_fgn.py provision            # новый ключ — только тем, у кого старого нет вовсе
 docker exec -it blinvpn-api python legacy_fgn.py verify --old /app/data/bot2.db
 
 docker compose start bot webhook
@@ -53,3 +55,12 @@ docker compose start bot webhook
 (id пользователя платформы ↔ id и имя в Remnawave). Дальше платформа ведёт его как своего — продление, устройства,
 сброс ключа, удаление после окончания — строго по этой привязке; чужие пользователи панели по-прежнему недоступны.
 Перенесённые не показываются в «Ресейле», и перенести их группу через ресейл нельзя.
+
+## relink: по Telegram ID
+
+Для всех людей FGN без привязки ищет в Remnawave старого пользователя `user_…` с тем же Telegram ID
+(анти-ключи пропускаются) и привязывает его — и живым, и давно истёкшим (при оплате продлится старый ключ).
+Если у живой подписки уже есть новый `batman_` от `provision` и им ни разу не пользовались (нет трафика,
+подключений, устройств) — он удаляется, человеку возвращается старый ключ со сроком из базы. Уже подключённые
+новые ключи не трогаются. Несколько старых с одним Telegram ID — берётся тот, что совпадает с ключом в базе,
+иначе с самым поздним сроком (всё в отчёте).

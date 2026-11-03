@@ -696,6 +696,174 @@ def cmd_adopt(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── relink: старый пользователь Remnawave по Telegram ID ──
+
+OLD_NAME_RE = re.compile(r"^user_[A-Za-z0-9_-]{6,}$")   # имена пользователей старого бота FGN в Remnawave
+
+
+def _scan_rw(client: Any) -> list[dict[str, Any]]:
+    """все пользователи панели (только чтение), страницами внахлёст."""
+    seen: dict[str, dict[str, Any]] = {}
+    start, size, total = 0, 500, None
+    for _ in range(5000):
+        page = client.get_users(start=start, size=size)
+        if isinstance(page, dict) and isinstance(page.get("response"), (dict, list)):
+            page = page["response"]
+        users = page.get("users") if isinstance(page, dict) else page
+        if isinstance(page, dict) and page.get("total") is not None:
+            total = int(page["total"])
+        if not users:
+            break
+        for u in users:
+            if isinstance(u, dict) and u.get("id") is not None:
+                seen[str(u["id"])] = u
+        end = start + len(users)
+        if (total is not None and end >= total) or (total is None and len(users) < size):
+            break
+        start = end - 50 if len(users) > 100 else end
+    return list(seen.values())
+
+
+def _rw_used(client: Any, u: dict[str, Any]) -> bool:
+    """пользовался ли ключом: трафик, подключения, устройства. Не смогли проверить — считаем, что да."""
+    ut = u.get("userTraffic") if isinstance(u.get("userTraffic"), dict) else {}
+    for k in ("onlineAt", "lastConnectedAt", "firstConnectedAt"):
+        if u.get(k) or ut.get(k):
+            return True
+    for k in ("usedTrafficBytes", "lifetimeUsedTrafficBytes", "trafficUsedBytes"):
+        try:
+            if float(u.get(k) or ut.get(k) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    try:
+        data = client.get_user_hwid_devices(int(u["id"]))
+        if isinstance(data, dict) and "response" in data:
+            data = data["response"]
+        devs = data.get("devices") if isinstance(data, dict) else data
+        return bool(devs)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def cmd_relink(args: argparse.Namespace) -> int:
+    import provisioning  # type: ignore
+    import remnawave  # type: ignore
+    if not db.get_setting(SETTING, ""):
+        raise SystemExit("Сначала import")
+    if not provisioning.is_configured():
+        raise SystemExit("Remnawave не настроена")
+    client = remnawave.get_client()
+    log("Читаю всех пользователей Remnawave (только чтение)…")
+    rw_all = _scan_rw(client)
+    bound = db.fetchall("SELECT user_id, rw_id, username FROM rw_legacy_users")
+    bound_ids = {int(r["rw_id"]) for r in bound}
+    bound_users = {int(r["user_id"]) for r in bound}
+    # ключи «анти» старого бота — не основной VPN, их не привязываем
+    anti = set()
+    for r in db.fetchall(f"SELECT anti_key FROM {ARCHIVE_PREFIX}users WHERE anti_key IS NOT NULL"):
+        sh = key_short(r["anti_key"])
+        if sh:
+            anti.add(sh)
+    for r in db.fetchall(f'SELECT "key" AS k FROM {ARCHIVE_PREFIX}anti_keys'):
+        sh = key_short(r["k"]) or (str(r["k"]) if r["k"] and "/" not in str(r["k"]) else None)
+        if sh:
+            anti.add(sh)
+    by_tg: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for u in rw_all:
+        name = str(u.get("username") or "")
+        if not OLD_NAME_RE.match(name) or int(u["id"]) in bound_ids:
+            continue
+        if str(u.get("shortUuid") or "") in anti:
+            continue
+        try:
+            tg = int(str(u.get("telegramId") or "").strip())
+        except ValueError:
+            continue
+        by_tg[tg].append(u)
+    log(f"В Remnawave: всего {len(rw_all)}, старых user_… с Telegram ID и без привязки — {sum(len(v) for v in by_tg.values())}")
+    users = db.fetchall(f"SELECT m.user_id, m.telegram_id FROM {ARCHIVE_PREFIX}map_users m ORDER BY m.user_id")
+    res = Counter()
+    issues: list[str] = []
+    done = 0
+    for m in users:
+        uid, tg = int(m["user_id"]), int(m["telegram_id"])
+        if uid in bound_users:
+            continue
+        cands = by_tg.get(tg) or []
+        if not cands:
+            res["старого в Remnawave нет"] += 1
+            continue
+        sub = db.fetchone("SELECT * FROM subscriptions WHERE user_id = ? ORDER BY CASE status WHEN 'Active' THEN 0 "
+                          "WHEN 'Expired' THEN 1 ELSE 2 END, id DESC LIMIT 1", (uid,))
+        pick = None
+        if sub and sub.get("short_uuid"):
+            pick = next((c for c in cands if str(c.get("shortUuid")) == str(sub["short_uuid"])), None)
+        if pick is None:
+            cands = sorted(cands, key=lambda c: str(c.get("expireAt") or ""), reverse=True)
+            pick = cands[0]
+            if len(cands) > 1:
+                res["несколько старых — взят с самым поздним сроком"] += 1
+                issues.append(f"user {uid} tg {tg}: старых {len(cands)}: "
+                              + ", ".join(f"{c['username']} до {c.get('expireAt')}" for c in cands[:5]))
+        live = bool(sub) and sub["status"] in ("Active", "Expired")
+        new_rw = None
+        if live and sub.get("rw_id"):
+            # у живой подписки уже новый batman_ (выдал provision) — убираем его, только если им не пользовались
+            new_rw = remnawave.RemnawaveAPI._unwrap_user(client.get(f"/api/users/{int(sub['rw_id'])}")) \
+                if str(sub["rw_id"]).isdigit() else None
+            if new_rw and str(new_rw.get("username")) == provisioning.rw_username(uid):
+                if _rw_used(client, new_rw):
+                    res["новый batman_ уже подключали — оставлен"] += 1
+                    issues.append(f"user {uid}: {new_rw['username']} уже используется — старый {pick['username']} не привязан")
+                    continue
+            else:
+                new_rw = None
+        if args.dry_run:
+            res["будет привязан" + (" (вместо нового batman_)" if new_rw else "")] += 1
+            continue
+        if new_rw:
+            client.delete_user(int(new_rw["id"]))
+            res["лишний batman_ удалён"] += 1
+        db.execute("INSERT INTO rw_legacy_users (user_id, rw_id, username, short_uuid, source, created_at) "
+                   "VALUES (?, ?, ?, ?, 'fgn-tg', ?)", (uid, int(pick["id"]), str(pick["username"]), pick.get("shortUuid"), iso(now())))
+        remnawave.invalidate_own_aliases()
+        bound_ids.add(int(pick["id"]))
+        if live:
+            # старый ключ снова у человека: срок и устройства — как в базе (не меньше, чем в Remnawave)
+            exp_db = parse_old(sub["expires_at"])
+            exp_rw = parse_old(pick.get("expireAt"))
+            exp = max([d for d in (exp_db, exp_rw) if d] or [now()])
+            hw = int(pick.get("hwidDeviceLimit") or 0)
+            dev = max(int(sub["devices_limit"] or 1), hw)
+            patch: dict[str, Any] = {"id": int(pick["id"]), "expire_at": exp, "hwid_device_limit": dev}
+            if exp > now():
+                patch["status"] = "ACTIVE"
+            client.update_user(**patch)
+            fresh = remnawave.RemnawaveAPI._unwrap_user(client.get(f"/api/users/{int(pick['id'])}")) or pick
+            db.execute("UPDATE subscriptions SET rw_id = ?, short_uuid = ?, key_config = COALESCE(?, key_config), "
+                       "key_uuid = COALESCE(?, key_uuid), expires_at = ?, devices_limit = ?, sync_state = NULL, "
+                       "status = ? WHERE id = ?",
+                       (str(pick["id"]), fresh.get("shortUuid"), fresh.get("subscriptionUrl"), fresh.get("vlessUuid"),
+                        iso(exp), dev, "Active" if exp > now() else "Expired", int(sub["id"])))
+            res["привязан, живая подписка"] += 1
+        else:
+            res["привязан, подписка истекла (ключ оживёт при продлении)"] += 1
+        done += 1
+        if done % 500 == 0:
+            log(f"  … {done}: {dict(res)}")
+        time.sleep(args.pause)
+    log(f"Итог: {dict(res)}")
+    for line in issues[:100]:
+        log("  " + line)
+    if issues:
+        path = os.path.join(os.path.dirname(db.DB_PATH), f"legacy_fgn_relink_{int(time.time())}.log")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(issues))
+        log(f"Полный список: {path}")
+    return 0
+
+
 # ── provision: живая подписка без ключа ──
 
 def cmd_provision(args: argparse.Namespace) -> int:
@@ -889,7 +1057,7 @@ def main() -> int:
             s.add_argument("--dry-run", action="store_true", help="всё сделать и откатить")
             s.add_argument("--winback", action="store_true", help="не гасить «подарок вернувшимся» для истёкших")
             s.add_argument("--allow-existing", action="store_true", help="в FGN уже есть пользователи")
-    for name in ("adopt", "provision"):
+    for name in ("adopt", "relink", "provision"):
         s = sub.add_parser(name)
         s.add_argument("--limit", type=int, default=0)
         s.add_argument("--dry-run", action="store_true")
@@ -897,7 +1065,7 @@ def main() -> int:
     args = ap.parse_args()
     db.init_db()
     return {"check": cmd_check, "import": cmd_import, "adopt": cmd_adopt, "provision": cmd_provision,
-            "verify": cmd_verify}[args.cmd](args)
+            "verify": cmd_verify, "relink": cmd_relink}[args.cmd](args)
 
 
 if __name__ == "__main__":
