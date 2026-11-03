@@ -781,6 +781,36 @@ def _rw_by_id(client: Any, rid: Any) -> Optional[dict[str, Any]]:
     return None
 
 
+RW_MAX_EXPIRE = datetime(2099, 12, 31, tzinfo=timezone.utc)
+
+
+def _relink_live(client: Any, sub: dict[str, Any], pick: dict[str, Any]) -> None:
+    """живой подписке — старый ключ: срок и устройства как в базе (не меньше, чем в Remnawave), затем строка подписки."""
+    exp_db = parse_old(sub["expires_at"])
+    exp_rw = parse_old(pick.get("expireAt"))
+    exp = min(max([d for d in (exp_db, exp_rw) if d] or [now()]), RW_MAX_EXPIRE)
+    try:
+        hw = int(pick.get("hwidDeviceLimit") or 0)
+    except (TypeError, ValueError):
+        hw = 0
+    dev = max(int(sub["devices_limit"] or 1), hw, 1)
+    patch: dict[str, Any] = {"id": int(pick["id"]), "expire_at": exp, "hwid_device_limit": dev}
+    if exp > now():
+        patch["status"] = "ACTIVE"
+    client.update_user(**patch)
+    fresh = _rw_by_id(client, pick["id"]) or pick
+    db.execute("UPDATE subscriptions SET rw_id = ?, short_uuid = ?, key_config = COALESCE(?, key_config), "
+               "key_uuid = COALESCE(?, key_uuid), expires_at = ?, devices_limit = ?, sync_state = NULL, "
+               "status = ? WHERE id = ?",
+               (str(pick["id"]), fresh.get("shortUuid") or pick.get("shortUuid"), fresh.get("subscriptionUrl"),
+                fresh.get("vlessUuid"), iso(exp), dev, "Active" if exp > now() else "Expired", int(sub["id"])))
+
+
+def _rw_err(exc: Exception) -> str:
+    pl = getattr(exc, "payload", None)
+    return f"{exc}" + (f" {json.dumps(pl, ensure_ascii=False)[:300]}" if pl else "")
+
+
 def cmd_relink(args: argparse.Namespace) -> int:
     import provisioning  # type: ignore
     import remnawave  # type: ignore
@@ -791,7 +821,8 @@ def cmd_relink(args: argparse.Namespace) -> int:
     client = remnawave.get_client()
     log("Читаю всех пользователей Remnawave (только чтение)…")
     rw_all = _scan_rw(client)
-    bound = db.fetchall("SELECT user_id, rw_id, username FROM rw_legacy_users")
+    bound = db.fetchall("SELECT user_id, rw_id, username, source FROM rw_legacy_users")
+    bound_by_user = {int(r["user_id"]): r for r in bound}
     bound_ids = {int(r["rw_id"]) for r in bound}
     bound_users = {int(r["user_id"]) for r in bound}
     # ключи «анти» старого бота — не основной VPN, их не привязываем
@@ -824,6 +855,25 @@ def cmd_relink(args: argparse.Namespace) -> int:
     for m in users:
         uid, tg = int(m["user_id"]), int(m["telegram_id"])
         if uid in bound_users:
+            # починка после прерванного запуска: привязка записана, а живая подписка ещё смотрит не туда
+            leg = bound_by_user.get(uid)
+            if leg and leg["source"] == "fgn-tg":
+                sub = db.fetchone("SELECT * FROM subscriptions WHERE user_id = ? AND status IN ('Active', 'Expired') "
+                                  "ORDER BY id DESC LIMIT 1", (uid,))
+                if sub and str(sub.get("rw_id") or "") != str(leg["rw_id"]):
+                    pick = _rw_by_id(client, leg["rw_id"])
+                    if not pick:
+                        res["починка: старого уже нет в Remnawave"] += 1
+                        continue
+                    if args.dry_run:
+                        res["будет починен (прерванный запуск)"] += 1
+                        continue
+                    try:
+                        _relink_live(client, sub, pick)
+                        res["починен после прерванного запуска"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        res["починка: панель отказала"] += 1
+                        issues.append(f"user {uid}: починка {pick.get('username')}: {_rw_err(exc)}")
             continue
         cands = by_tg.get(tg) or []
         sub = db.fetchone("SELECT * FROM subscriptions WHERE user_id = ? ORDER BY CASE status WHEN 'Active' THEN 0 "
@@ -868,31 +918,29 @@ def cmd_relink(args: argparse.Namespace) -> int:
         if args.dry_run:
             res["будет привязан" + (" (вместо нового batman_)" if new_rw else "")] += 1
             continue
-        if new_rw:
-            client.delete_user(int(new_rw["id"]))
-            res["лишний batman_ удалён"] += 1
         db.execute("INSERT INTO rw_legacy_users (user_id, rw_id, username, short_uuid, source, created_at) "
                    "VALUES (?, ?, ?, ?, 'fgn-tg', ?)", (uid, int(pick["id"]), str(pick["username"]), pick.get("shortUuid"), iso(now())))
         remnawave.invalidate_own_aliases()
         bound_ids.add(int(pick["id"]))
         if live:
-            # старый ключ снова у человека: срок и устройства — как в базе (не меньше, чем в Remnawave)
-            exp_db = parse_old(sub["expires_at"])
-            exp_rw = parse_old(pick.get("expireAt"))
-            exp = max([d for d in (exp_db, exp_rw) if d] or [now()])
-            hw = int(pick.get("hwidDeviceLimit") or 0)
-            dev = max(int(sub["devices_limit"] or 1), hw)
-            patch: dict[str, Any] = {"id": int(pick["id"]), "expire_at": exp, "hwid_device_limit": dev}
-            if exp > now():
-                patch["status"] = "ACTIVE"
-            client.update_user(**patch)
-            fresh = _rw_by_id(client, pick["id"]) or pick
-            db.execute("UPDATE subscriptions SET rw_id = ?, short_uuid = ?, key_config = COALESCE(?, key_config), "
-                       "key_uuid = COALESCE(?, key_uuid), expires_at = ?, devices_limit = ?, sync_state = NULL, "
-                       "status = ? WHERE id = ?",
-                       (str(pick["id"]), fresh.get("shortUuid"), fresh.get("subscriptionUrl"), fresh.get("vlessUuid"),
-                        iso(exp), dev, "Active" if exp > now() else "Expired", int(sub["id"])))
+            # сначала старый ключ — человеку, и только потом удаляем новый batman_: панель откажет — ничего не теряем
+            try:
+                _relink_live(client, sub, pick)
+            except Exception as exc:  # noqa: BLE001
+                db.execute("DELETE FROM rw_legacy_users WHERE user_id = ? AND source = 'fgn-tg'", (uid,))
+                remnawave.invalidate_own_aliases()
+                bound_ids.discard(int(pick["id"]))
+                res["панель отказала — пропущено, ничего не изменено"] += 1
+                issues.append(f"user {uid} tg {tg}: {pick['username']}: {_rw_err(exc)}")
+                continue
             res["привязан, живая подписка"] += 1
+            if new_rw:
+                try:
+                    client.delete_user(int(new_rw["id"]))
+                    res["лишний batman_ удалён"] += 1
+                except Exception as exc:  # noqa: BLE001
+                    res["лишний batman_ не удалось удалить"] += 1
+                    issues.append(f"user {uid}: {new_rw.get('username')} не удалён: {_rw_err(exc)}")
         else:
             res["привязан, подписка истекла (ключ оживёт при продлении)"] += 1
         done += 1
