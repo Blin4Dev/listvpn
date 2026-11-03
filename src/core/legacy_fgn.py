@@ -746,6 +746,24 @@ def _rw_used(client: Any, u: dict[str, Any]) -> bool:
         return True
 
 
+def _usage_key(u: dict[str, Any]) -> tuple:
+    """какой из нескольких старых пользователей с одним Telegram ID — настоящий: которым пользовались."""
+    ut = u.get("userTraffic") if isinstance(u.get("userTraffic"), dict) else {}
+
+    def num(*keys: str) -> float:
+        for k in keys:
+            v = u.get(k) if u.get(k) is not None else ut.get(k)
+            try:
+                if v is not None:
+                    return float(v)
+            except (TypeError, ValueError):
+                pass
+        return 0.0
+    online = str(u.get("onlineAt") or ut.get("onlineAt") or u.get("lastConnectedAt") or "")
+    used = num("lifetimeUsedTrafficBytes", "usedTrafficBytes", "trafficUsedBytes")
+    return (1 if (used > 0 or online) else 0, online, used, str(u.get("expireAt") or ""))
+
+
 def _rw_by_id(client: Any, rid: Any) -> Optional[dict[str, Any]]:
     """пользователь панели по числовому id: в Remnawave 3.x — POST /api/users/resolve, GET /api/users/<id> — 404."""
     import remnawave  # type: ignore
@@ -808,26 +826,38 @@ def cmd_relink(args: argparse.Namespace) -> int:
         if uid in bound_users:
             continue
         cands = by_tg.get(tg) or []
-        if not cands:
-            res["старого в Remnawave нет"] += 1
-            continue
         sub = db.fetchone("SELECT * FROM subscriptions WHERE user_id = ? ORDER BY CASE status WHEN 'Active' THEN 0 "
                           "WHEN 'Expired' THEN 1 ELSE 2 END, id DESC LIMIT 1", (uid,))
+        if not cands:
+            res["старого в Remnawave нет"] += 1
+            # живая подписка указывает на пользователя, которого в Remnawave уже нет (удалили вручную) —
+            # отдаём её provision, иначе в приложении висит несуществующая ссылка
+            if sub and sub["status"] == "Active" and sub.get("rw_id") and not _rw_by_id(client, sub["rw_id"]):
+                res["ключ удалён в Remnawave — выдаст provision"] += 1
+                issues.append(f"user {uid} tg {tg}: ключ {sub.get('short_uuid')} удалён в Remnawave, старого нет — новый выдаст provision")
+                if not args.dry_run:
+                    db.execute("UPDATE subscriptions SET rw_id = NULL, sync_state = 'legacy_missing' WHERE id = ?", (int(sub["id"]),))
+            continue
         pick = None
         if sub and sub.get("short_uuid"):
             pick = next((c for c in cands if str(c.get("shortUuid")) == str(sub["short_uuid"])), None)
         if pick is None:
-            cands = sorted(cands, key=lambda c: str(c.get("expireAt") or ""), reverse=True)
+            # несколько (старый бот плодил дубли): тот, которым пользовались — трафик/подключения, потом срок
+            cands = sorted(cands, key=_usage_key, reverse=True)
             pick = cands[0]
             if len(cands) > 1:
-                res["несколько старых — взят с самым поздним сроком"] += 1
-                issues.append(f"user {uid} tg {tg}: старых {len(cands)}: "
-                              + ", ".join(f"{c['username']} до {c.get('expireAt')}" for c in cands[:5]))
+                k = _usage_key(pick)
+                res["несколько старых — взят использованный" if k[0] else "несколько старых, ни одним не пользовались — взят с поздним сроком"] += 1
+                issues.append(f"user {uid} tg {tg}: старых {len(cands)}, взят {pick['username']}"
+                              f" (трафик {int(k[2]) // 1048576} МБ, онлайн {k[1] or '—'}, до {pick.get('expireAt')}); остальные: "
+                              + ", ".join(c['username'] for c in cands[1:6]))
         live = bool(sub) and sub["status"] in ("Active", "Expired")
         new_rw = None
         if live and sub.get("rw_id"):
             # у живой подписки уже новый batman_ (выдал provision) — убираем его, только если им не пользовались
             new_rw = _rw_by_id(client, sub["rw_id"])
+            if new_rw is None:
+                res["новый batman_ уже удалён в Remnawave"] += 1
             if new_rw and str(new_rw.get("username")) == provisioning.rw_username(uid):
                 if _rw_used(client, new_rw):
                     res["новый batman_ уже подключали — оставлен"] += 1
