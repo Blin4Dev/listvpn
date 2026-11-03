@@ -942,7 +942,8 @@ def cmd_relink(args: argparse.Namespace) -> int:
                 new_rw = remnawave.RemnawaveAPI._unwrap_user(client.get_user_by_username(provisioning.rw_username(uid))) or None
             except remnawave.RemnawaveError:
                 new_rw = None
-            if new_rw and str(new_rw.get("username")) == provisioning.rw_username(uid):
+        if new_rw is not None:
+            if str(new_rw.get("username")) == provisioning.rw_username(uid):
                 if _rw_used(client, new_rw):
                     res["новый batman_ уже подключали — оставлен"] += 1
                     issues.append(f"user {uid}: {new_rw['username']} уже используется — старый {pick['username']} не привязан")
