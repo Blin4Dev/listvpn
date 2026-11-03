@@ -276,6 +276,8 @@ def handle_start(message: dict[str, Any]) -> None:
         _apply_promo(chat_id, user, payload[6:].strip())
     elif payload.startswith("gift_") and user and _send_gift(chat_id, payload[5:].strip()):
         return
+    elif re.fullmatch(r"(?i)giftn?_[a-z0-9]{6,16}", payload) and user and _send_gift(chat_id, payload.upper()):
+        return  # ссылки старого бота FGN: ?start=GIFT_XXXX
     elif payload.startswith("pay_") and user and _send_payment_return(chat_id, user, payload[4:].strip()):
         return
     elif payload.startswith("payfail_") and user and _send_payment_return(chat_id, user, payload[8:].strip(), failed=True):
@@ -287,15 +289,23 @@ def handle_start(message: dict[str, Any]) -> None:
 
 def _send_gift(chat_id: int, raw: str) -> bool:
     """/start gift_XXXX: что за подарок + кнопка активации в мини-приложении."""
-    if not re.fullmatch(r"[A-Fa-f0-9]{8,16}", raw or ""):
+    if not re.fullmatch(r"(?:GIFTN?_)?[A-Za-z0-9]{6,16}", raw or ""):
         return False
-    code = "GIFT-" + raw.upper()
     try:
         import reflevels  # type: ignore
-        info = reflevels.gift_preview(code)
+        # новые ссылки: gift_<hex>; коды старого бота FGN: GIFT_XXXX / GIFTN_XXXX (и без префикса)
+        cands = [reflevels.normalize_gift_code(raw)] if raw.upper().startswith("GIFT") else []
+        cands += ["GIFT-" + raw.upper(), "GIFT-N" + raw.upper()]
+        info, code = None, cands[0]
+        for c in cands:
+            info = reflevels.gift_preview(c)
+            if info:
+                code = c
+                break
     except Exception as exc:  # noqa: BLE001
         print(f"[bot] gift preview error: {type(exc).__name__}: {exc}", flush=True)
         info = None
+        code = "GIFT-" + raw.upper()
     if not info:
         api("sendMessage", {"chat_id": chat_id, "text": "⚠️ Подарок не найден. Проверьте ссылку."})
         return True

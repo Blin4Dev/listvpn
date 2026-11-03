@@ -369,14 +369,24 @@ def create_gift(user: dict[str, Any]) -> dict[str, Any]:
     return {"code": code}
 
 
+def normalize_gift_code(code: Any) -> str:
+    """код как в базе: старые коды бота FGN (GIFT_XXXX, GIFTN_XXXX) перенесены как GIFT-XXXX / GIFT-NXXXX."""
+    c = str(code or "").strip().upper()
+    if c.startswith("GIFTN_"):
+        return GIFT_PREFIX + "N" + c[6:]
+    if c.startswith("GIFT_"):
+        return GIFT_PREFIX + c[5:]
+    return c
+
+
 def is_gift_code(code: str) -> bool:
-    return str(code or "").strip().upper().startswith(GIFT_PREFIX)
+    return normalize_gift_code(code).startswith(GIFT_PREFIX)
 
 
 def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
     """активировать подарок: тариф на months получателю."""
     _ensure_schema()
-    code = str(code or "").strip().upper()
+    code = normalize_gift_code(code)
     row = db.fetchone("SELECT * FROM referral_rewards WHERE code = ? AND kind IN ('gift', 'bought', 'admin')", (code,))
     if not row or db.projects.of(row) != db.projects.of(user):
         raise RewardError("Подарок не найден", 404)
@@ -524,7 +534,7 @@ def gift_preview(code: str) -> Optional[dict[str, Any]]:
     _ensure_schema()
     row = db.fetchone("SELECT kind, status, months, expires_at FROM referral_rewards "
                       "WHERE code = ? AND kind IN ('gift', 'bought', 'admin') AND project_id = ?",
-                      (str(code or "").strip().upper(), db.pid()))
+                      (normalize_gift_code(code), db.pid()))
     if not row:
         return None
     return {"status": _admin_status(row), "months": int(row.get("months") or 1)}

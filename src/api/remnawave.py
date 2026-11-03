@@ -322,6 +322,48 @@ class RemnawaveAPI:
             )
         return self.post("/api/users/resolve", json_body=body)
 
+    def find_user_by_short_uuid(self, short_uuid: str) -> Optional[dict[str, Any]]:
+        """пользователь панели по shortUuid ключа (только чтение). Нет — None."""
+        short = str(short_uuid or "").strip()
+        if not short:
+            return None
+        for call in (lambda: self.resolve_user(short_uuid=short), lambda: self.get_user_by_short_uuid(short)):
+            try:
+                u = self._unwrap_user(call())
+            except RemnawaveNotFoundError:
+                return None
+            except RemnawaveError as exc:
+                if exc.status == 404:
+                    return None
+                continue
+            if u and str(u.get("shortUuid") or u.get("short_uuid") or "") == short:
+                return u
+        return None
+
+    def adopt_foreign_user(self, *, id: int, short_uuid: str, new_username: str,
+                           description: Optional[str] = None, telegram_id: Optional[int] = None) -> dict[str, Any]:
+        """ТОЛЬКО перенос старой базы (legacy_fgn.py adopt): пользователь старого бота становится batman_<id>,
+        ключ (shortUuid) не меняется. Заново читаем по shortUuid и сверяем id — переименовать чужого по ошибке нельзя.
+        После PATCH перечитываем: панель обязана вернуть новое имя, иначе ошибка."""
+        if not is_own_username(new_username):
+            raise RemnawaveForeignUserError(f"отказ: новое имя {new_username!r} не batman_<id>")
+        cur = self.find_user_by_short_uuid(short_uuid)
+        if not cur or str(cur.get("id")) != str(id):
+            raise RemnawaveForeignUserError(f"отказ: по ключу {short_uuid!r} найден не пользователь id={id}")
+        if is_own_username(cur.get("username")) and cur.get("username") != new_username:
+            raise RemnawaveForeignUserError(f"отказ: пользователь уже {cur.get('username')!r}")
+        body: dict[str, Any] = {"id": int(id), "username": new_username}
+        if description is not None:
+            body["description"] = description
+        if telegram_id:
+            body["telegramId"] = int(telegram_id)
+        self.patch("/api/users/", json_body=body)
+        after = self.find_user_by_short_uuid(short_uuid)
+        if not after or after.get("username") != new_username:
+            raise RemnawaveError(f"панель не переименовала пользователя (сейчас {after and after.get('username')!r})")
+        self._remember_own(after)
+        return after
+
     def create_user(
         self,
         *,
