@@ -328,6 +328,25 @@ def _recalc_conversion(link_id: int) -> None:
     db.execute("UPDATE tracking_links SET conversion_rate = ? WHERE id = ?", (rate, link_id))
 
 
+_SBP_PHONE_RE = re.compile(r"^\+7 9\d{2} \d{3} \d{2} \d{2}$")
+WITHDRAW_METHOD_TITLES = {"usdt_ton": "USDT (TON)", "sbp": "СБП"}
+
+
+def normalize_sbp_phone(phone: str) -> str:
+    """телефон для СБП → строго «+7 9xx xxx xx xx» ('' — не российский мобильный)."""
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 11 and digits[0] in "78":
+        digits = digits[1:]
+    if len(digits) != 10 or digits[0] != "9":
+        return ""
+    return f"+7 {digits[:3]} {digits[3:6]} {digits[6:8]} {digits[8:]}"
+
+
+def clean_bank(bank: str) -> str:
+    b = " ".join((bank or "").split())[:60]
+    return b if len(b) >= 2 and not re.search(r"[<>]", b) else ""
+
+
 def valid_ton_address(address: str) -> bool:
     a = (address or "").strip()
     if not a:
@@ -348,6 +367,7 @@ def serialize_withdrawal(w: dict[str, Any]) -> dict[str, Any]:
         "amount": float(w.get("amount") or 0),
         "address": w.get("address"),
         "method": w.get("method") or "usdt_ton",
+        "bank": w.get("bank"),
         "status": w.get("status") or "pending",
         # хеш транзакции (колонка всё ещё tx_link)
         "tx_hash": w.get("tx_link"),
@@ -360,7 +380,9 @@ def serialize_withdrawal(w: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def request_withdrawal(user_id: int, amount: float, address: str) -> dict[str, Any]:
+def request_withdrawal(user_id: int, amount: float, address: str, method: str = "usdt_ton",
+                       bank: str = "") -> dict[str, Any]:
+    """заявка на вывод: usdt_ton (address — кошелёк TON) или sbp (address — телефон, bank — банк)."""
     try:
         amount = float(amount)
     except (TypeError, ValueError):
@@ -368,8 +390,20 @@ def request_withdrawal(user_id: int, amount: float, address: str) -> dict[str, A
     amount = round(amount, 2)
     if amount < MIN_WITHDRAW_RUB:
         raise ServiceError(f"Минимальная сумма вывода — {int(MIN_WITHDRAW_RUB)}₽", 400)
-    if not valid_ton_address(address):
-        raise ServiceError("Неверный адрес. Нужен адрес USDT TON (UQ…/EQ…) или домен .ton / .t.me", 400)
+    method = (method or "usdt_ton").strip().lower()
+    bank_v: Optional[str] = None
+    if method == "sbp":
+        address = normalize_sbp_phone(address)
+        if not address:
+            raise ServiceError("Укажите номер телефона в формате +7 9xx xxx xx xx", 400)
+        bank_v = clean_bank(bank)
+        if not bank_v:
+            raise ServiceError("Укажите название банка", 400)
+    elif method == "usdt_ton":
+        if not valid_ton_address(address):
+            raise ServiceError("Неверный адрес. Нужен адрес USDT TON (UQ…/EQ…) или домен .ton / .t.me", 400)
+    else:
+        raise ServiceError("Способ вывода: USDT (TON) или СБП", 400)
 
     if not db.fetchone("SELECT id FROM users WHERE id = ?", (user_id,)):
         raise ServiceError("Пользователь не найден", 404)
@@ -383,9 +417,9 @@ def request_withdrawal(user_id: int, amount: float, address: str) -> dict[str, A
         if cur.rowcount == 0:
             raise ServiceError("Недостаточно средств на реферальном балансе", 400)
         ins = tx.execute(
-            "INSERT INTO withdrawals (user_id, amount, address, method, status, created_at) "
-            "VALUES (?, ?, ?, 'usdt_ton', 'pending', ?)",
-            (user_id, amount, address.strip(), db.utcnow_iso()),
+            "INSERT INTO withdrawals (user_id, amount, address, method, bank, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            (user_id, amount, address.strip(), method, bank_v, db.utcnow_iso()),
         )
         wid = ins.lastrowid
         # реферальный леджер (API v1)
@@ -426,7 +460,7 @@ def complete_withdrawal(withdrawal_id: int, tx_hash: str) -> dict[str, Any]:
     _get_withdrawal(withdrawal_id)
     tx_hash = (tx_hash or "").strip()
     if not tx_hash:
-        raise ServiceError("Укажите hash транзакции", 400)
+        raise ServiceError("Укажите hash транзакции или номер операции", 400)
     if len(tx_hash) > 300:
         raise ServiceError("Слишком длинный hash", 400)
     cur = db.execute(

@@ -630,6 +630,8 @@ export type Withdrawal = {
   id: number;
   amount: number;
   address: string;
+  method?: string;          // usdt_ton | sbp
+  bank?: string | null;     // sbp: банк
   status: "pending" | "approved" | "rejected";
   tx_link?: string | null;
   created_at?: string;
@@ -644,15 +646,37 @@ export async function fetchWithdrawals(): Promise<{ items: Withdrawal[]; min_wit
   }
 }
 
+export type WithdrawMethod = "usdt_ton" | "sbp";
+
+/** вывод: usdt_ton — address = кошелёк TON; sbp — address = телефон «+7 9xx xxx xx xx», bank — банк */
 export async function requestWithdraw(
   amount: number,
   address: string,
+  method: WithdrawMethod = "usdt_ton",
+  bank = "",
 ): Promise<{ success: boolean; partner_balance: number; withdrawal: Withdrawal }> {
   return appFetch("/withdraw", {
     method: "POST",
-    body: JSON.stringify({ amount, address }),
+    body: JSON.stringify({ amount, address, method, bank }),
   });
 }
+
+/** ввод телефона для СБП с маской «+7 9xx xxx xx xx» */
+export function formatSbpPhone(raw: string): string {
+  const t = raw.trim();
+  // «+7 …» — уже наш префикс (или вставили международный номер): цифры после него
+  let d = t.startsWith("+7") ? t.slice(2).replace(/\D/g, "") : t.replace(/\D/g, "");
+  // вставили «89…» / «79…» целиком
+  if (!t.startsWith("+7") && d.length === 11 && (d[0] === "7" || d[0] === "8")) d = d.slice(1);
+  // ввод с восьмёрки или семёрки: «8» / «7» в начале — это код страны
+  if (!t.startsWith("+7") && (d[0] === "7" || d[0] === "8")) d = d.slice(1);
+  d = d.slice(0, 10);
+  if (!d) return "";
+  const parts = [d.slice(0, 3), d.slice(3, 6), d.slice(6, 8), d.slice(8, 10)].filter(Boolean);
+  return `+7 ${parts.join(" ")}`;
+}
+
+export const SBP_PHONE_RE = /^\+7 9\d{2} \d{3} \d{2} \d{2}$/;
 
 
 export type SubAppLink = { app: string; link: string; encrypted: boolean; open_url?: string };

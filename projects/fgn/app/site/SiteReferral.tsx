@@ -1,7 +1,7 @@
 // FGN сайт: /cabinet/referral — реферальная программа (как экран мини-аппа): баланс и вывод (USDT TON),
 // друзья и приглашение, прогресс уровня, уровни, награды уровня (бесплатная подписка, подарки друзьям).
 import React, { useEffect, useState } from "react";
-import { appFetch, fetchWithdrawals, requestWithdraw, type Withdrawal } from "../utils/api";
+import { SBP_PHONE_RE, appFetch, fetchWithdrawals, formatSbpPhone, requestWithdraw, type WithdrawMethod, type Withdrawal } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import { loadReferral, patchReferral, peekReferral, type ReferralData } from "../utils/referral";
 import { C } from "../components/fgn";
@@ -72,7 +72,10 @@ const WD_STATUS: Record<Withdrawal["status"], { t: string; c: string }> = {
 
 function WithdrawModal({ balance, min, onClose, onDone }: { balance: number; min: number; onClose: () => void; onDone: (b: number) => void }) {
   const [amount, setAmount] = useState(balance >= min ? String(Math.floor(balance)) : "");
+  const [method, setMethod] = useState<WithdrawMethod>("usdt_ton");
   const [address, setAddress] = useState("");
+  const [phone, setPhone] = useState("");
+  const [bank, setBank] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [ok, setOk] = useState(false);
@@ -81,11 +84,18 @@ function WithdrawModal({ balance, min, onClose, onDone }: { balance: number; min
     const amt = Number(amount);
     if (!amt || amt < min) return setErr(`Минимум ${rub(min)}`);
     if (amt > balance) return setErr("Недостаточно средств");
-    const a = address.trim();
-    if (!(/^(UQ|EQ|0Q|kQ)[A-Za-z0-9_-]{46}$/.test(a) || /\.ton$/i.test(a) || /\.t\.me$/i.test(a))) return setErr("Неверный адрес. Нужен UQ…/EQ… или .ton / .t.me");
+    let dest = "";
+    if (method === "sbp") {
+      if (!SBP_PHONE_RE.test(phone)) return setErr("Номер телефона — в формате +7 9xx xxx xx xx");
+      if (bank.trim().length < 2) return setErr("Укажите название банка");
+      dest = phone;
+    } else {
+      dest = address.trim();
+      if (!(/^(UQ|EQ|0Q|kQ)[A-Za-z0-9_-]{46}$/.test(dest) || /\.ton$/i.test(dest) || /\.t\.me$/i.test(dest))) return setErr("Неверный адрес. Нужен UQ…/EQ… или .ton / .t.me");
+    }
     setBusy(true);
     try {
-      const r = await requestWithdraw(amt, a);
+      const r = await requestWithdraw(amt, dest, method, bank.trim());
       setOk(true);
       onDone(Number(r.partner_balance));
     } catch (e) {
@@ -103,11 +113,24 @@ function WithdrawModal({ balance, min, onClose, onDone }: { balance: number; min
         </>
       ) : (
         <>
-          <div className="fs-sheet-hint">Выплата в USDT в сети TON. Минимум {rub(min)}, доступно {rub(Math.floor(balance))}.</div>
+          <div className="fs-sheet-hint">{method === "sbp" ? "Выплата по СБП на номер телефона." : "Выплата в USDT в сети TON."} Минимум {rub(min)}, доступно {rub(Math.floor(balance))}.</div>
           <div className="fs-wd">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {([["usdt_ton", "USDT (TON)"], ["sbp", "СБП"]] as const).map(([m, t]) => (
+                <button key={m} type="button" className={`fs-cbtn sm${method === m ? "" : " dark"}`} onClick={() => { setMethod(m); setErr(""); }}>{t}</button>
+              ))}
+            </div>
             <input className="fs-cinput" inputMode="numeric" placeholder={`Сумма, от ${min} ₽`} value={amount}
               onChange={(e) => setAmount(e.target.value.replace(/[^\d]/g, ""))} />
-            <input className="fs-cinput" placeholder="Адрес кошелька: UQ… или name.ton" value={address} onChange={(e) => setAddress(e.target.value)} />
+            {method === "sbp" ? (
+              <>
+                <input className="fs-cinput" inputMode="tel" autoComplete="tel" placeholder="+7 9xx xxx xx xx" value={phone}
+                  onChange={(e) => setPhone(formatSbpPhone(e.target.value))} />
+                <input className="fs-cinput" placeholder="Банк: например, Сбербанк, Т-Банк" value={bank} onChange={(e) => setBank(e.target.value.slice(0, 60))} />
+              </>
+            ) : (
+              <input className="fs-cinput" placeholder="Адрес кошелька: UQ… или name.ton" value={address} onChange={(e) => setAddress(e.target.value)} />
+            )}
             {err ? <div className="fs-sheet-err">{err}</div> : null}
             <button type="button" className="fs-cbtn block" disabled={busy || balance < min} onClick={submit}>
               {busy ? "Отправляем…" : balance < min ? `Нужно от ${rub(min)}` : "Вывести"}
@@ -136,7 +159,7 @@ function RequestsModal({ onClose }: { onClose: () => void }) {
             <div key={w.id}>
               <div>
                 <small>{w.created_at ? formatDateRu(w.created_at) : `#${w.id}`}</small>
-                <small title={w.address}>{w.address}</small>
+                <small title={w.address}>{w.method === "sbp" ? `СБП · ${w.bank || ""} · ${w.address}` : w.address}</small>
               </div>
               <div style={{ textAlign: "right" }}>
                 <b>{rub(w.amount)}</b>

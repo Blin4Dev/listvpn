@@ -229,7 +229,8 @@ def notify_withdrawal(withdrawal: dict[str, Any]) -> Optional[dict[str, Any]]:
     text = (
         f"💰 <b>Новый запрос на вывод #{wid}</b>\n\n"
         f"Пользователь: {user_link(int(withdrawal['user_id']))}\n"
-        f"Сумма: {_fmt_amount(withdrawal['amount'])}₽\n\n"
+        f"Сумма: {_fmt_amount(withdrawal['amount'])}₽\n"
+        f"{_withdraw_dest(withdrawal)}\n\n"
         "Обработайте заявку в панели → Пользователи → Выводы."
     )
     kb = None
@@ -237,6 +238,13 @@ def notify_withdrawal(withdrawal: dict[str, Any]) -> Optional[dict[str, Any]]:
     if base.startswith("https://"):
         kb = {"inline_keyboard": [[{"text": "Открыть в панели", "url": f"{base}/withdrawals"}]]}
     return send("withdrawals", text, reply_markup=kb)
+
+
+def _withdraw_dest(w: dict[str, Any]) -> str:
+    """куда выводить: СБП — телефон и банк, иначе кошелёк USDT TON."""
+    if (w.get("method") or "") == "sbp":
+        return f"Способ: СБП\nТелефон: <code>{_esc(str(w.get('address') or ''))}</code>\nБанк: {_esc(str(w.get('bank') or '—'))}"
+    return f"Способ: USDT (TON)\nКошелёк: <code>{_esc(str(w.get('address') or ''))}</code>"
 
 
 def _fmt_amount(v: Any) -> str:
@@ -285,15 +293,15 @@ def _send_entities(telegram_id: int, segments: list[tuple[str, Optional[dict]]])
     }) is not None
 
 
-def dm_withdrawal_completed(telegram_id: int, amount: Any, tx_hash: str) -> bool:
-    """лс: вывод выполнен + сумма + hash."""
+def dm_withdrawal_completed(telegram_id: int, amount: Any, tx_hash: str, sbp: bool = False) -> bool:
+    """лс: вывод выполнен + сумма + hash (СБП — номер операции)."""
     if not telegram_id:
         return False
     return _send_entities(int(telegram_id), [
         ("✔️", {"type": "custom_emoji", "custom_emoji_id": EMOJI_APPROVED}),
         (" ", None),
         ("Вывод выполнен", {"type": "bold"}),
-        (f"\n\nСумма: {_fmt_amount(amount)}₽\nHash транзакции:\n", None),
+        (f"\n\nСумма: {_fmt_amount(amount)}₽\n{'Номер операции (СБП)' if sbp else 'Hash транзакции'}:\n", None),
         (str(tx_hash), {"type": "code"}),
     ])
 

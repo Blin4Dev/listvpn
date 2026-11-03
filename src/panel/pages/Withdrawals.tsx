@@ -11,7 +11,7 @@ export type WithdrawalStatus = 'pending' | 'approved' | 'completed' | 'rejected'
 
 export type WithdrawalItem = {
   id: number; user_id: number; username?: string | null; telegram_id?: number | null; email?: string | null;
-  amount: number; address: string; status: WithdrawalStatus;
+  amount: number; address: string; method?: string; bank?: string | null; status: WithdrawalStatus;
   tx_hash?: string | null; reject_reason?: string | null; refunded?: boolean; is_banned?: boolean;
   created_at?: string; approved_at?: string | null; processed_at?: string | null;
 };
@@ -119,7 +119,9 @@ export const WithdrawalsPage: React.FC<{ onToast: (t: string, m: string, ty: Toa
                       <button className="btn ghost sm" style={{ padding: 0, color: 'var(--text)' }} onClick={() => onOpenUser(w.user_id)}>{who(w)}</button>
                       {w.is_banned && <span className="badge danger" style={{ marginLeft: 8 }}>бан</span>}
                     </td>
-                    <td style={{ fontWeight: 600 }}>{fmtRub(w.amount)}</td>
+                    <td style={{ fontWeight: 600 }}>{fmtRub(w.amount)}
+                      <div className="faint" style={{ fontSize: 12, fontWeight: 400 }}>{w.method === 'sbp' ? `СБП · ${w.bank || '—'}` : 'USDT TON'}</div>
+                    </td>
                     <td><span className={`badge ${st.cls}`} style={st.style}>{st.label}</span></td>
                     <td className="muted" style={{ fontSize: 13 }}>{fmtDT(w.created_at)}</td>
                     <td style={{ fontSize: 13, maxWidth: 260 }}>
@@ -159,18 +161,35 @@ export const WithdrawalsPage: React.FC<{ onToast: (t: string, m: string, ty: Toa
               <div className="inset" style={{ padding: 12 }}><div className="sub">Пользователь</div><div style={{ fontWeight: 500, marginTop: 2 }}>{who(pay)}</div></div>
               <div className="inset" style={{ padding: 12 }}><div className="sub">Сумма к переводу</div><div style={{ fontWeight: 600, fontSize: 18, marginTop: 2 }}>{fmtRub(pay.amount)}</div></div>
             </div>
-            <div>
-              <label className="field-label">Адрес для перевода (USDT TON)</label>
-              <div className="flex gap-2">
-                <div className="input mono" style={{ fontSize: 13, wordBreak: 'break-all', height: 'auto', minHeight: 40, lineHeight: 1.45, padding: '9px 12px', userSelect: 'all' }}>{pay.address}</div>
-                <button className="icon-btn" style={{ flex: 'none', height: 'auto' }} title="Скопировать адрес" onClick={() => copy(pay.address, 'Адрес для перевода')}><Copy size={15} /></button>
+            {pay.method === 'sbp' ? (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="field-label">Телефон (СБП)</label>
+                  <div className="flex gap-2">
+                    <div className="input mono" style={{ fontSize: 13, height: 'auto', minHeight: 40, lineHeight: 1.45, padding: '9px 12px', userSelect: 'all' }}>{pay.address}</div>
+                    <button className="icon-btn" style={{ flex: 'none', height: 'auto' }} title="Скопировать телефон" onClick={() => copy(pay.address.replace(/\s/g, ''), 'Телефон')}><Copy size={15} /></button>
+                  </div>
+                </div>
+                <div>
+                  <label className="field-label">Банк</label>
+                  <div className="input" style={{ fontSize: 13, height: 'auto', minHeight: 40, lineHeight: 1.45, padding: '9px 12px' }}>{pay.bank || '—'}</div>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div>
+                <label className="field-label">Адрес для перевода (USDT TON)</label>
+                <div className="flex gap-2">
+                  <div className="input mono" style={{ fontSize: 13, wordBreak: 'break-all', height: 'auto', minHeight: 40, lineHeight: 1.45, padding: '9px 12px', userSelect: 'all' }}>{pay.address}</div>
+                  <button className="icon-btn" style={{ flex: 'none', height: 'auto' }} title="Скопировать адрес" onClick={() => copy(pay.address, 'Адрес для перевода')}><Copy size={15} /></button>
+                </div>
+              </div>
+            )}
             <div>
-              <label className="field-label">Hash транзакции</label>
-              <input className="input mono" value={hash} onChange={(e) => setHash(e.target.value)} placeholder="Вставьте hash после перевода" autoFocus />
+              <label className="field-label">{pay.method === 'sbp' ? 'Номер операции СБП' : 'Hash транзакции'}</label>
+              <input className="input mono" value={hash} onChange={(e) => setHash(e.target.value)}
+                placeholder={pay.method === 'sbp' ? 'Номер операции из приложения банка' : 'Вставьте hash после перевода'} autoFocus />
             </div>
-            <div className="sub" style={{ fontSize: 12 }}>После «Завершить» статус станет «Завершено», а пользователь получит сообщение в Telegram с этим hash.</div>
+            <div className="sub" style={{ fontSize: 12 }}>После «Завершить» статус станет «Завершено», а пользователь получит сообщение в Telegram с {pay.method === 'sbp' ? 'номером операции' : 'этим hash'}.</div>
           </div>
         </Modal>
       )}

@@ -44,7 +44,7 @@ FAMILY_CODE_LIMIT = (5, 3600)
 DEVICE_DEL_LIMIT = (20, 3600)
 
 # method из запроса → method в withdrawals (панель и форум знают usdt_ton)
-WITHDRAW_METHODS = {"crypto": "usdt_ton", "usdt_ton": "usdt_ton"}
+WITHDRAW_METHODS = {"crypto": "usdt_ton", "usdt_ton": "usdt_ton", "sbp": "sbp"}
 
 
 class TokenIn(BaseModel):
@@ -60,8 +60,9 @@ class RefreshIn(BaseModel):
 class WithdrawalIn(BaseModel):
     amount: float = Field(..., gt=0, le=10_000_000)
     method: str = Field("crypto", min_length=1, max_length=32)
-    # адрес USDT (TON). Не передан — берём адрес из прошлой заявки пользователя
+    # crypto: адрес USDT (TON); sbp: телефон «+7 9xx xxx xx xx». Не передан — из прошлой заявки этим способом
     address: Optional[str] = Field(None, max_length=128)
+    bank: Optional[str] = Field(None, max_length=80)  # sbp: название банка (не передан — из прошлой заявки)
 
 
 class SessionIn(BaseModel):
@@ -449,20 +450,31 @@ def build_router(core: Any) -> APIRouter:
         _limit(f"withdraw:{uid}", WITHDRAW_LIMIT)
         method = WITHDRAW_METHODS.get(body.method.strip().lower())
         if not method:
-            raise _err(422, "Способ вывода не поддерживается. Доступно: crypto (USDT TON)", "bad_method")
+            raise _err(422, "Способ вывода не поддерживается. Доступно: crypto (USDT TON), sbp", "bad_method")
         amount = round(float(body.amount), 2)
         min_rub = float(core.services.MIN_WITHDRAW_RUB)
         if amount < min_rub:
             raise _err(400, f"Минимальная сумма вывода — {int(min_rub)}₽", "amount_too_small")
         address = (body.address or "").strip()
-        if not address:
-            last = db.fetchone("SELECT address FROM withdrawals WHERE user_id = ? AND address != '' "
-                               "ORDER BY id DESC LIMIT 1", (uid,))
-            address = str((last or {}).get("address") or "").strip()
+        bank = (body.bank or "").strip()
+        if not address or (method == "sbp" and not bank):
+            last = db.fetchone("SELECT address, bank FROM withdrawals WHERE user_id = ? AND method = ? AND address != '' "
+                               "ORDER BY id DESC LIMIT 1", (uid, method)) or {}
+            address = address or str(last.get("address") or "").strip()
+            bank = bank or str(last.get("bank") or "").strip()
+        bank_v = None
+        if method == "sbp":
+            address = core.services.normalize_sbp_phone(address)
+            if not address:
+                raise _err(400, "Укажите телефон для СБП в формате +7 9xx xxx xx xx", "phone_required")
+            bank_v = core.services.clean_bank(bank)
+            if not bank_v:
+                raise _err(400, "Укажите название банка", "bank_required")
+        else:
             if not address:
                 raise _err(400, "Укажите адрес кошелька USDT (TON)", "address_required")
-        if not core.services.valid_ton_address(address):
-            raise _err(400, "Неверный адрес. Нужен адрес USDT TON (UQ…/EQ…) или домен .ton / .t.me", "bad_address")
+            if not core.services.valid_ton_address(address):
+                raise _err(400, "Неверный адрес. Нужен адрес USDT TON (UQ…/EQ…) или домен .ton / .t.me", "bad_address")
 
         # баланс по леджеру + списание + заявка — одной транзакцией
         with db.transaction() as conn:
@@ -474,8 +486,8 @@ def build_router(core: Any) -> APIRouter:
             if cur.rowcount == 0:
                 raise _err(400, "Недостаточно средств на реферальном балансе", "insufficient_funds")
             wid = int(conn.execute(
-                "INSERT INTO withdrawals (user_id, amount, address, method, status, created_at) "
-                "VALUES (?, ?, ?, ?, 'pending', ?)", (uid, amount, address, method, db.utcnow_iso()),
+                "INSERT INTO withdrawals (user_id, amount, address, method, bank, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?)", (uid, amount, address, method, bank_v, db.utcnow_iso()),
             ).lastrowid)
             store.ledger_add(conn, uid, "withdrawal", -amount, withdrawal_id=wid)
 

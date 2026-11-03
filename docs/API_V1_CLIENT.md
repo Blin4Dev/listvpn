@@ -447,15 +447,17 @@ POST {BASE}/auth/logout?all_sessions=true  → {"ok": true, "revoked": 3}
 
 ```json
 {"amount": 100, "method": "crypto", "address": "UQAbc..."}
+{"amount": 100, "method": "sbp", "address": "+7 912 345 67 89", "bank": "Т-Банк"}
 ```
 
 - `amount` — рубли, минимум 100.
-- `method` — `crypto` (USDT в сети TON).
-- `address` — адрес TON (`UQ…` / `EQ…`) или домен `.ton` / `.t.me`. Не передан — берётся адрес из прошлой заявки.
+- `method` — `crypto` (USDT в сети TON) или `sbp` (СБП на номер телефона).
+- `address` — для `crypto`: адрес TON (`UQ…` / `EQ…`) или домен `.ton` / `.t.me`; для `sbp`: российский мобильный, сервер приводит его к виду `+7 9xx xxx xx xx`. Не передан — берётся из прошлой заявки этим же способом.
+- `bank` — только для `sbp`: название банка получателя (2–60 символов). Не передан — из прошлой заявки по СБП.
 
 Ответ `201`: `{"id": 42, "status": "pending"}`. Сумма сразу списывается с баланса; заявку обрабатывает команда.
 
-Ошибки: `400 amount_too_small`, `400 insufficient_funds`, `400 address_required`, `400 bad_address`, `422 bad_method`, `429` (не больше 5 за 10 минут).
+Ошибки: `400 amount_too_small`, `400 insufficient_funds`, `400 address_required`, `400 bad_address`, `400 phone_required`, `400 bank_required`, `422 bad_method`, `429` (не больше 5 за 10 минут).
 
 ### GET /tasks
 

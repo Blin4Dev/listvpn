@@ -2356,7 +2356,9 @@ class RedeemPromoBody(BaseModel):
 
 class WithdrawBody(BaseModel):
     amount: float
-    address: str
+    address: str = Field("", max_length=128)        # кошелёк TON или телефон для СБП
+    method: str = Field("usdt_ton", max_length=16)  # usdt_ton | sbp
+    bank: str = Field("", max_length=80)           # банк для СБП
 
 
 class CreatePaymentBody(BaseModel):
@@ -6596,7 +6598,8 @@ def panel_withdraw_complete(withdrawal_id: int, body: WithdrawCompleteBody, _: d
     delivered = False
     if user and user.get("telegram_id"):
         try:
-            delivered = forum.dm_withdrawal_completed(int(user["telegram_id"]), w["amount"], str(w.get("tx_link") or ""))
+            delivered = forum.dm_withdrawal_completed(int(user["telegram_id"]), w["amount"], str(w.get("tx_link") or ""),
+                                                      sbp=(w.get("method") == "sbp"))
         except Exception:  # noqa: BLE001
             delivered = False
     return {**_serialize_withdrawal_admin(w), "notified": delivered}
@@ -8527,7 +8530,7 @@ def app_withdraw(body: WithdrawBody, user: dict = Depends(require_channel_dep)) 
     if not allowed:
         raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
     try:
-        w = services.request_withdrawal(int(user["id"]), body.amount, body.address)
+        w = services.request_withdrawal(int(user["id"]), body.amount, body.address, body.method, body.bank)
     except services.ServiceError as exc:
         raise HTTPException(exc.status, detail={"message": exc.message})
 

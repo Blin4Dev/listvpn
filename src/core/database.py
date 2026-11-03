@@ -1295,6 +1295,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "approved_at": "ALTER TABLE withdrawals ADD COLUMN approved_at TEXT",
             "reject_reason": "ALTER TABLE withdrawals ADD COLUMN reject_reason TEXT",
             "refunded": "ALTER TABLE withdrawals ADD COLUMN refunded INTEGER NOT NULL DEFAULT 0",
+            # вывод по СБП: address = телефон «+7 9xx xxx xx xx», bank — название банка
+            "bank": "ALTER TABLE withdrawals ADD COLUMN bank TEXT",
         },
         "subscriptions": {
             # до какого момента подключены белые списки (отдельный сквад)

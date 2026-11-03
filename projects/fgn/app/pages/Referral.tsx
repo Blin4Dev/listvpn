@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch, fetchWithdrawals, openTgLink, requestWithdraw, type Withdrawal } from "../utils/api";
+import { SBP_PHONE_RE, appFetch, fetchWithdrawals, formatSbpPhone, openTgLink, requestWithdraw, type WithdrawMethod, type Withdrawal } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import { copyText } from "../components/SubLinkBox";
 import { BRAND_NAME } from "../utils/brand";
@@ -289,7 +289,10 @@ function SheetBtn({ children, onClick, disabled, dark, pill }: { children: React
 // ── вывод ──
 function WithdrawSheet({ balance, min, onClose, onDone }: { balance: number; min: number; onClose: () => void; onDone: (b: number) => void }) {
   const [amount, setAmount] = useState(balance >= min ? String(Math.floor(balance)) : "");
+  const [method, setMethod] = useState<WithdrawMethod>("usdt_ton");
   const [address, setAddress] = useState("");
+  const [phone, setPhone] = useState("");
+  const [bank, setBank] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [ok, setOk] = useState(false);
@@ -299,12 +302,19 @@ function WithdrawSheet({ balance, min, onClose, onDone }: { balance: number; min
     const amt = Number(amount);
     if (!amt || amt < min) { setErr(`Минимум ${min} ₽`); return; }
     if (amt > balance) { setErr("Недостаточно средств"); return; }
-    const a = address.trim();
-    const okAddr = /^(UQ|EQ|0Q|kQ)[A-Za-z0-9_-]{46}$/.test(a) || /\.ton$/i.test(a) || /\.t\.me$/i.test(a);
-    if (!okAddr) { setErr("Неверный адрес. Нужен UQ…/EQ… или .ton / .t.me"); return; }
+    let dest = "";
+    if (method === "sbp") {
+      if (!SBP_PHONE_RE.test(phone)) { setErr("Номер телефона — в формате +7 9xx xxx xx xx"); return; }
+      if (bank.trim().length < 2) { setErr("Укажите название банка"); return; }
+      dest = phone;
+    } else {
+      dest = address.trim();
+      const okAddr = /^(UQ|EQ|0Q|kQ)[A-Za-z0-9_-]{46}$/.test(dest) || /\.ton$/i.test(dest) || /\.t\.me$/i.test(dest);
+      if (!okAddr) { setErr("Неверный адрес. Нужен UQ…/EQ… или .ton / .t.me"); return; }
+    }
     setBusy(true);
     try {
-      const res = await requestWithdraw(amt, a);
+      const res = await requestWithdraw(amt, dest, method, bank.trim());
       setOk(true);
       onDone(res.partner_balance);
     } catch (e) {
@@ -325,7 +335,28 @@ function WithdrawSheet({ balance, min, onClose, onDone }: { balance: number; min
         </>
       ) : (
         <>
-          <div style={sheetText}>Выплата в USDT в сети TON. Минимум {rub(min)}, доступно {rub(Math.floor(balance))}.</div>
+          <div style={sheetText}>
+            {method === "sbp" ? "Выплата по СБП на номер телефона." : "Выплата в USDT в сети TON."} Минимум {rub(min)}, доступно {rub(Math.floor(balance))}.
+          </div>
+          <div style={fieldLabel}>Способ</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {([["usdt_ton", "USDT (TON)"], ["sbp", "СБП"]] as const).map(([m, t]) => (
+              <button
+                key={m}
+                type="button"
+                className="blin-press"
+                onClick={() => { setMethod(m); setErr(""); }}
+                style={{
+                  ...fgnInput, height: 46, borderRadius: 14, cursor: "pointer", textAlign: "center", fontSize: 15, fontWeight: 500,
+                  border: `1px solid ${method === m ? "rgba(52,214,124,.55)" : CARD_BORDER}`,
+                  background: method === m ? "rgba(52,214,124,.08)" : fgnInput.background,
+                  color: method === m ? C.text : MUTED,
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
           <div style={fieldLabel}>Сумма, ₽</div>
           <input
             value={amount}
@@ -334,13 +365,36 @@ function WithdrawSheet({ balance, min, onClose, onDone }: { balance: number; min
             inputMode="numeric"
             style={{ ...fgnInput, borderRadius: 16, border: `1px solid ${CARD_BORDER}`, fontSize: 16 }}
           />
-          <div style={fieldLabel}>Адрес кошелька (UQ… / EQ… / .ton)</div>
-          <input
-            value={address}
-            onChange={(e) => setAddress(e.target.value)}
-            placeholder="UQ… или name.ton"
-            style={{ ...fgnInput, borderRadius: 16, border: `1px solid ${CARD_BORDER}`, fontSize: 16 }}
-          />
+          {method === "sbp" ? (
+            <>
+              <div style={fieldLabel}>Номер телефона</div>
+              <input
+                value={phone}
+                onChange={(e) => setPhone(formatSbpPhone(e.target.value))}
+                placeholder="+7 9xx xxx xx xx"
+                inputMode="tel"
+                autoComplete="tel"
+                style={{ ...fgnInput, borderRadius: 16, border: `1px solid ${CARD_BORDER}`, fontSize: 16 }}
+              />
+              <div style={fieldLabel}>Банк</div>
+              <input
+                value={bank}
+                onChange={(e) => setBank(e.target.value.slice(0, 60))}
+                placeholder="Например: Сбербанк, Т-Банк"
+                style={{ ...fgnInput, borderRadius: 16, border: `1px solid ${CARD_BORDER}`, fontSize: 16 }}
+              />
+            </>
+          ) : (
+            <>
+              <div style={fieldLabel}>Адрес кошелька (UQ… / EQ… / .ton)</div>
+              <input
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                placeholder="UQ… или name.ton"
+                style={{ ...fgnInput, borderRadius: 16, border: `1px solid ${CARD_BORDER}`, fontSize: 16 }}
+              />
+            </>
+          )}
           {err ? <div style={sheetErr}>{err}</div> : null}
           <div style={{ marginTop: 20 }}>
             <SheetBtn disabled={busy || balance < min} onClick={() => void submit()}>
@@ -386,7 +440,7 @@ function RequestsSheet({ onClose }: { onClose: () => void }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14.5, lineHeight: "20px", color: MUTED }}>{w.created_at ? `${formatDateRu(w.created_at)} г.` : "—"}</div>
                   <div style={{ marginTop: 7, fontSize: 12, lineHeight: "16px", color: LABEL, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {shortAddr(w.address)}
+                    {w.method === "sbp" ? `СБП · ${w.bank || ""} · ${w.address}` : shortAddr(w.address)}
                     {st ? <span style={{ color: st[1] }}> · {st[0]}</span> : null}
                   </div>
                 </div>

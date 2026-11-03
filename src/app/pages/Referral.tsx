@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch, fetchWithdrawals, openTgLink, requestWithdraw, type Withdrawal } from "../utils/api";
+import { SBP_PHONE_RE, appFetch, fetchWithdrawals, formatSbpPhone, openTgLink, requestWithdraw, type WithdrawMethod, type Withdrawal } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import { copyText } from "../components/SubLinkBox";
 import { MSIcon, btnReset } from "../components/ui";
@@ -87,7 +87,7 @@ function OutlineButton({ children, onClick }: { children: React.ReactNode; onCli
   );
 }
 
-function Input({ value, onChange, placeholder, inputMode }: { value: string; onChange: (v: string) => void; placeholder?: string; inputMode?: "numeric" | "text" }) {
+function Input({ value, onChange, placeholder, inputMode }: { value: string; onChange: (v: string) => void; placeholder?: string; inputMode?: "numeric" | "text" | "tel" }) {
   return (
     <input
       value={value}
@@ -243,7 +243,10 @@ export default function Referral() {
 // ── вывод ──
 function WithdrawSheet({ balance, min, onClose, onDone }: { balance: number; min: number; onClose: () => void; onDone: (b: number) => void }) {
   const [amount, setAmount] = useState(balance >= min ? String(Math.floor(balance)) : "");
+  const [method, setMethod] = useState<WithdrawMethod>("usdt_ton");
   const [address, setAddress] = useState("");
+  const [phone, setPhone] = useState("");
+  const [bank, setBank] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [ok, setOk] = useState(false);
@@ -253,12 +256,19 @@ function WithdrawSheet({ balance, min, onClose, onDone }: { balance: number; min
     const amt = Number(amount);
     if (!amt || amt < min) { setErr(`Минимум ${min} ₽`); return; }
     if (amt > balance) { setErr("Недостаточно средств"); return; }
-    const a = address.trim();
-    const okAddr = /^(UQ|EQ|0Q|kQ)[A-Za-z0-9_-]{46}$/.test(a) || /\.ton$/i.test(a) || /\.t\.me$/i.test(a);
-    if (!okAddr) { setErr("Неверный адрес. Нужен UQ…/EQ… или .ton / .t.me"); return; }
+    let dest = "";
+    if (method === "sbp") {
+      if (!SBP_PHONE_RE.test(phone)) { setErr("Номер телефона — в формате +7 9xx xxx xx xx"); return; }
+      if (bank.trim().length < 2) { setErr("Укажите название банка"); return; }
+      dest = phone;
+    } else {
+      dest = address.trim();
+      const okAddr = /^(UQ|EQ|0Q|kQ)[A-Za-z0-9_-]{46}$/.test(dest) || /\.ton$/i.test(dest) || /\.t\.me$/i.test(dest);
+      if (!okAddr) { setErr("Неверный адрес. Нужен UQ…/EQ… или .ton / .t.me"); return; }
+    }
     setBusy(true);
     try {
-      const res = await requestWithdraw(amt, a);
+      const res = await requestWithdraw(amt, dest, method, bank.trim());
       setOk(true);
       onDone(res.partner_balance);
     } catch (e) {
@@ -280,12 +290,41 @@ function WithdrawSheet({ balance, min, onClose, onDone }: { balance: number; min
       ) : (
         <>
           <div style={{ fontSize: 14.5, lineHeight: 1.5, color: N.muted, marginBottom: 16 }}>
-            Выплата в USDT в сети TON. Минимум {min} ₽, доступно {Math.floor(balance)} ₽.
+            {method === "sbp" ? "Выплата по СБП на номер телефона." : "Выплата в USDT в сети TON."} Минимум {min} ₽, доступно {Math.floor(balance)} ₽.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+            {([["usdt_ton", "USDT (TON)"], ["sbp", "СБП"]] as const).map(([m, t]) => (
+              <button
+                key={m}
+                type="button"
+                className="blin-press"
+                onClick={() => { setMethod(m); setErr(""); }}
+                style={{
+                  ...btnReset, height: 44, borderRadius: 14, fontFamily: N.font, fontSize: 15, fontWeight: 500, cursor: "pointer",
+                  border: `1px solid ${method === m ? N.redText : N.cardBorder}`,
+                  background: method === m ? "rgba(224,0,0,0.14)" : "rgba(255,255,255,0.05)",
+                  color: method === m ? N.text : N.muted,
+                }}
+              >
+                {t}
+              </button>
+            ))}
           </div>
           <div style={{ fontSize: 14, color: N.muted, marginBottom: 6 }}>Сумма, ₽</div>
           <Input value={amount} onChange={(v) => setAmount(v.replace(/[^\d]/g, ""))} placeholder={String(min)} inputMode="numeric" />
-          <div style={{ fontSize: 14, color: N.muted, margin: "14px 0 6px" }}>Адрес кошелька (UQ… / EQ… / .ton)</div>
-          <Input value={address} onChange={setAddress} placeholder="UQ… или name.ton" />
+          {method === "sbp" ? (
+            <>
+              <div style={{ fontSize: 14, color: N.muted, margin: "14px 0 6px" }}>Номер телефона</div>
+              <Input value={phone} onChange={(v) => setPhone(formatSbpPhone(v))} placeholder="+7 9xx xxx xx xx" inputMode="tel" />
+              <div style={{ fontSize: 14, color: N.muted, margin: "14px 0 6px" }}>Банк</div>
+              <Input value={bank} onChange={(v) => setBank(v.slice(0, 60))} placeholder="Например: Сбербанк, Т-Банк" />
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 14, color: N.muted, margin: "14px 0 6px" }}>Адрес кошелька (UQ… / EQ… / .ton)</div>
+              <Input value={address} onChange={setAddress} placeholder="UQ… или name.ton" />
+            </>
+          )}
           {err ? <div style={{ fontSize: 13.5, color: "#FF6B6B", marginTop: 10 }}>{err}</div> : null}
           <div style={{ marginTop: 18 }}>
             <NoirButton primary disabled={busy || balance < min} onClick={() => void submit()}>
@@ -315,7 +354,9 @@ function RequestsSheet({ onClose }: { onClose: () => void }) {
               <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderTop: i ? `1px solid ${N.divider}` : "none" }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 16.5, color: N.text }}>{rub(Number(w.amount))}</div>
-                  <div style={{ fontSize: 13.5, color: N.muted, marginTop: 2 }}>{w.created_at ? formatDateRu(w.created_at) : ""}</div>
+                  <div style={{ fontSize: 13.5, color: N.muted, marginTop: 2 }}>
+                    {w.created_at ? formatDateRu(w.created_at) : ""}{w.method === "sbp" ? ` · СБП${w.bank ? `, ${w.bank}` : ""}` : ""}
+                  </div>
                 </div>
                 <div style={{ fontSize: 14, color }}>{title}</div>
               </div>
