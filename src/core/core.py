@@ -409,6 +409,11 @@ def _startup() -> None:
             print(f"[BatmanVPN] заморозка удалена — возвращено в работу подписок: {n}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[BatmanVPN] unfreeze legacy failed: {exc}", flush=True)
+    # ресейл: перенос / выдача срока, оборванные рестартом
+    try:
+        resale.recover_after_restart()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[resale] восстановление после рестарта: {type(exc).__name__}: {exc}", flush=True)
     # рассылки, прерванные рестартом, не должны висеть «отправляется»
     try:
         db.execute("UPDATE mailings SET status = 'Interrupted' WHERE status = 'Sending'")

@@ -49,8 +49,8 @@ export default function SiteMigration({ nav, desktop }: { nav: CabNav; desktop: 
       const r = await claimMigration();
       const until = r.expires_at ? formatDateRu(r.expires_at) : "";
       setInfo(null);
-      setNote(until ? `Подписка ${r.target || info.target} действует до ${until}. Добавьте новый ключ на устройство.`
-        : `Подписка ${r.target || info.target} готова. Добавьте новый ключ на устройство.`);
+      setNote(until ? `Вам выдана подписка ${r.target || info.target} до ${until}. Добавьте новый ключ на устройство.`
+        : `Вам выдана подписка ${r.target || info.target}. Добавьте новый ключ на устройство.`);
     } catch (e) {
       if (isAuthErr(e)) {
         nav.expired();

@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS resale_migration_users (
     claimed_at TEXT,
     granted_until TEXT,
     notified_at TEXT,                         -- когда бот один раз прислал «Ваши подписки переезжают»
+    granted_seconds INTEGER,                  -- сколько выдали на самом деле (общий потолок 30 дней на Telegram ID)
+    claim_sub_id INTEGER,                     -- подписка, которую продлеваем (для восстановления после рестарта)
+    claim_prev_exp TEXT,                      -- её срок до выдачи; новая подписка — «new:<макс. id подписок>»
     UNIQUE (migration_id, telegram_id)
 );
 CREATE INDEX IF NOT EXISTS idx_resale_users_tg ON resale_migration_users(telegram_id, status);
@@ -130,17 +133,56 @@ def ensure_schema() -> None:
             return
         conn = db.connect()
         conn.executescript(SCHEMA)
-        # старые базы: новые столбцы
-        for table, col in (("resale_migrations", "info_url"), ("resale_migration_users", "notified_at")):
+        # старые базы: новые столбцы (API и бот — разные процессы: второй ALTER того же столбца не ошибка)
+        for table, col, typ in (("resale_migrations", "info_url", "TEXT"),
+                                ("resale_migration_users", "notified_at", "TEXT"),
+                                ("resale_migration_users", "granted_seconds", "INTEGER"),
+                                ("resale_migration_users", "claim_sub_id", "INTEGER"),
+                                ("resale_migration_users", "claim_prev_exp", "TEXT")):
             cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if col not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
-        # первый вызов в процессе: фоновых задач ещё нет (uvicorn — один процесс). Перенос, оборванный
-        # перезапуском, иначе навсегда остался бы «Выполняется» и блокировал группу — помечаем ошибкой.
-        conn.execute("UPDATE resale_migrations SET status = 'failed', error = 'Прервано перезапуском сервера — запустите перенос заново', "
-                     "finished_at = ? WHERE status = 'running'", (_iso(_now()),))
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
         conn.commit()
         _schema_ready = True
+
+
+def recover_after_restart() -> None:
+    """ТОЛЬКО при старте API (фоновые задачи и выдачи живут в его процессе; бот — отдельный процесс и
+    сюда не ходит). Перенос, оборванный перезапуском, иначе навсегда остался бы «Выполняется» и блокировал
+    группу. Выдача, оборванная посередине, — по подписке смотрим, успела ли она продлиться."""
+    ensure_schema()
+    db.execute("UPDATE resale_migrations SET status = 'failed', error = 'Прервано перезапуском сервера — запустите перенос заново', "
+               "finished_at = ? WHERE status = 'running'", (_iso(_now()),))
+    for t in db.fetchall("SELECT DISTINCT claim_token FROM resale_migration_users WHERE status = 'claiming' "
+                         "AND claim_token IS NOT NULL"):
+        token = t["claim_token"]
+        r = db.fetchone("SELECT * FROM resale_migration_users WHERE claim_token = ? AND status = 'claiming' LIMIT 1", (token,))
+        if not r or not r.get("claimed_user_id") or not r.get("claim_prev_exp"):
+            continue  # запись старого формата — оставляем как есть, видно в панели «Выдаётся»
+        uid, prev = int(r["claimed_user_id"]), str(r["claim_prev_exp"])
+        done_sub = None
+        if prev.startswith("new:"):
+            try:
+                max_id = int(prev[4:])
+            except ValueError:
+                continue
+            done_sub = db.fetchone("SELECT * FROM subscriptions WHERE user_id = ? AND id > ? AND status != 'Deleted' "
+                                   "ORDER BY id DESC LIMIT 1", (uid, max_id))
+        elif r.get("claim_sub_id"):
+            sub = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (int(r["claim_sub_id"]),))
+            if sub and prev.startswith("exp:") and str(sub.get("expires_at") or "") != prev[4:]:
+                done_sub = sub
+        if done_sub:
+            db.execute("UPDATE resale_migration_users SET status = 'claimed', granted_until = ? "
+                       "WHERE claim_token = ? AND status = 'claiming'", (done_sub.get("expires_at"), token))
+            print(f"[resale] выдача user {uid} после рестарта: подписка продлена — отмечено «заменён»", flush=True)
+        else:
+            _release_claim(token)
+            print(f"[resale] выдача user {uid} после рестарта: не успела — снова ждёт замены ключа", flush=True)
 
 
 # ── чтение Remnawave ──
@@ -519,18 +561,24 @@ def _run_migration(mid: int, prefix: str) -> None:
     b = build_people(users, prefix, snapshot)
     people = b["people"]
     with db.transaction():
-        # кто уже получил срок в прошлом (отменённом) переносе этой группы — второй раз не даём
+        # кто уже получил срок в прошлом переносе этой группы — второй раз не даём;
+        # получил из другой группы — только остаток до общего потолка 30 дней
         claimed = {int(r["telegram_id"]) for r in db.fetchall(
             "SELECT DISTINCT u.telegram_id FROM resale_migration_users u JOIN resale_migrations m ON m.id = u.migration_id "
             "WHERE m.prefix = ? AND u.status IN ('claimed', 'claiming')", (prefix,))}
+        given = _granted_totals()
         rows = []
         capped = 0
         for tg, p in people.items():
             if tg in claimed:
                 continue
+            grant = min(int(p["grant"]), MAX_GRANT_SECONDS - given.get(tg, 0))
+            if grant < MIN_REMAINING_SECONDS:
+                claimed.add(tg)  # потолок уже выбран — считаем в «уже получали»
+                continue
             if p["remaining"] > MAX_GRANT_SECONDS:
                 capped += 1
-            rows.append((mid, tg, db.dumps(sorted(p["usernames"])), p["old_expire_at"], int(p["remaining"]), int(p["grant"])))
+            rows.append((mid, tg, db.dumps(sorted(p["usernames"])), p["old_expire_at"], int(p["remaining"]), grant))
         if rows:
             db.executemany(
                 "INSERT INTO resale_migration_users (migration_id, telegram_id, rw_usernames, old_expire_at, "
@@ -643,6 +691,28 @@ def _eligible_user(user: Optional[dict[str, Any]]) -> bool:
         and not user.get("is_banned")
 
 
+def _granted_totals(telegram_id: Optional[int] = None) -> dict[int, int]:
+    """сколько секунд уже выдано по переносам на Telegram ID (все группы). Одна выдача = один claim_token,
+    в ней все строки с одним сроком — берём максимум по токену."""
+    where, params = "", []
+    if telegram_id is not None:
+        where, params = " AND u.telegram_id = ?", [int(telegram_id)]
+    out: dict[int, int] = {}
+    for r in db.fetchall(
+            "SELECT u.telegram_id AS tg, MAX(MIN(COALESCE(u.granted_seconds, u.grant_seconds), ?)) AS s "
+            "FROM resale_migration_users u JOIN resale_migrations m ON m.id = u.migration_id "
+            f"WHERE u.status IN ('claimed', 'claiming') AND m.target_project = ?{where} "
+            "GROUP BY u.telegram_id, COALESCE(u.claim_token, u.id)", [MAX_GRANT_SECONDS, TARGET_PROJECT, *params]):
+        out[int(r["tg"])] = min(MAX_GRANT_SECONDS, out.get(int(r["tg"]), 0) + int(r["s"] or 0))
+    return out
+
+
+def _release_claim(token: str) -> None:
+    db.execute("UPDATE resale_migration_users SET status = 'pending', claim_token = NULL, claimed_user_id = NULL, "
+               "claimed_at = NULL, granted_seconds = NULL, claim_sub_id = NULL, claim_prev_exp = NULL "
+               "WHERE claim_token = ? AND status = 'claiming'", (token,))
+
+
 def _pending_rows(telegram_id: int) -> list[dict[str, Any]]:
     return db.fetchall(
         "SELECT u.*, m.old_name, m.info_url FROM resale_migration_users u JOIN resale_migrations m ON m.id = u.migration_id "
@@ -660,10 +730,11 @@ def pending_for(user: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if not rows:
         return None
     top = rows[0]
+    left = MAX_GRANT_SECONDS - _granted_totals(int(user["telegram_id"])).get(int(user["telegram_id"]), 0)  # type: ignore[index]
     return {
         "name": top["old_name"],
         "target": target_name(),
-        "days": int(int(top["grant_seconds"]) // DAY),
+        "days": int(max(0, min(int(top["grant_seconds"]), left)) // DAY),
         "info_url": top.get("info_url") or "",
     }
 
@@ -759,9 +830,9 @@ def grant_seconds(user: dict[str, Any], seconds: int) -> dict[str, Any]:
         else:
             db.execute("UPDATE subscriptions SET expires_at = ?, status = 'Active' WHERE id = ?",
                        (_iso(new_exp), target["id"]))
-        fulfillment._apply_provision_to_sub(target, prov)
-        fulfillment._sync_user_status(uid)
-        _end_grace(uid)
+        # срок уже записан: дальше — только сопутствующее; его сбой не должен вернуть перенос в «ждёт»
+        # (иначе повторное нажатие выдало бы срок второй раз)
+        _after_grant(uid, lambda: fulfillment._apply_provision_to_sub(target, prov))
         return {"subscription_id": target["id"], "expires_at": _iso(new_exp),
                 "mode": "trial_upgrade" if upgrading_trial else "extend"}
 
@@ -780,7 +851,18 @@ def grant_seconds(user: dict[str, Any], seconds: int) -> dict[str, Any]:
         user=user, devices=devices, expire_at=new_exp, provision=prov,
         traffic_gb=traffic_gb, sub_type="vpn", squads=squads,
     )
-    return {"subscription_id": sub["id"], "expires_at": sub.get("expires_at"), "mode": "new"}
+    _after_grant(uid, None)
+    return {"subscription_id": sub["id"], "expires_at": sub.get("expires_at") or _iso(new_exp), "mode": "new"}
+
+
+def _after_grant(uid: int, apply: Optional[Callable[[], None]]) -> None:
+    for step in (apply, lambda: fulfillment._sync_user_status(uid), lambda: _end_grace(uid)):
+        if step is None:
+            continue
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[resale] user {uid}: после выдачи: {type(exc).__name__}: {exc}", flush=True)
 
 
 _claim_lock = threading.Lock()
@@ -812,28 +894,45 @@ def claim(user: dict[str, Any]) -> dict[str, Any]:
             raise ResaleError("Переносить нечего", 404)
         ids = [int(r["id"]) for r in rows]
         marks = ",".join("?" * len(ids))
+        # несколько переносов на один Telegram ID — всего не больше 30 дней (в том числе с прошлыми выдачами)
+        left = MAX_GRANT_SECONDS - _granted_totals(tg).get(tg, 0)
+        seconds = max(0, min(MAX_GRANT_SECONDS, left, max(int(r["grant_seconds"]) for r in rows)))
+        # что продлеваем и какой там срок сейчас — чтобы после рестарта посреди выдачи понять, успела ли она
+        with projects.use(TARGET_PROJECT):
+            target, _trial = fulfillment.find_extend_target(uid, "extend", None)
+        if target is not None:
+            sub_id, prev = int(target["id"]), "exp:" + str(target.get("expires_at") or "")
+        else:
+            mx = db.fetchone("SELECT COALESCE(MAX(id), 0) AS m FROM subscriptions WHERE user_id = ?", (uid,))
+            sub_id, prev = None, f"new:{int((mx or {}).get('m') or 0)}"
         cur = db.execute(
-            f"UPDATE resale_migration_users SET status = 'claiming', claim_token = ?, claimed_user_id = ?, claimed_at = ? "
-            f"WHERE id IN ({marks}) AND status = 'pending'", (token, uid, _iso(_now()), *ids))
+            f"UPDATE resale_migration_users SET status = 'claiming', claim_token = ?, claimed_user_id = ?, claimed_at = ?, "
+            f"granted_seconds = ?, claim_sub_id = ?, claim_prev_exp = ? WHERE id IN ({marks}) AND status = 'pending'",
+            (token, uid, _iso(_now()), seconds, sub_id, prev, *ids))
         if cur.rowcount != len(ids):
             # кто-то успел раньше: вернуть своё и попросить повторить
-            db.execute("UPDATE resale_migration_users SET status = 'pending', claim_token = NULL, claimed_user_id = NULL, "
-                       "claimed_at = NULL WHERE claim_token = ? AND status = 'claiming'", (token,))
+            _release_claim(token)
             raise ResaleError("Повторите через пару секунд", 409)
-    # несколько переносов на один Telegram ID — всё равно не больше 30 дней
-    seconds = min(MAX_GRANT_SECONDS, max(int(r["grant_seconds"]) for r in rows))
+    if seconds < 60:
+        # потолок 30 дней уже выбран прошлыми переносами — выдавать нечего, окно больше не показываем
+        db.execute("UPDATE resale_migration_users SET status = 'claimed', granted_seconds = 0, claimed_at = ? "
+                   "WHERE claim_token = ? AND status = 'claiming'", (_iso(_now()), token))
+        return {"success": True, "already": True, "name": rows[0]["old_name"], "target": target_name(),
+                "days": 0, "expires_at": target.get("expires_at") if target else None, "mode": "cap"}
     try:
         with projects.use(TARGET_PROJECT):
             res = grant_seconds(user, seconds)
     except BaseException as exc:
-        db.execute("UPDATE resale_migration_users SET status = 'pending', claim_token = NULL, claimed_user_id = NULL, "
-                   "claimed_at = NULL WHERE claim_token = ? AND status = 'claiming'", (token,))
+        _release_claim(token)
         if isinstance(exc, ResaleError):
             raise
         raise ResaleError("Не удалось перенести подписку, попробуйте ещё раз через минуту", 502) from exc
     until = res.get("expires_at")
-    db.execute("UPDATE resale_migration_users SET status = 'claimed', granted_until = ?, claimed_at = ? "
-               "WHERE claim_token = ? AND status = 'claiming'", (until, _iso(_now()), token))
+    try:
+        db.execute("UPDATE resale_migration_users SET status = 'claimed', granted_until = ?, claimed_at = ? "
+                   "WHERE claim_token = ? AND status = 'claiming'", (until, _iso(_now()), token))
+    except Exception as exc:  # noqa: BLE001 — срок уже выдан: остаётся «claiming», при рестарте восстановится
+        print(f"[resale] user {uid}: срок выдан, но отметка не записалась: {exc}", flush=True)
     print(f"[resale] user {uid} (tg {tg}): +{seconds // 3600} ч из переноса «{rows[0]['old_name']}», "
           f"{res.get('mode')}, до {until}", flush=True)
     return {"success": True, "already": False, "name": rows[0]["old_name"], "target": target_name(),
