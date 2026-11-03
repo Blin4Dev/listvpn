@@ -86,6 +86,26 @@ def _build(segments: list[tuple[str, Optional[dict[str, Any]]]]) -> tuple[str, l
     return text, entities
 
 
+_MARKUP_RE = __import__("re").compile(r"!\[([^\]]+)\]\(tg://emoji\?id=(\d+)\)|\*\*(.+?)\*\*", __import__("re").S)
+
+
+def markup_segments(src: str) -> list[tuple[str, Optional[dict[str, Any]]]]:
+    """текст из project.json → куски с entity: ![✔️](tg://emoji?id=…) — premium-эмодзи, **жирный**."""
+    out: list[tuple[str, Optional[dict[str, Any]]]] = []
+    pos = 0
+    for m in _MARKUP_RE.finditer(src or ""):
+        if m.start() > pos:
+            out.append((src[pos:m.start()], None))
+        if m.group(2):
+            out.append((m.group(1), {"type": "custom_emoji", "custom_emoji_id": m.group(2)}))
+        else:
+            out.append((m.group(3), {"type": "bold"}))
+        pos = m.end()
+    if pos < len(src or ""):
+        out.append((src[pos:], None))
+    return out
+
+
 def _plural_hours(n: int) -> str:
     """русская форма: 1 час / 2 часа / 5 часов."""
     n = abs(int(n))
@@ -304,6 +324,10 @@ OB_DISCOUNT_HOURS = 24
 
 
 def _ob_message(stage: str) -> tuple[str, list[dict[str, Any]]]:
+    # свой текст проекта: project.json → bot.onboarding.<этап> (у FGN — свои m30/h24/h48/h71)
+    own = ((projects.current().cfg.get("bot") or {}).get("onboarding") or {}).get(stage)
+    if own:
+        return _build(markup_segments(str(own)))
     b = {"type": "bold"}
     em = {"type": "custom_emoji", "custom_emoji_id": OB_EMOJI[stage]}
     ch = OB_CHAR[stage]

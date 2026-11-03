@@ -128,29 +128,12 @@ def _utf16_len(s: str) -> int:
     return len(s.encode("utf-16-le")) // 2
 
 
-_TG_EMOJI_RE = re.compile(r"!\[([^\]]+)\]\(tg://emoji\?id=(\d+)\)")
-
-
-def _emoji_markup_segments(src: str) -> list[tuple[str, Optional[dict[str, Any]]]]:
-    """текст с premium-эмодзи в формате Telegram: ![✔️](tg://emoji?id=…) → куски с custom_emoji."""
-    out: list[tuple[str, Optional[dict[str, Any]]]] = []
-    pos = 0
-    for m in _TG_EMOJI_RE.finditer(src):
-        if m.start() > pos:
-            out.append((src[pos:m.start()], None))
-        out.append((m.group(1), {"type": "custom_emoji", "custom_emoji_id": m.group(2)}))
-        pos = m.end()
-    if pos < len(src):
-        out.append((src[pos:], None))
-    return out
-
-
 def _welcome_text_entities() -> tuple[str, list[dict[str, Any]]]:
     """приветствие: premium-эмодзи + bold «добро пожаловать!».
     Свой текст проекта — project.json → bot.welcome_message (с ![x](tg://emoji?id=…)), у FGN он свой."""
     custom = P().bot_text("welcome_message", "")
     if custom:
-        segments = _emoji_markup_segments(custom)
+        segments = reminders.markup_segments(custom)
     else:
         segments = [
             ("🦊", {"type": "custom_emoji", "custom_emoji_id": EMOJI_FOX}),
