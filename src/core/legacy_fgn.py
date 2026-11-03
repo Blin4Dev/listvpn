@@ -166,6 +166,26 @@ def load_old(c: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def apply_keys_from(old: dict[str, Any], path: Optional[str]) -> int:
+    """старый бот иногда затирает ссылку до «https://домен» без кода. Если в прошлом снимке базы у того же
+    Telegram ID код был — берём его (человек тот же, ключ тот же). Сменил ключ сам — остаётся новый."""
+    if not path:
+        return 0
+    oc = open_old(path)
+    prev = {int(r["telegram_id"]): r["vpn_key"] for r in oc.execute("SELECT telegram_id, vpn_key FROM users NOT INDEXED")}
+    oc.close()
+    n = 0
+    for u in old["users"]:
+        if key_short(u.get("vpn_key")):
+            continue
+        k = prev.get(int(u["telegram_id"]))
+        if key_short(k):
+            u["vpn_key"] = k
+            n += 1
+    old["keys_restored"] = n
+    return n
+
+
 def plan(old: dict[str, Any], at: datetime) -> dict[str, Any]:
     """что и как переносим — общий расчёт для check и import (чтобы проверка показывала ровно то, что сделает импорт)."""
     users = old["users"]
@@ -234,6 +254,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     if unknown:
         log(f"  ! незнакомые таблицы (попадут в архив): {sorted(unknown)}")
     old = load_old(oc)
+    if apply_keys_from(old, args.keys_from):
+        log(f"  ключ восстановлен из прошлого снимка ({args.keys_from}): {old['keys_restored']}")
     at = now()
     p = plan(old, at)
     log("\nПодписки:")
@@ -309,6 +331,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     tables = old_tables(oc)
     old = load_old(oc)
     oc.close()
+    restored = apply_keys_from(old, args.keys_from)
     at = now()
     p = plan(old, at)
     vals = _fgn_values()
@@ -331,6 +354,8 @@ def cmd_import(args: argparse.Namespace) -> int:
                 raise SystemExit(f"Таблица архива {name} уже есть — похоже, перенос уже делали")
             conn.execute(f'CREATE TABLE main."{name}" AS SELECT * FROM old."{t}"')
         stats["archive_tables"] = len(tables)
+        stats["keys_restored_from_previous"] = restored
+        stats["keys_from"] = os.path.basename(args.keys_from) if args.keys_from else None
         conn.execute(f"CREATE TABLE main.{ARCHIVE_PREFIX}map_users (old_id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL, "
                      "user_id INTEGER NOT NULL)")
         conn.execute(f"CREATE TABLE main.{ARCHIVE_PREFIX}map_payments (old_payment_id TEXT PRIMARY KEY, "
@@ -1009,6 +1034,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     oc = open_old(args.old)
     old = load_old(oc)
     tables = old_tables(oc)
+    apply_keys_from(old, args.keys_from)
     done = db.get_setting(SETTING, "")
     if not done:
         raise SystemExit("Перенос ещё не делали")
@@ -1144,17 +1170,27 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if not fails else 2
 
 
+def cmd_link(args: argparse.Namespace) -> int:
+    """Remnawave одной командой: adopt (по ключу) → relink (по Telegram ID) → provision (новый ключ — только кому не найти)."""
+    for step, fn in (("adopt — по ключу из базы", cmd_adopt), ("relink — по Telegram ID", cmd_relink),
+                     ("provision — новый ключ тем, у кого старого нет", cmd_provision)):
+        log(f"\n═══ {step} ═══")
+        fn(args)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Перенос старой базы FGN в новую платформу")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("check", "import", "verify"):
         s = sub.add_parser(name)
         s.add_argument("--old", required=True, help="путь к старой базе (bot2.db)")
+        s.add_argument("--keys-from", default="", help="прошлый снимок старой базы: ключи, затёртые старым ботом")
         if name == "import":
             s.add_argument("--dry-run", action="store_true", help="всё сделать и откатить")
             s.add_argument("--winback", action="store_true", help="не гасить «подарок вернувшимся» для истёкших")
             s.add_argument("--allow-existing", action="store_true", help="в FGN уже есть пользователи")
-    for name in ("adopt", "relink", "provision"):
+    for name in ("adopt", "relink", "provision", "link"):
         s = sub.add_parser(name)
         s.add_argument("--limit", type=int, default=0)
         s.add_argument("--dry-run", action="store_true")
@@ -1162,7 +1198,7 @@ def main() -> int:
     args = ap.parse_args()
     db.init_db()
     return {"check": cmd_check, "import": cmd_import, "adopt": cmd_adopt, "provision": cmd_provision,
-            "verify": cmd_verify, "relink": cmd_relink}[args.cmd](args)
+            "verify": cmd_verify, "relink": cmd_relink, "link": cmd_link}[args.cmd](args)
 
 
 if __name__ == "__main__":

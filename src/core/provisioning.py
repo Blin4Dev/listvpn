@@ -184,14 +184,16 @@ def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[
         user_id = _local_user_id(telegram_id, email)
     if not user_id:
         return None
-    rw = _by_username(client, rw_username(int(user_id)))
-    if rw and _owned(rw, user_id=user_id):
-        return rw
+    # привязка к старому пользователю (перенос FGN) — выбрана намеренно, поэтому важнее batman_<id>,
+    # который мог остаться от прошлого прогона
     leg = legacy_for_user(user_id)
     if leg:
         rw = _by_username(client, str(leg["username"]))
         if rw and _owned(rw, user_id=user_id):
             return rw
+    rw = _by_username(client, rw_username(int(user_id)))
+    if rw and _owned(rw, user_id=user_id):
+        return rw
     return None
 
 
