@@ -21,6 +21,10 @@
     }
   },
   "theme_color": "#05050A",
+  "boot": {
+    "background": "#050505",
+    "poster": ""
+  },
   "features": {
     "promo_days": true,
     "promo_at_payment": true,

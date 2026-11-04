@@ -32,6 +32,17 @@ const BRAND = {
   refLevelNames: Object.fromEntries(Object.entries(CFG.ref_level_names || {}).map(([k, v]) => [k, String(v)])),
 };
 
+// экран загрузки до первой отрисовки React (index.html) — в стиле проекта, иначе на секунду мелькает чужой бренд.
+// project.json → "boot": {"background": "#050505", "poster": ""} (poster — картинка из assets, "" — без неё);
+// по умолчанию — заставка BatmanVPN (intro-poster.jpg проекта или общая)
+const BOOT_CFG = (CFG.boot || {}) as { background?: string; poster?: string; page_background?: string };
+const cssColor = (v: unknown, def: string) => (typeof v === "string" && /^#[0-9a-fA-F]{3,8}$/.test(v) ? v : def);
+const BOOT_POSTER = typeof BOOT_CFG.poster === "string"
+  ? BOOT_CFG.poster.replace(/[^A-Za-z0-9._/-]/g, "")
+  : "intro-poster.jpg";
+const BOOT_BG = cssColor(BOOT_CFG.background, "#0B0D16");
+const PAGE_BG = cssColor(BOOT_CFG.page_background ?? BOOT_CFG.background, "#14110E");
+
 const MIME: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -113,7 +124,12 @@ function projectAssets(): Plugin {
       });
     },
     transformIndexHtml(html) {
-      return html.replace(/%LISTVPN_BRAND%/g, BRAND.name);
+      const poster = BOOT_POSTER ? `/assets/${BOOT_POSTER}` : "";
+      return html
+        .replace(/%LISTVPN_BRAND%/g, BRAND.name)
+        .replace(/%LISTVPN_PAGE_BG%/g, PAGE_BG)
+        .replace(/%LISTVPN_BOOT_BG%/g, poster ? `${BOOT_BG} url(${poster}) center / cover no-repeat` : BOOT_BG)
+        .replace(/%LISTVPN_BOOT_PRELOAD%/g, poster ? `    <link rel="preload" href="${poster}" as="image" />\n` : "");
     },
     closeBundle() {
       // redirect.html для deep link incy/happ (tg не открывает эти схемы) — с названием проекта;
