@@ -135,6 +135,7 @@ export function FgnBackdrop({ style }: { style?: React.CSSProperties }) {
 
 // ── контурные иконки (24×24, stroke = currentColor) ──
 const ICONS: Record<string, React.ReactNode> = {
+  clip: <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />,
   leaf: (
     <>
       <path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z" />

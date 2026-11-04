@@ -2,7 +2,8 @@
 // Макет: шапка «назад» + «Поддержка», под ней @бот, карточка-приветствие, сообщения,
 // внизу непрозрачная панель: поле «Сообщение» + круглая кнопка отправки.
 // Логика (опрос, правки/удаления, «Нет, спасибо», вложения от поддержки) — как в базовом экране.
-// Кнопок «прикрепить» и «ответить» в макете нет — убраны.
+// Скрепка — прикрепить фото/видео/файл (как в базовом экране); вставка картинки из буфера тоже прикрепляет.
+// Кнопки «ответить» в макете нет.
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTgBack } from "../components/noir";
 import RichText from "../components/RichText";
@@ -14,6 +15,7 @@ import {
   fetchSupport,
   markSupportRead,
   sendSupportMessage,
+  uploadSupportFile,
   type SupportFile,
   type SupportMessage,
   type SupportState,
@@ -22,6 +24,8 @@ import {
 import { C, FgnBackdrop, FgnHeader, FgnIcon } from "../components/fgn";
 
 const POLL_MS = 4000;
+
+type Pending = { key: string; file: File; preview?: string; progress: number; id?: string; error?: string; abort?: () => void };
 const MUTED = "rgba(196, 196, 206, 0.62)";
 const BUBBLE = "#151517";
 const GREETING = "На связи. Напишите, если не открывается ключ или зависла оплата.";
@@ -173,6 +177,8 @@ export default function Support() {
     } catch { return ""; }
   });
   const [sending, setSending] = useState(false);
+  const [pending, setPending] = useState<Pending[]>([]);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [viewer, setViewer] = useState<string | null>(null);
   useTgBack(viewer ? () => setViewer(null) : undefined);
   const [closing, setClosing] = useState(false);
@@ -268,7 +274,55 @@ export default function Support() {
   };
 
   const maxText = state?.limits?.max_text || 4000;
-  const canSend = !sending && text.trim().length > 0;
+  const limits = state?.limits || { max_file_mb: 50, max_files: 10, max_text: 4000 };
+
+  const addFiles = (list: FileList | File[] | null) => {
+    const all = list ? Array.from(list) : [];
+    if (!all.length) return;
+    const room = limits.max_files - pending.length;
+    const files = all.slice(0, Math.max(0, room));
+    if (all.length > room) setError(`Можно прикрепить не больше ${limits.max_files} файлов`);
+    for (const file of files) {
+      const key = `${Date.now()}-${Math.random()}`;
+      if (file.size > limits.max_file_mb * 1024 * 1024) {
+        setPending((p) => [...p, { key, file, progress: 0, error: `Больше ${limits.max_file_mb} МБ` }]);
+        continue;
+      }
+      const preview = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
+      const up = uploadSupportFile(file, (pr) => setPending((p) => p.map((x) => (x.key === key ? { ...x, progress: pr } : x))));
+      setPending((p) => [...p, { key, file, preview, progress: 0, abort: up.abort }]);
+      up.promise
+        .then((res) => setPending((p) => p.map((x) => (x.key === key ? { ...x, id: res.id, progress: 1 } : x))))
+        .catch((e: Error) => setPending((p) => p.map((x) => (x.key === key ? { ...x, error: e.message } : x))));
+    }
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const removePending = (key: string) => {
+    setPending((p) => {
+      const x = p.find((y) => y.key === key);
+      if (x?.abort && !x.id && !x.error) x.abort();
+      if (x?.preview) URL.revokeObjectURL(x.preview);
+      return p.filter((y) => y.key !== key);
+    });
+  };
+
+  // вставка скриншота из буфера (Ctrl+V / «Вставить» на телефоне) — прикрепляется как файл
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const imgs = Array.from(e.clipboardData?.items || [])
+      .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f)
+      .map((f) => (f.name && f.name !== "image.png" ? f : new File([f], `screenshot-${Date.now()}.${(f.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: f.type })));
+    if (imgs.length) {
+      e.preventDefault();
+      addFiles(imgs);
+    }
+  };
+
+  const uploading = pending.some((p) => !p.id && !p.error);
+  const ready = pending.filter((p) => p.id);
+  const canSend = !sending && !uploading && (text.trim().length > 0 || ready.length > 0);
 
   const send = async () => {
     if (!canSend) return;
@@ -279,7 +333,7 @@ export default function Support() {
     setText("");
     if (taRef.current) taRef.current.style.height = "";
     try {
-      const m = await sendSupportMessage(body, []);
+      const m = await sendSupportMessage(body, ready.map((p) => p.id as string));
       stick.current = true;
       if (!state?.chat) setState((s) => (s ? { ...s, chat: { id: 0, unread: 0 } } : s));
       // любой ответ снимает вопрос «ещё помочь?»
@@ -287,6 +341,8 @@ export default function Support() {
       merge([m]);
       // первое сообщение после закрытия открывает тикет
       if (state?.ticket?.status !== "open" || m.ticket_closed) reload();
+      pending.forEach((p) => p.preview && URL.revokeObjectURL(p.preview));
+      setPending((p) => p.filter((x) => x.error));
     } catch (e) {
       setText((cur) => (cur ? cur : body));
       setError((e as Error).message || "Не удалось отправить");
@@ -372,11 +428,53 @@ export default function Support() {
             {error ? (
               <div style={{ fontSize: 13, lineHeight: "17px", color: C.danger, padding: "0 2px 10px" }} onClick={() => setError("")}>{error}</div>
             ) : null}
+            {pending.length > 0 ? (
+              <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "0 0 10px" }}>
+                {pending.map((p) => (
+                  <div key={p.key} style={{ position: "relative", flex: "none", width: 64, height: 64, borderRadius: 14, background: C.cardBg,
+                    border: `1px solid ${p.error ? C.danger : "rgba(255, 255, 255, 0.1)"}`, overflow: "hidden" }}>
+                    {p.preview ? <img src={p.preview} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", opacity: p.id ? 1 : 0.55 }} /> : (
+                      <div style={{ padding: 7, fontSize: 10.5, color: MUTED, lineHeight: "13px", wordBreak: "break-all" }}>
+                        <FgnIcon name="file" size={18} />
+                        <div style={{ overflow: "hidden", maxHeight: 26, marginTop: 2 }}>{p.file.name}</div>
+                      </div>
+                    )}
+                    {!p.id && !p.error ? (
+                      <div style={{ position: "absolute", left: 6, right: 6, bottom: 6, height: 4, borderRadius: 2, background: "rgba(0,0,0,0.45)" }}>
+                        <div style={{ width: `${Math.round(p.progress * 100)}%`, height: "100%", borderRadius: 2, background: C.green }} />
+                      </div>
+                    ) : null}
+                    {p.error ? <div style={{ position: "absolute", inset: "auto 0 0 0", fontSize: 9.5, background: "rgba(0,0,0,0.75)", color: C.danger, padding: "2px 4px" }}>{p.error}</div> : null}
+                    <button type="button" onClick={() => removePending(p.key)} aria-label="Убрать"
+                      style={{ ...btnReset, position: "absolute", top: 3, right: 3, width: 22, height: 22, borderRadius: 11, border: "none", padding: 0,
+                        background: "rgba(0,0,0,0.65)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                      <FgnIcon name="close" size={13} stroke={2.2} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             <div style={{ display: "flex", alignItems: "flex-end", gap: 8.5 }}>
+              <input ref={fileRef} type="file" multiple style={{ display: "none" }}
+                onChange={(e) => addFiles(e.target.files)} />
+              <button
+                type="button"
+                onClick={() => fileRef.current?.click()}
+                aria-label="Прикрепить файл"
+                className="blin-press"
+                style={{
+                  ...btnReset, flex: "none", width: 48, height: 48, marginBottom: 2.5, padding: 0, borderRadius: "50%",
+                  border: "1px solid rgba(255, 255, 255, 0.1)", background: C.cardBg, color: C.text,
+                  display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+                }}
+              >
+                <FgnIcon name="clip" size={21} stroke={1.8} />
+              </button>
               <textarea
                 ref={taRef}
                 value={text}
                 onChange={onText}
+                onPaste={onPaste}
                 rows={1}
                 placeholder="Сообщение"
                 className="fgn-support-ta"
