@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import sys
 import threading
@@ -84,13 +85,15 @@ def api(method: str, payload: Optional[dict[str, Any]] = None, *, timeout: float
         except json.JSONDecodeError:
             _tl.err = (e.code, raw[:200] or str(e.reason))
             return None
-        # 429: один retry по retry_after
+        # 429: один retry по retry_after. getUpdates не должен спать минутами —
+        # иначе /start висит, пока бот «уважает» лимит рассылки.
         if e.code == 429 and _retries > 0:
             try:
                 ra = float(((body or {}).get("parameters") or {}).get("retry_after") or 1)
             except (TypeError, ValueError):
                 ra = 1.0
-            time.sleep(min(ra, 30) + 0.1)
+            cap = 5.0 if method == "getUpdates" else 15.0
+            time.sleep(min(ra, cap) + 0.1)
             return api(method, payload, timeout=timeout, _retries=_retries - 1)
     except urllib.error.URLError as e:
         _tl.err = (0, f"нет связи с Telegram: {e.reason}")
@@ -160,22 +163,45 @@ def _launch_button() -> dict[str, Any]:
     return {"text": "Запустить", "url": f"https://t.me/{P().bot_username}"}
 
 
+def _send_chat(chat_id: int, payload: dict[str, Any], *, timeout: float = 12.0) -> bool:
+    """sendMessage; при ошибке пишем в лог (раньше /start молча терялся)."""
+    body = {"chat_id": chat_id, **payload}
+    if api("sendMessage", body, timeout=timeout) is not None:
+        return True
+    err = last_error()
+    print(f"[bot:{P().id}] sendMessage не прошёл ({err[0] if err else '—'}: {err[1] if err else 'нет ответа'})",
+          flush=True)
+    return False
+
+
 def _send_welcome(chat_id: int) -> None:
-    """/start: приветствие + кнопки «запустить» / «поддержка» (bot api 9.4+)."""
+    """/start: приветствие + кнопки «запустить» / «поддержка».
+    Сначала bot api 9.4+ (style/premium-эмодзи); Telegram отверг — то же без украшений.
+    Иначе пользователь ждал онбординг через полчаса или не получал ничего."""
     text, entities = _welcome_text_entities()
     launch = _launch_button()
-    # style: primary — синяя, danger — красная, success — зелёная (bot api 9.4+)
-    rows: list[list[dict[str, Any]]] = [[{**launch, "style": "danger", "icon_custom_emoji_id": EMOJI_KEY}]]
+    fancy: list[list[dict[str, Any]]] = [[{**launch, "style": "danger", "icon_custom_emoji_id": EMOJI_KEY}]]
     sup = _support_button(icon_custom_emoji_id=EMOJI_CHAT)
     if sup:
-        rows.append([sup])
-    api("sendMessage", {
-        "chat_id": chat_id,
-        "text": text,
-        "entities": entities,
-        "link_preview_options": {"is_disabled": True},
-        "reply_markup": {"inline_keyboard": rows},
-    })
+        fancy.append([sup])
+    plain: list[list[dict[str, Any]]] = [[dict(launch)]]
+    sup_plain = _support_button()
+    if sup_plain:
+        plain.append([sup_plain])
+    preview = {"link_preview_options": {"is_disabled": True}}
+    attempts: list[dict[str, Any]] = [
+        {**preview, "text": text, "entities": entities, "reply_markup": {"inline_keyboard": fancy}},
+        {**preview, "text": text, "entities": entities, "reply_markup": {"inline_keyboard": plain}},
+        {**preview, "text": text, "reply_markup": {"inline_keyboard": plain}},
+        {**preview, "text": text},
+    ]
+    for payload in attempts:
+        if _send_chat(chat_id, payload):
+            return
+        code = (last_error() or (0, ""))[0]
+        # сеть/таймаут: не долбить ещё несколько раз по 12с
+        if code not in (400, 404):
+            return
 
 
 def _with_query(url: str, key: str, value: str) -> str:
@@ -226,15 +252,17 @@ def _send_migration_notice(chat_id: int, user: Optional[dict[str, Any]]) -> None
 def _send_banned(chat_id: int) -> None:
     """заблокированному: сообщение о блокировке вместо приветствия."""
     text = "⛔️ Ваш аккаунт заблокирован за нарушение правил сервиса."
-    api("sendMessage", {
-        "chat_id": chat_id,
+    kb = {"reply_markup": {"inline_keyboard": [[_support_button()]]}} if _support_button() else {}
+    if _send_chat(chat_id, {
         "text": text,
         "entities": [
             {"type": "custom_emoji", "custom_emoji_id": reminders.EMOJI_STOP, "offset": 0, "length": 2},
             {"type": "bold", "offset": 3, "length": len(text) - 3},
         ],
-        **({"reply_markup": {"inline_keyboard": [[_support_button()]]}} if _support_button() else {}),
-    })
+        **kb,
+    }):
+        return
+    _send_chat(chat_id, {"text": text, **kb})
 
 
 def handle_start(message: dict[str, Any]) -> None:
@@ -252,16 +280,11 @@ def handle_start(message: dict[str, Any]) -> None:
     user = fulfillment.get_user(_ensure_user(telegram_id, frm))
     is_new = not existed
 
-    # blacklist при входе
-    try:
-        blacklist.enforce(user, log=lambda m: print(m, flush=True))
-    except Exception as exc:  # noqa: BLE001
-        print(f"[blacklist] ошибка проверки: {exc}", flush=True)
     if user and user.get("is_banned"):
         _send_banned(chat_id)
         return
 
-    # first_start_at один раз
+    # first_start_at один раз — до медленных вызовов, чтобы онбординг не сдвинулся
     if user:
         db.execute(
             "UPDATE users SET first_start_at = ? WHERE id = ? AND first_start_at IS NULL",
@@ -283,7 +306,15 @@ def handle_start(message: dict[str, Any]) -> None:
     elif payload.startswith("payfail_") and user and _send_payment_return(chat_id, user, payload[8:].strip(), failed=True):
         return
 
+    # приветствие сразу: blacklist.enforce может сходить в Remnawave и задержать ответ
     _send_welcome(chat_id)
+    try:
+        blacklist.enforce(user, log=lambda m: print(m, flush=True))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[blacklist] ошибка проверки: {exc}", flush=True)
+    if user and user.get("is_banned"):
+        _send_banned(chat_id)
+        return
     _send_migration_notice(chat_id, user)
 
 
@@ -563,8 +594,49 @@ def process_update(update: dict[str, Any]) -> None:
         print(f"[bot] ошибка обработки апдейта: {type(exc).__name__}: {exc}", flush=True)
 
 
+# getUpdates не должен ждать fulfill/remnawave: иначе /start стоит в очереди минутами
+_UPDATE_WORKERS = 12
+_update_q: "queue.Queue[Optional[tuple[str, dict[str, Any]]]]" = queue.Queue(maxsize=500)
+_workers_lock = threading.Lock()
+_workers_started = False
+
+
+def _update_worker() -> None:
+    while True:
+        item = _update_q.get()
+        try:
+            if not item:
+                continue
+            pid, upd = item
+            with projects.use(pid):
+                process_update(upd)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[bot] ошибка воркера: {type(exc).__name__}: {exc}", flush=True)
+        finally:
+            _update_q.task_done()
+
+
+def _ensure_update_workers() -> None:
+    global _workers_started
+    with _workers_lock:
+        if _workers_started:
+            return
+        _workers_started = True
+        for i in range(_UPDATE_WORKERS):
+            threading.Thread(target=_update_worker, name=f"bot-upd-{i}", daemon=True).start()
+
+
+def _dispatch_update(pid: str, upd: dict[str, Any]) -> None:
+    try:
+        _update_q.put((pid, upd), timeout=1.0)
+    except queue.Full:
+        with projects.use(pid):
+            process_update(upd)
+
+
 def _poll(pid: str, token: str) -> None:
     """long polling одного бота (в контексте его проекта). Токен сменили / убрали в панели — поток завершается."""
+    _ensure_update_workers()
     with projects.use(pid):
         me = api("getMe")
         if me:
@@ -580,7 +652,9 @@ def _poll(pid: str, token: str) -> None:
         reported = ""
         while P().bot_token == token and P().active:
             try:
-                updates = api("getUpdates", {"offset": offset, "timeout": 30, "allowed_updates": allowed}, timeout=40)
+                updates = api("getUpdates", {
+                    "offset": offset, "timeout": 25, "limit": 100, "allowed_updates": allowed,
+                }, timeout=35)
                 if updates is None:
                     # getUpdates не прошёл: раньше молча крутились в цикле и бот «молчал»
                     code, desc = last_error() or (0, "нет ответа")
@@ -593,7 +667,7 @@ def _poll(pid: str, token: str) -> None:
                     if msg != reported:
                         print(f"[bot:{pid}] не получает сообщения: {msg} ({code or '—'}: {desc})", flush=True)
                         reported = msg
-                    time.sleep(5 if code == 409 else 3)
+                    time.sleep(2 if code == 409 else 1)
                     if code == 409:
                         api("deleteWebhook", {"drop_pending_updates": False})
                     continue
@@ -604,10 +678,14 @@ def _poll(pid: str, token: str) -> None:
                     continue
                 for upd in updates:
                     offset = max(offset, int(upd["update_id"]) + 1)
-                    process_update(upd)
+                    # pre_checkout: Telegram даёт 10с — не кладём в очередь
+                    if "pre_checkout_query" in upd:
+                        process_update(upd)
+                    else:
+                        _dispatch_update(pid, upd)
             except Exception as exc:  # noqa: BLE001
                 print(f"[bot:{pid}] ошибка цикла: {type(exc).__name__}: {exc}", flush=True)
-                time.sleep(3)
+                time.sleep(2)
         print(f"[bot:{pid}] токен изменён или проект выключен в панели — переподключение", flush=True)
 
 
@@ -641,7 +719,8 @@ def run() -> None:
                         warned.add(p.id)
                     continue
                 warned.discard(p.id)
-                if cur and cur[0] == tok and cur[1].is_alive():
+                # второй getUpdates на тот же токен → 409, бот «молчит» минутами
+                if cur and cur[1].is_alive():
                     continue
                 t = threading.Thread(target=_poll, args=(p.id, tok), name=f"bot-{p.id}", daemon=True)
                 running[p.id] = (tok, t)
