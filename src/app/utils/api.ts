@@ -768,7 +768,8 @@ export function markSupportRead(): Promise<unknown> {
 export function uploadSupportFile(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
   const xhr = new XMLHttpRequest();
   const promise = new Promise<Omit<SupportFile, "url">>((resolve, reject) => {
-    xhr.open("POST", `/api/app/support/upload?name=${encodeURIComponent(file.name || "file")}`);
+    // абсолютный адрес, как в appFetch: в Telegram WebView относительный /api иногда уходит не на наш домен
+    xhr.open("POST", `${window.location.origin}/api/app/support/upload?name=${encodeURIComponent(file.name || "file")}`);
     const h = initDataHeader();
     Object.keys(h).forEach((k) => xhr.setRequestHeader(k, h[k]));
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
@@ -777,7 +778,14 @@ export function uploadSupportFile(file: File, onProgress: (p: number) => void): 
       let body: any = null;
       try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
       if (xhr.status >= 200 && xhr.status < 300 && body?.id) resolve(body);
-      else reject(new Error(body?.detail?.message || (xhr.status === 413 ? "Файл слишком большой" : `Ошибка ${xhr.status}`)));
+      else {
+        const detail = body?.detail;
+        const msg = (detail && typeof detail === "object" ? detail.message : typeof detail === "string" ? detail : "") || body?.error;
+        // ответ не от нашего API (прокси/защита сайта) — показать, кто отказал, чтобы было видно сразу
+        const who = !body ? (/cloudflare/i.test(xhr.responseText || "") || xhr.getResponseHeader("cf-ray") ? " (Cloudflare)"
+          : xhr.getResponseHeader("server") ? ` (${xhr.getResponseHeader("server")})` : " (не от сервера FGN)") : "";
+        reject(new Error(msg || (xhr.status === 413 ? "Файл слишком большой" : `Ошибка ${xhr.status}${who}`)));
+      }
     };
     xhr.onerror = () => reject(new Error("Нет соединения"));
     xhr.onabort = () => reject(new Error("Отменено"));
