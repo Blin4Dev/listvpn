@@ -543,7 +543,7 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
     };
 
     const limits = data?.limits || { max_file_mb: 50, max_files: 10, max_text: 4000 };
-    const addFiles = (list: FileList | null) => {
+    const addFiles = (list: FileList | File[] | null) => {
       if (!list || sid == null) return;
       const room = limits.max_files - pending.length;
       Array.from(list).slice(0, Math.max(0, room)).forEach((file) => {
@@ -557,6 +557,14 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
       });
       if (fileRef.current) fileRef.current.value = '';
     };
+    // скриншот из буфера (Ctrl+V / ⌘V) или перетащенный файл → вложение к сообщению
+    const clipFiles = (items: DataTransferItemList | null | undefined, imagesOnly: boolean): File[] =>
+      Array.from(items || [])
+        .filter((it) => it.kind === 'file' && (!imagesOnly || it.type.startsWith('image/')))
+        .map((it) => it.getAsFile())
+        .filter((f): f is File => !!f)
+        .map((f) => (f.name && f.name !== 'image.png' ? f
+          : new File([f], `screenshot-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${(f.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`, { type: f.type })));
     const removePending = (key: string) => setPending((p) => {
       const x = p.find((y) => y.key === key);
       if (x?.abort && !x.id && !x.error) x.abort();
@@ -902,9 +910,30 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                     )}
                     {messageAction || (
                       <textarea className="input" rows={1} value={text}
-                        placeholder={asNote ? 'Комментарий для сотрудников…' : 'Сообщение пользователю…'}
+                        placeholder={asNote ? 'Комментарий для сотрудников…' : 'Сообщение пользователю… (скрин — Ctrl+V)'}
                         onChange={(e) => { setText(e.target.value.slice(0, limits.max_text)); e.target.style.height = 'auto'; e.target.style.height = `${Math.min(160, e.target.scrollHeight)}px`; }}
                         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } if (e.key === 'Escape' && editing) cancelEdit(); }}
+                        onPaste={(e) => {
+                          const files = clipFiles(e.clipboardData?.items, true);
+                          if (!files.length) return; // обычный текст — вставляется как всегда
+                          e.preventDefault();
+                          if (!canWriteUser || asNote || editing) {
+                            onToast('Скриншот', 'Картинку можно прикрепить только к сообщению пользователю — не к комментарию и не при правке', 'info' as ToastType);
+                            return;
+                          }
+                          addFiles(files);
+                        }}
+                        onDragOver={(e) => { if (Array.from(e.dataTransfer?.items || []).some((it) => it.kind === 'file')) e.preventDefault(); }}
+                        onDrop={(e) => {
+                          const files = clipFiles(e.dataTransfer?.items, false);
+                          if (!files.length) return;
+                          e.preventDefault();
+                          if (!canWriteUser || asNote || editing) {
+                            onToast('Файл', 'Файл можно прикрепить только к сообщению пользователю', 'info' as ToastType);
+                            return;
+                          }
+                          addFiles(files);
+                        }}
                         style={{ width: '100%', resize: 'none', minHeight: 42, maxHeight: 160, lineHeight: 1.4, paddingTop: 10, paddingBottom: 10 }} />
                     )}
                   </div>
