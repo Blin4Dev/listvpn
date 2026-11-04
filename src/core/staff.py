@@ -55,7 +55,8 @@ ROUTES: list[tuple[set[str], re.Pattern, str]] = [
         (R, r"/support/chats", "any"),
         (R, r"/support/unread", "any"),
         (R, r"/support/chats/\d+", "any"),
-        ("POST", r"/support/chats/\d+/(?:read|start|close|upload|messages|pool|escalate)", "any"),
+        ("POST", r"/support/chats/\d+/(?:read|start|close|upload|messages|pool|escalate|wait)", "any"),
+        ("POST", r"/support/chats/\d+/reopen", "curator"),   # переоткрыть — куратор (и владелец)
         # своё сообщение (своё+48ч внутри)
         ("POST", r"/support/chats/\d+/messages/\d+/edit", "any"),
         ("DELETE", r"/support/chats/\d+/messages/\d+", "any"),

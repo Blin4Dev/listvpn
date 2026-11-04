@@ -891,6 +891,7 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                   )}
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
                     {!editing && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <div style={{ display: 'inline-flex', alignSelf: 'flex-start', padding: 2, borderRadius: 8, background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)' }}>
                         <button type="button" onClick={() => pickMode(false)}
                           style={{
@@ -907,10 +908,20 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                             color: asNote ? 'var(--text)' : 'var(--muted, #9a9a9a)',
                           }}>Комментарий</button>
                       </div>
+                      {/* «Ожидание» — над полем, а не в строке ввода: на телефоне она выталкивала кнопку отправки */}
+                      {canWriteUser && !asNote && !!chat.user_waiting && (
+                        <button type="button" className="btn sm" style={{ marginLeft: 'auto', height: 30, padding: '0 10px', fontSize: 12.5 }}
+                          title="Пользователь ничего не увидит — текущее ожидание без штрафа"
+                          disabled={!!busy} onClick={() => void ackWait()}>
+                          {busy === 'wait' ? <Spinner size={13} /> : <Clock size={13} />} Ожидание
+                        </button>
+                      )}
+                      </div>
                     )}
                     {messageAction || (
                       <textarea className="input" rows={1} value={text}
-                        placeholder={asNote ? 'Комментарий для сотрудников…' : 'Сообщение пользователю… (скрин — Ctrl+V)'}
+                        placeholder={asNote ? 'Комментарий для сотрудников…' : 'Сообщение пользователю…'}
+                        title={asNote ? undefined : 'Скриншот можно вставить сюда: Ctrl+V / ⌘V'}
                         onChange={(e) => { setText(e.target.value.slice(0, limits.max_text)); e.target.style.height = 'auto'; e.target.style.height = `${Math.min(160, e.target.scrollHeight)}px`; }}
                         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } if (e.key === 'Escape' && editing) cancelEdit(); }}
                         onPaste={(e) => {
@@ -937,13 +948,6 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                         style={{ width: '100%', resize: 'none', minHeight: 42, maxHeight: 160, lineHeight: 1.4, paddingTop: 10, paddingBottom: 10 }} />
                     )}
                   </div>
-                  {canWriteUser && !asNote && !editing && !!chat.user_waiting && (
-                    <button className="btn" style={{ height: 42, flex: 'none' }}
-                      title="Пользователь ничего не увидит — текущее ожидание без штрафа"
-                      disabled={!!busy} onClick={() => void ackWait()}>
-                      {busy === 'wait' ? <Spinner size={15} /> : <Clock size={15} />} Ожидание
-                    </button>
-                  )}
                   {(asNote || canWriteUser || editing) && (
                     <button className="btn solid" style={{ height: 42, flex: 'none' }}
                       title={editing ? 'Сохранить' : 'Отправить'}
