@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import bisect
 import statistics as st
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 import contextvars
+import copy
+import threading
+import time
 
 import database as db
 import projects
@@ -23,6 +27,38 @@ def _and(col: str = "project_id") -> str:
     return f" AND {col} = '{pid}'"
 
 MSK = timezone(timedelta(hours=3))
+
+# Сводки собираются из всех платежей и пользователей проекта (на больших базах — сотни тысяч строк),
+# поэтому выборки и готовые ответы живут несколько секунд: повторные открытия панели — мгновенно.
+_TTL = 30.0
+_cache: dict[tuple, tuple[float, Any]] = {}
+_cache_lock = threading.Lock()
+
+
+def _scope_key() -> str:
+    sc = _SCOPE.get()
+    return "*" if sc == "*" else (projects.normalize(sc) or projects.current_id())
+
+
+def _cached(key: tuple, fn):
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    val = fn()
+    with _cache_lock:
+        if len(_cache) > 64:
+            for k in [k for k, v in _cache.items() if v[0] <= now]:
+                _cache.pop(k, None)
+        _cache[key] = (now + _TTL, val)
+    return val
+
+
+def invalidate() -> None:
+    with _cache_lock:
+        _cache.clear()
+
 PAID = ("paid", "completed")
 
 PERIODS = {"7d": 7, "30d": 30, "90d": 90, "365d": 365, "all": None}
@@ -73,6 +109,11 @@ def _money(v: float) -> float:
 
 
 def _paid_payments() -> list[dict[str, Any]]:
+    # общий список только читается (_classify всегда размечает его целиком — одинаково)
+    return _cached(("pays", _scope_key()), _load_paid_payments)
+
+
+def _load_paid_payments() -> list[dict[str, Any]]:
     rows = db.fetchall(
         "SELECT id, user_id, provider, method, amount, stars, status, purpose, plan_devices, months, "
         "extra_devices, created_at, paid_at, refunded_at, referral_applied FROM payments "
@@ -149,17 +190,26 @@ def _bucket_range(start: date, end: date, bucket: str) -> list[date]:
 
 
 def _users() -> list[dict[str, Any]]:
+    return _cached(("users", _scope_key()), _load_users)
+
+
+def _load_users() -> list[dict[str, Any]]:
     rows = db.fetchall(
         "SELECT id, telegram_id, username, email, is_banned, referred_by, tracking_code, balance, "
         "partner_balance, created_at FROM users WHERE 1 = 1" + _and()
     )
     for u in rows:
-        u["t"] = _dt(u.get("created_at"))
+        t = u["t"] = _dt(u.get("created_at"))
+        u["d"] = _msk_day(t) if t else None
     return rows
 
 
 def _trial_grants() -> dict[int, datetime]:
     """Когда пользователь впервые получил пробный период."""
+    return _cached(("trials", _scope_key()), _load_trial_grants)
+
+
+def _load_trial_grants() -> dict[int, datetime]:
     out: dict[int, datetime] = {}
     for r in db.fetchall("SELECT c.user_id, MIN(c.granted_at) AS t FROM trial_checks c JOIN users u ON u.id = c.user_id "
                          "WHERE 1 = 1" + _and("u.project_id") + " GROUP BY c.user_id"):
@@ -188,6 +238,11 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
             return statistics(period, date_from, date_to)
         finally:
             _SCOPE.reset(token)
+    key = ("stats", _scope_key(), period, str(date_from), str(date_to))
+    return copy.deepcopy(_cached(key, lambda: _statistics(period, date_from, date_to)))
+
+
+def _statistics(period: str, date_from: Optional[date], date_to: Optional[date]) -> dict[str, Any]:
     now = _now()
     today = _msk_day(now)
     end_day = today
@@ -390,7 +445,7 @@ def statistics(period: str = "30d", date_from: Optional[date] = None, date_to: O
         for _ in range(i):
             m = (m - timedelta(days=1)).replace(day=1)
         m_next = (m.replace(day=28) + timedelta(days=4)).replace(day=1)
-        ids = [int(u["id"]) for u in users if u["t"] and m <= _msk_day(u["t"]) < m_next]
+        ids = [int(u["id"]) for u in users if u["d"] and m <= u["d"] < m_next]
         n = len(ids)
         paid_n = sum(1 for x in ids if x in first_pay)
         revenue = sum(rev_by_user.get(x, 0) for x in ids)
@@ -483,7 +538,7 @@ def dashboard(scope: Optional[str] = None) -> dict[str, Any]:
     """главная панели: проект (по умолчанию — текущий) или вся сеть (scope="*")."""
     token = _SCOPE.set(scope)
     try:
-        return _dashboard()
+        return copy.deepcopy(_cached(("dash", _scope_key()), _dashboard))
     finally:
         _SCOPE.reset(token)
 
@@ -492,12 +547,18 @@ def _dashboard() -> dict[str, Any]:
     now = _now()
     today = _msk_day(now)
     day0 = datetime.combine(today, datetime.min.time(), MSK).astimezone(timezone.utc)
-    pays = [p for p in _paid_payments() if p["status"] in PAID]
+    pays = sorted((p for p in _paid_payments() if p["status"] in PAID), key=lambda p: p["t"])
     users = _users()
+    p_t = [p["t"] for p in pays]
+    p_cum = [0.0]
+    for p in pays:
+        p_cum.append(p_cum[-1] + p["amount"])
 
     def rev_between(a: datetime, b: datetime) -> tuple[float, int]:
-        sel = [p for p in pays if _in(p["t"], a, b)]
-        return sum(p["amount"] for p in sel), len(sel)
+        i, j = bisect.bisect_left(p_t, a), bisect.bisect_left(p_t, b)
+        if j <= i:
+            return 0.0, 0
+        return p_cum[j] - p_cum[i], j - i
 
     r_today, n_today = rev_between(day0, now)
     r_yday, n_yday = rev_between(day0 - timedelta(days=1), day0)

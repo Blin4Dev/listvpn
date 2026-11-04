@@ -429,9 +429,11 @@ def _startup() -> None:
     # статус юзеров по фактическим подпискам
     # (раньше новым ставили Trial даже без подписки)
     try:
-        for uid, st in user_states_map().items():
-            if st != "Banned":
-                db.execute("UPDATE users SET status = ? WHERE id = ? AND status != ?", (st, uid, st))
+        # одной транзакцией и только изменившиеся: раньше — по коммиту на каждого юзера (на 80 тыс. — минуты блокировки базы)
+        cur_st = {int(r["id"]): r.get("status") for r in db.fetchall("SELECT id, status FROM users")}
+        changed = [(st, uid) for uid, st in user_states_map().items() if st != "Banned" and cur_st.get(uid) != st]
+        if changed:
+            db.executemany("UPDATE users SET status = ? WHERE id = ?", changed)
     except Exception as exc:  # noqa: BLE001
         print(f"[BatmanVPN] status resync failed: {exc}", flush=True)
     import threading
@@ -3589,25 +3591,53 @@ def panel_payments(
     ]
 
 
-def _filter_users(search: Optional[str], status: Optional[str]) -> list[dict[str, Any]]:
-    items = db.fetchall("SELECT * FROM users WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
-    states = user_states_map(db.pid())
-    for u in items:
-        u["_state"] = states.get(int(u["id"]), "None")
+_STATE_SQL = (
+    "CASE WHEN COALESCE(u.is_banned, 0) THEN 'Banned' WHEN COALESCE(s.total, 0) = 0 THEN 'None' "
+    "WHEN s.paid_now THEN 'Active' WHEN s.trial_now THEN 'Trial' ELSE 'Expired' END"
+)
+
+
+def _users_page(search: Optional[str], status: Optional[str], limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+    """страница пользователей проекта: фильтр, поиск и выборка — в базе (раньше в память грузились все).
+    Статус — как user_states_map (та же формула)."""
+    now_iso = iso()
+    where, params = ["u.project_id = ?"], [db.pid()]
     if status and status != "all":
-        st = status.lower()
-        items = [u for u in items if str(u.get("_state", "")).lower() == st]
+        where.append(f"lower({_STATE_SQL}) = ?")
+        params.append(status.lower())
     if search:
         q = search.lower().lstrip("@")
-        items = [
-            u
-            for u in items
-            if q in str(u.get("username") or "").lower()
-            or q in str(u.get("telegram_id") or "")
-            or q in str(u.get("id") or "")
-            or q in str(u.get("referral_code") or "").lower()
-        ]
-    return items
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append("(lower(COALESCE(u.username, '')) LIKE ? ESCAPE '\\' OR CAST(COALESCE(u.telegram_id, '') AS TEXT) LIKE ? ESCAPE '\\' "
+                     "OR CAST(u.id AS TEXT) LIKE ? ESCAPE '\\' OR lower(COALESCE(u.referral_code, '')) LIKE ? ESCAPE '\\')")
+        params += [like, like, like, like]
+    sub = ("LEFT JOIN (SELECT user_id, COUNT(*) AS total, "
+           "MAX(CASE WHEN status = 'Active' AND type != 'trial' AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS paid_now, "
+           "MAX(CASE WHEN status = 'Active' AND type = 'trial' AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS trial_now "
+           "FROM subscriptions WHERE user_id IN (SELECT id FROM users WHERE project_id = ?) GROUP BY user_id) s ON s.user_id = u.id")
+    w = " AND ".join(where)
+    if not (status and status != "all"):
+        # без фильтра по статусу: считаем и статус только для строк страницы (а не по подпискам всех)
+        total = int((db.fetchone(f"SELECT COUNT(*) AS c FROM users u WHERE {w}", tuple(params)) or {}).get("c") or 0)
+        page = db.fetchall(f"SELECT u.id FROM users u WHERE {w} ORDER BY u.id DESC LIMIT ? OFFSET ?", (*params, limit, offset))
+        ids = [int(r["id"]) for r in page]
+        if not ids:
+            return [], total
+        marks = ",".join("?" * len(ids))
+        sub1 = sub.replace("WHERE user_id IN (SELECT id FROM users WHERE project_id = ?)", f"WHERE user_id IN ({marks})")
+        rows = db.fetchall(f"SELECT u.*, {_STATE_SQL} AS _state FROM users u {sub1} WHERE u.id IN ({marks}) ORDER BY u.id DESC",
+                           (now_iso, now_iso, *ids, *ids))
+        return rows, total
+    base = [now_iso, now_iso, db.pid()]
+    total = int((db.fetchone(f"SELECT COUNT(*) AS c FROM users u {sub} WHERE {w}", (*base, *params)) or {}).get("c") or 0)
+    rows = db.fetchall(f"SELECT u.*, {_STATE_SQL} AS _state FROM users u {sub} WHERE {w} ORDER BY u.id DESC LIMIT ? OFFSET ?",
+                       (*base, *params, limit, offset))
+    return rows, total
+
+
+def _filter_users(search: Optional[str], status: Optional[str]) -> list[dict[str, Any]]:
+    rows, _total = _users_page(search, status, 10 ** 9, 0)
+    return rows
 
 
 @app.get("/api/panel/users")
@@ -3620,9 +3650,10 @@ def panel_users(
     status: Optional[str] = Query(None),
     p: dict = Depends(require_panel),
 ) -> dict[str, Any]:
-    items = _filter_users(search or q, status)
-    page_data = paginate(items, limit, offset if offset else (page - 1) * limit)
-    page_items = page_data["items"]
+    limit = max(1, min(int(limit), 500))
+    off = max(0, int(offset if offset else (page - 1) * limit))
+    page_items, total = _users_page(search or q, status, limit, off)
+    page_data = {"items": page_items, "total": total}
     # сумма успешных платежей пачкой (не n+1)
     revenue_map: dict[int, float] = {}
     manage_ids: Optional[set[int]] = None  # None = полный доступ (owner/curator)
@@ -5437,22 +5468,38 @@ def panel_keys(
     status: Optional[str] = Query(None),
     _: dict = Depends(require_panel),
 ) -> dict[str, Any]:
-    items = db.fetchall("SELECT * FROM subscriptions WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    # фильтр и страница — в SQL: раньше сериализовались все подписки проекта (на FGN — сотни тысяч, по запросу на каждую)
+    where = ["s.project_id = ?"]
+    args: list[Any] = [db.pid()]
     if status and status != "all":
-        items = [k for k in items if str(k.get("status", "")).lower() == status.lower()]
+        where.append("LOWER(s.status) = ?")
+        args.append(status.lower())
     needle = (search or q or "").lower().lstrip("@")
-    serialized: list[dict[str, Any]] = []
-    for k in items:
-        ser = serialize_key(k)
-        if needle:
-            hay = " ".join(
-                str(x or "")
-                for x in (ser.get("key_uuid"), ser.get("username"), ser.get("user_id"), ser.get("short_uuid"))
-            ).lower()
-            if needle not in hay:
-                continue
-        serialized.append(ser)
-    page_data = paginate(serialized, limit, offset if offset else (page - 1) * limit)
+    if needle:
+        label = ("CASE WHEN COALESCE(u.username, '') != '' THEN '@' || u.username "
+                 "WHEN COALESCE(u.telegram_id, 0) != 0 THEN 'id' || u.telegram_id "
+                 "WHEN COALESCE(u.email, '') != '' THEN u.email "
+                 "WHEN u.id IS NOT NULL THEN '#' || u.id ELSE '' END")
+        where.append(f"instr(LOWER(COALESCE(s.key_uuid, '') || ' ' || ({label}) || ' ' || COALESCE(s.user_id, '') || ' ' "
+                     f"|| COALESCE(s.short_uuid, '')), ?) > 0")
+        args.append(needle)
+    cond = " AND ".join(where)
+    join = "LEFT JOIN users u ON u.id = s.user_id" if needle else ""
+    total = int((db.fetchone(f"SELECT COUNT(*) AS c FROM subscriptions s {join} WHERE {cond}", tuple(args)) or {}).get("c") or 0)
+    limit = max(1, min(int(limit), 500))
+    off = max(0, int(offset if offset else (page - 1) * limit))
+    rows = db.fetchall(f"SELECT s.* FROM subscriptions s {join} WHERE {cond} ORDER BY s.id DESC LIMIT ? OFFSET ?",
+                       (*args, limit, off))
+    uids = sorted({int(r["user_id"]) for r in rows if r.get("user_id")})
+    owners: dict[int, dict[str, Any]] = {}
+    if uids:
+        owners = {int(u["id"]): u for u in db.fetchall(
+            f"SELECT * FROM users WHERE id IN ({','.join('?' * len(uids))})", tuple(uids))}
+    items = []
+    for k in rows:
+        u = owners.get(int(k["user_id"])) if k.get("user_id") else None
+        items.append(serialize_key(k, u) if u else serialize_key(k))
+    page_data = {"items": items, "total": total}
     return {"items": page_data["items"], "total": page_data["total"]}
 
 
