@@ -210,8 +210,8 @@ def prefix_of(username: Any) -> Optional[str]:
     if not m:
         return None
     p = m.group(1) + "_"
-    if p == provisioning.USERNAME_PREFIX:
-        return None
+    if p in provisioning.own_prefixes():
+        return None  # свои: batman_, fgn_ … (префиксы проектов сети)
     return p
 
 
@@ -483,7 +483,7 @@ def normalize_prefix(raw: Any) -> str:
     p = str(raw or "").strip()
     if p and not p.endswith("_"):
         p += "_"
-    if not _PREFIX_RE.fullmatch(p) or p == provisioning.USERNAME_PREFIX:
+    if not _PREFIX_RE.fullmatch(p) or p in provisioning.own_prefixes():
         raise ResaleError("Неверный префикс группы")
     if _legacy_prefix(p):
         raise ResaleError(f"{p} — пользователи старого бота FGN, они уже перенесены в FGN. Это не ресейлер")

@@ -2,6 +2,7 @@
   "id": "fgn",
   "name": "FGN",
   "order": 1,
+  "rw_username_prefix": "fgn_",
   "channel": {
     "id": "",
     "url": ""

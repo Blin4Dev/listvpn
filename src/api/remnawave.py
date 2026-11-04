@@ -21,6 +21,26 @@ API_CONTRACT = "3.4.4"
 # Бот работает ТОЛЬКО со своими пользователями панели: имя строго batman_<id пользователя бота>.
 # Любое изменение / удаление другого пользователя (чужие проекты на той же панели) клиент отклоняет.
 OWN_USERNAME_RE = re.compile(r"^batman_[0-9]+$")
+# префиксы проектов сети (batman_, fgn_ …) — из project.json, их задаёт provisioning. Только явный список:
+# широкая маска «что-то_число» приняла бы за своих ресейлеров (dnet_123) — их трогать нельзя.
+_own_prefixes: frozenset = frozenset({"batman_"})
+
+
+def set_own_prefixes(prefixes: Iterable[str]) -> None:
+    global _own_prefixes
+    ok = {str(p) for p in prefixes if re.fullmatch(r"[a-z][a-z0-9]{1,15}_", str(p or ""))}
+    _own_prefixes = frozenset(ok | {"batman_"})
+
+
+def own_prefixes() -> frozenset:
+    return _own_prefixes
+
+
+def _own_by_prefix(name: str) -> bool:
+    for p in _own_prefixes:
+        if name.startswith(p) and name[len(p):].isdigit():
+            return True
+    return False
 
 
 # старые пользователи перенесённых ботов (таблица rw_legacy_users): имя в панели осталось прежним.
@@ -63,7 +83,7 @@ def own_aliases() -> frozenset:
 
 def is_own_username(name: Any) -> bool:
     s = str(name or "")
-    return bool(OWN_USERNAME_RE.match(s)) or (bool(s) and s in own_aliases())
+    return bool(OWN_USERNAME_RE.match(s)) or _own_by_prefix(s) or (bool(s) and s in own_aliases())
 
 
 class RemnawaveError(Exception):

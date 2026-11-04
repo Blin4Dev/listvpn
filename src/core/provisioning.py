@@ -25,12 +25,54 @@ def is_configured() -> bool:
     return bool(_env("REMWAVE_API_KEY", "REMNAWAVE_TOKEN", "REMNAWAVE_API_TOKEN"))
 
 
-USERNAME_PREFIX = "batman_"
+USERNAME_PREFIX = "batman_"   # исторический префикс (BatmanVPN и все, кто создан до префиксов проектов)
+
+
+def _projects():
+    try:
+        from . import projects as p  # type: ignore
+    except ImportError:
+        import projects as p  # type: ignore
+    return p
+
+
+def project_prefix(pid: Optional[str]) -> str:
+    """префикс имён проекта в Remnawave: project.json → rw_username_prefix (у FGN — fgn_), иначе batman_."""
+    try:
+        raw = str((_projects().get(pid).cfg or {}).get("rw_username_prefix") or "").strip()
+    except Exception:  # noqa: BLE001
+        raw = ""
+    if raw and not raw.endswith("_"):
+        raw += "_"
+    return raw if raw and raw[:-1].isalnum() and raw[:-1].islower() else USERNAME_PREFIX
+
+
+def own_prefixes() -> set[str]:
+    out = {USERNAME_PREFIX}
+    try:
+        for p in _projects().all_projects():
+            out.add(project_prefix(p.id))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 def rw_username(user_id: int) -> str:
-    """имя пользователя в Remnawave: batman_<id пользователя в боте>."""
-    return f"{USERNAME_PREFIX}{int(user_id)}"
+    """имя пользователя в Remnawave для НОВЫХ: <префикс проекта пользователя><id> (fgn_123, batman_45)."""
+    try:
+        pid = _projects().of_user(int(user_id))
+    except Exception:  # noqa: BLE001
+        pid = None
+    return f"{project_prefix(pid)}{int(user_id)}"
+
+
+def own_names(user_id: int) -> list[str]:
+    """под какими именами может быть свой пользователь: префикс проекта и прежний batman_<id>."""
+    names = [rw_username(int(user_id))]
+    old = f"{USERNAME_PREFIX}{int(user_id)}"
+    if old not in names:
+        names.append(old)
+    return names
 
 
 EXTERNAL_SQUAD_KEY = "squad_external"
@@ -140,8 +182,9 @@ def _legacy_names() -> list[str]:
 def own_user_id(username: Any) -> Optional[int]:
     """id пользователя бота по имени в панели: batman_<id> или перенесённый (rw_legacy_users)."""
     name = str(username or "")
-    if name.startswith(USERNAME_PREFIX) and name[len(USERNAME_PREFIX):].isdigit():
-        return int(name[len(USERNAME_PREFIX):])
+    for p in own_prefixes():
+        if name.startswith(p) and name[len(p):].isdigit():
+            return int(name[len(p):])
     if not name:
         return None
     try:
@@ -160,6 +203,10 @@ def _legacy_map() -> dict[str, int]:
 
 if remnawave is not None:
     remnawave.set_own_alias_loader(_legacy_names)
+    try:
+        remnawave.set_own_prefixes(own_prefixes())
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _owned(u: dict[str, Any], *, user_id: Optional[int], telegram_id: Optional[int] = None,
@@ -170,7 +217,7 @@ def _owned(u: dict[str, Any], *, user_id: Optional[int], telegram_id: Optional[i
     if not isinstance(u, dict) or _num_id(u) is None or not user_id:
         return False
     name = str(u.get("username") or "")
-    if name == rw_username(int(user_id)):
+    if name in own_names(int(user_id)):
         return True
     leg = legacy_for_user(user_id)
     return bool(leg) and name == str(leg["username"]) and _num_id(u) == int(leg["rw_id"])
@@ -191,9 +238,11 @@ def lookup(client: Any, *, user_id: Optional[int] = None, telegram_id: Optional[
         rw = _by_username(client, str(leg["username"]))
         if rw and _owned(rw, user_id=user_id):
             return rw
-    rw = _by_username(client, rw_username(int(user_id)))
-    if rw and _owned(rw, user_id=user_id):
-        return rw
+    # fgn_<id> (префикс проекта), затем прежний batman_<id> — у кого ключ выдан до префиксов
+    for name in own_names(int(user_id)):
+        rw = _by_username(client, name)
+        if rw and _owned(rw, user_id=user_id):
+            return rw
     return None
 
 
@@ -213,6 +262,7 @@ def own_panel_users(client: Any, project: Optional[str] = None) -> list[dict[str
         return []
     out: list[dict[str, Any]] = []
     legacy = _legacy_map()
+    prefixes = own_prefixes()
     start, size = 0, 250
     while True:
         page = client.get_users(start=start, size=size)
@@ -221,10 +271,12 @@ def own_panel_users(client: Any, project: Optional[str] = None) -> list[dict[str
             break
         for u in users:
             name = str(u.get("username") or "")
-            if name.startswith(USERNAME_PREFIX) and name[len(USERNAME_PREFIX):].isdigit() \
-                    and int(name[len(USERNAME_PREFIX):]) in local and _num_id(u) is not None:
+            if _num_id(u) is None:
+                continue
+            oid = next((int(name[len(p):]) for p in prefixes if name.startswith(p) and name[len(p):].isdigit()), None)
+            if oid is not None and oid in local:
                 out.append(u)
-            elif name in legacy and legacy[name] in local and _num_id(u) is not None:
+            elif name in legacy and legacy[name] in local:
                 out.append(u)
         start += size
         total = (page.get("response") or page).get("total") if isinstance(page, dict) else None

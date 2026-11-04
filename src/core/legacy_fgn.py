@@ -658,7 +658,8 @@ def cmd_adopt(args: argparse.Namespace) -> int:
             issues.append(f"sub {r['sid']} user {uid}: у пользователя {name!r} нет числового id — пропущено")
             continue
         # имя в панели НЕ меняем: привязываем как есть (rw_legacy_users). Занято кем-то — пропуск.
-        if name.startswith(provisioning.USERNAME_PREFIX) and name != want:
+        if any(name.startswith(pf) and name[len(pf):].isdigit() for pf in provisioning.own_prefixes()) \
+                and name not in provisioning.own_names(uid):
             res["уже batman_ другого"] += 1
             issues.append(f"sub {r['sid']} user {uid}: в Remnawave уже {name} — пропущено")
             continue
@@ -671,7 +672,7 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         if args.dry_run:
             res["будет привязан"] += 1
             continue
-        if name != want:
+        if name not in provisioning.own_names(uid):
             db.execute("INSERT INTO rw_legacy_users (user_id, rw_id, username, short_uuid, source, created_at) "
                        "VALUES (?, ?, ?, ?, 'fgn', ?) ON CONFLICT(user_id) DO UPDATE SET rw_id = excluded.rw_id, "
                        "username = excluded.username, short_uuid = excluded.short_uuid",
@@ -938,12 +939,15 @@ def cmd_relink(args: argparse.Namespace) -> int:
                 res["новый batman_ уже удалён в Remnawave"] += 1
         elif live:
             # база перенесена заново, а batman_<id> от прошлого прогона в Remnawave остался (id те же)
-            try:
-                new_rw = remnawave.RemnawaveAPI._unwrap_user(client.get_user_by_username(provisioning.rw_username(uid))) or None
-            except remnawave.RemnawaveError:
-                new_rw = None
+            for nm in provisioning.own_names(uid):
+                try:
+                    new_rw = remnawave.RemnawaveAPI._unwrap_user(client.get_user_by_username(nm)) or None
+                except remnawave.RemnawaveError:
+                    new_rw = None
+                if new_rw:
+                    break
         if new_rw is not None:
-            if str(new_rw.get("username")) == provisioning.rw_username(uid):
+            if str(new_rw.get("username")) in provisioning.own_names(uid):
                 if _rw_used(client, new_rw):
                     res["новый batman_ уже подключали — оставлен"] += 1
                     issues.append(f"user {uid}: {new_rw['username']} уже используется — старый {pick['username']} не привязан")
