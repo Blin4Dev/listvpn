@@ -640,7 +640,9 @@ def clear_admin_plaintext() -> None:
     db.execute("UPDATE admin SET plaintext_once = NULL WHERE id = 1")
 
 
-PANEL_SESSION_TTL = 60 * 60  # 60 минут
+# скользящие 2 суток: при запросе к панели срок сдвигается, если прошла уже половина.
+# выкидывать раз в час/20 мин из-за абсолютного TTL не нужно. PANEL_SESSION_TTL в .env — секунды (1ч…14д).
+PANEL_SESSION_TTL = max(3600, min(_env_int("PANEL_SESSION_TTL", 2 * 86400), 14 * 86400))
 
 
 def _token_hash(token: str) -> str:
@@ -673,9 +675,17 @@ def get_panel_session(token: str) -> Optional[dict[str, Any]]:
     row = db.fetchone("SELECT * FROM panel_sessions WHERE token = ?", (th,))
     if not row:
         return None
-    if float(row["expires_at"]) < time.time():
+    now = time.time()
+    exp = float(row["expires_at"])
+    if exp < now:
         db.execute("DELETE FROM panel_sessions WHERE token = ?", (th,))
         return None
+    # активность продлевает сессию; не пишем в БД на каждый клик
+    if exp - now < PANEL_SESSION_TTL / 2:
+        new_exp = now + PANEL_SESSION_TTL
+        db.execute("UPDATE panel_sessions SET expires_at = ? WHERE token = ?", (new_exp, th))
+        row = dict(row)
+        row["expires_at"] = new_exp
     return row
 
 

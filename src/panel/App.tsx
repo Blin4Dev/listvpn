@@ -56,10 +56,12 @@ export default function App() {
     if (!token) { setIsAuthenticated(false); return; }
     fetch('/api/panel/auth/me', { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } })
       .then(async (res) => {
-        if (res.ok) { setMe(await res.json()); setIsAuthenticated(true); }
-        else { clearPanelToken(); setIsAuthenticated(false); }
+        if (res.ok) { setMe(await res.json()); setIsAuthenticated(true); return; }
+        // только истекшая/чужая сессия — на 5xx и сеть не выкидываем
+        if (res.status === 401) { clearPanelToken(); setIsAuthenticated(false); }
+        else window.setTimeout(loadMe, 3000);
       })
-      .catch(() => setIsAuthenticated(false));
+      .catch(() => { window.setTimeout(loadMe, 3000); });
   };
   useEffect(() => { loadMe(); }, []);
 
