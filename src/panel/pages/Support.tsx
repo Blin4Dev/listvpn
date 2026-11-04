@@ -38,7 +38,7 @@ type MeInfo = { name: string; role: 'owner' | 'curator' | 'operator'; full: bool
 type ChatData = { chat: ChatRow & { started_by_me: boolean; user_waiting?: boolean }; messages: SMsg[]; changes?: SMsg[]; limits: { max_file_mb: number; max_files: number; max_text: number }; me: MeInfo };
 type Pending = { key: string; file: File; preview?: string; progress: number; id?: string; error?: string; abort?: () => void };
 
-const POLL_MS = 4000;
+const POLL_MS = 8000;
 const STATUS_RU: Record<string, string> = {
   active: 'Подписка активна', trial: 'Пробный период', expired: 'Подписка закончилась', lapsed: 'Подписка удалена',
   never: 'Без подписки', banned: 'Заблокирован', blocked: 'Ключ заблокирован',
@@ -66,9 +66,10 @@ const shortWhen = (iso?: string | null) => {
 function uploadFile(chatId: number, file: File, onProgress: (p: number) => void) {
   const xhr = new XMLHttpRequest();
   const promise = new Promise<{ id: string }>((resolve, reject) => {
-    xhr.open('POST', `/api/panel/support/chats/${chatId}/upload?name=${encodeURIComponent(file.name || 'file')}`);
+    const fd = new FormData();
+    fd.append('file', file, file.name || 'file');
+    xhr.open('POST', `/api/panel/support/chats/${chatId}/upload`);
     xhr.setRequestHeader('Authorization', `Bearer ${getPanelToken()}`);
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       let b: any = null; try { b = JSON.parse(xhr.responseText); } catch { /* */ }
@@ -76,7 +77,7 @@ function uploadFile(chatId: number, file: File, onProgress: (p: number) => void)
     };
     xhr.onerror = () => reject(new Error('Нет соединения'));
     xhr.onabort = () => reject(new Error('Отменено'));
-    xhr.send(file);
+    xhr.send(fd);
   });
   return { promise, abort: () => xhr.abort() };
 }
@@ -411,13 +412,14 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
     const fileRef = useRef<HTMLInputElement>(null);
     const lastId = useRef(0);
     const stick = useRef(true);
+    const sendingRef = useRef(false);
 
     const loadChats = useCallback(() => {
       apiFetch(`/panel/support/chats?q=${encodeURIComponent(q)}&status=${status}&project=${encodeURIComponent(projFilter)}`)
         .then((x) => { setChats(Array.isArray(x?.chats) ? x.chats : []); setCounts(x?.counts || null); if (Array.isArray(x?.tabs)) setTabs(x.tabs); })
         .catch(() => setChats([]));
     }, [q, status, projFilter]);
-    useEffect(() => { loadChats(); const t = setInterval(loadChats, 8000); return () => clearInterval(t); }, [loadChats]);
+    useEffect(() => { loadChats(); const t = setInterval(loadChats, 15000); return () => clearInterval(t); }, [loadChats]);
     useEffect(() => {
       const load = () => apiFetch('/panel/team-chat/unread').then((r) => setTeamUnread(Number(r?.unread || 0))).catch(() => {});
       load(); const t = setInterval(load, 8000);
@@ -590,41 +592,58 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
       } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось удалить'), 'error'); }
     };
     const send = async () => {
-      if (sid == null) return;
+      if (sid == null || sendingRef.current) return;
       if (editing) {
         if (busy || !text.trim() && !editing.files.length) return;
+        sendingRef.current = true;
         setBusy('send');
         try {
           const m: SMsg = await apiFetch(`/panel/support/chats/${sid}/messages/${editing.id}/edit`, { method: 'POST', body: JSON.stringify({ text: text.trim() }) });
           replaceMsg(m); cancelEdit(); loadChats();
-        } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось изменить'), 'error'); } finally { setBusy(''); }
+        } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось изменить'), 'error'); } finally { sendingRef.current = false; setBusy(''); }
         return;
       }
       const asNote = noteMode || editing?.internal;
       if (asNote) {
         if (busy || !text.trim()) return;
+        const body = text.trim();
+        sendingRef.current = true;
         setBusy('send');
+        setText('');
         try {
           const m: SMsg = await apiFetch(`/panel/support/chats/${sid}/messages`, {
             method: 'POST',
-            body: JSON.stringify({ text: text.trim(), internal: true, reply_to: reply?.id || null }),
+            body: JSON.stringify({ text: body, internal: true, reply_to: reply?.id || null }),
           });
           stick.current = true;
           setData((cur) => (cur ? { ...cur, messages: [...cur.messages.filter((x) => x.id !== m.id), m].sort((a, b) => a.id - b.id) } : cur));
-          setText(''); setReply(null);
-        } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось отправить комментарий'), 'error'); } finally { setBusy(''); }
+          setReply(null);
+        } catch (e) {
+          setText((cur) => (cur ? cur : body));
+          onToast('Ошибка', parseApiErr(e, 'Не удалось отправить комментарий'), 'error');
+        } finally { sendingRef.current = false; setBusy(''); }
         return;
       }
       if (!canSend) return;
+      const body = text.trim();
+      const files = ready.map((p) => p.id);
+      const quote = reply?.id || null;
+      sendingRef.current = true;
       setBusy('send');
+      setText('');
+      setReply(null);
       try {
-        const m: SMsg = await apiFetch(`/panel/support/chats/${sid}/messages`, { method: 'POST', body: JSON.stringify({ text: text.trim(), files: ready.map((p) => p.id), reply_to: reply?.id || null }) });
+        const m: SMsg = await apiFetch(`/panel/support/chats/${sid}/messages`, { method: 'POST', body: JSON.stringify({ text: body, files, reply_to: quote }) });
         stick.current = true;
-        // lastId не двигаем: сообщение юзера перед нашим подтянет опрос
+        if (typeof m.id === 'number') lastId.current = Math.max(lastId.current, m.id);
         setData((cur) => (cur ? { ...cur, messages: [...cur.messages.filter((x) => x.id !== m.id), m].sort((a, b) => a.id - b.id) } : cur));
-        setText(''); setReply(null); pending.forEach((p) => p.preview && URL.revokeObjectURL(p.preview)); setPending((p) => p.filter((x) => x.error));
+        pending.forEach((p) => p.preview && URL.revokeObjectURL(p.preview));
+        setPending((p) => p.filter((x) => x.error));
         loadChats();
-      } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось отправить'), 'error'); } finally { setBusy(''); }
+      } catch (e) {
+        setText((cur) => (cur ? cur : body));
+        onToast('Ошибка', parseApiErr(e, 'Не удалось отправить'), 'error');
+      } finally { sendingRef.current = false; setBusy(''); }
     };
     const ackWait = async () => {
       if (sid == null || busy) return;
@@ -923,7 +942,11 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                         placeholder={asNote ? 'Комментарий для сотрудников…' : 'Сообщение пользователю…'}
                         title={asNote ? undefined : 'Скриншот можно вставить сюда: Ctrl+V / ⌘V'}
                         onChange={(e) => { setText(e.target.value.slice(0, limits.max_text)); e.target.style.height = 'auto'; e.target.style.height = `${Math.min(160, e.target.scrollHeight)}px`; }}
-                        onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } if (e.key === 'Escape' && editing) cancelEdit(); }}
+                        onKeyDown={(e) => {
+                          if (e.nativeEvent.isComposing || e.key === 'Process') return;
+                          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
+                          if (e.key === 'Escape' && editing) cancelEdit();
+                        }}
                         onPaste={(e) => {
                           const files = clipFiles(e.clipboardData?.items, true);
                           if (!files.length) return; // обычный текст — вставляется как всегда
@@ -949,7 +972,7 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                     )}
                   </div>
                   {(asNote || canWriteUser || editing) && (
-                    <button className="btn solid" style={{ height: 42, flex: 'none' }}
+                    <button type="button" className="btn solid" style={{ height: 42, flex: 'none' }}
                       title={editing ? 'Сохранить' : 'Отправить'}
                       disabled={editing ? !!busy || (!text.trim() && !editing.files.length) : asNote ? !canNoteSend : !canSend}
                       onClick={() => void send()}>

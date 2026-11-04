@@ -44,9 +44,10 @@ export const AutofineCard: React.FC<{ onToast: (t: string, m: string, ty: ToastT
         </div>
       </div>
       <div className="sub" style={{ fontSize: 13, lineHeight: 1.5, marginTop: 6 }}>
-        Клиент ждёт ответа в обращении {cfg.minutes} мин рабочего времени — сотруднику, который ведёт обращение, автоматически
-        выписывается штраф {cfg.hours} раб. ч (оплата дня ÷ часы смены). Считаются только минуты по графику; заметки — не ответ;
-        кнопка «Ожидание» в чате снимает текущий штраф без сообщения пользователю. Один штраф на одно ожидание.
+        Клиент ждёт ответа {cfg.minutes} мин рабочего времени — штраф {cfg.hours} раб. ч
+        (оплата дня ÷ часы смены). Не за каждый тикет: одна пачка у сотрудника — один штраф,
+        и только если он сам столько не отвечал. Кнопка «Ожидание» выводит обращение из расчёта без сообщения клиенту.
+        Общая очередь (если включено) — тоже один штраф операторам на смене за очередь целиком.
         Обращения у вас и переданные вам не штрафуются. Отменить автоштраф можно в карточке сотрудника.
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4" style={{ marginTop: 14 }}>
@@ -67,7 +68,7 @@ export const AutofineCard: React.FC<{ onToast: (t: string, m: string, ty: ToastT
         </label>
         <label className="flex items-center justify-between gap-3">
           <span><span style={{ fontWeight: 600, fontSize: 14 }}>Штрафовать за общую очередь</span><br />
-            <span className="faint" style={{ fontSize: 12 }}>Если обращение никто не взял — штраф всем операторам на смене</span></span>
+            <span className="faint" style={{ fontSize: 12 }}>Если никто не взял — один штраф операторам на смене за очередь целиком</span></span>
           <Toggle on={cfg.pool} onChange={() => void save({ pool: !cfg.pool })} />
         </label>
       </div>

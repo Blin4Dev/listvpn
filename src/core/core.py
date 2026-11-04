@@ -8958,8 +8958,38 @@ def _for_user(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [support.public_message(m) for m in msgs if not m.get("internal")]
 
 
-async def _stream_upload(request: Request, chat_id: int, uploader: str, uploader_id: str, name: str) -> dict[str, Any]:
-    """тело = байты файла; обрыв сверх лимита."""
+def _form_init_data(form: Any) -> Optional[str]:
+    raw = form.get("init_data") if form is not None else None
+    if raw is None:
+        return None
+    if hasattr(raw, "read"):
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+async def _stream_upload(request: Request, chat_id: int, uploader: str, uploader_id: str, name: str,
+                         form: Any = None) -> dict[str, Any]:
+    """сырые байты или multipart (Telegram WebView часто ломает octet-stream + кастомные заголовки)."""
+    ct = (request.headers.get("content-type") or "").lower()
+    if form is not None or "multipart/form-data" in ct:
+        form = form if form is not None else await request.form()
+        item = form.get("file")
+        if item is None:
+            raise HTTPException(400, detail={"message": "Файл не получен"})
+        fname = (getattr(item, "filename", None) or name or "file")[:200]
+        data = await item.read() if hasattr(item, "read") else bytes(item)
+        if len(data) > support.MAX_FILE_BYTES:
+            raise HTTPException(413, detail={"message": f"Файл больше {support.MAX_FILE_BYTES // support.MB} МБ"})
+        up = _sup(support.Upload, chat_id, uploader, uploader_id, fname)
+        try:
+            up.write(data)
+        except support.SupportError as e:
+            raise HTTPException(e.status, detail={"message": e.message})
+        except BaseException:
+            up.abort()
+            raise
+        return _sup(up.finish)
     try:
         declared = int(request.headers.get("content-length") or 0)
     except ValueError:
@@ -9239,14 +9269,26 @@ def app_support_get(after: int = Query(0, ge=0), user: dict = Depends(_app_user_
 
 
 @app.post("/api/app/support/upload")
-async def app_support_upload(request: Request, name: str = Query("file", max_length=200),
-                             user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+async def app_support_upload(request: Request, name: str = Query("file", max_length=200)) -> dict[str, Any]:
+    # WebView Telegram часто срезает X-Telegram-Init-Data на бинарном XHR — берём init_data из формы
+    form = None
+    extra_init = None
+    ct = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in ct:
+        form = await request.form()
+        extra_init = _form_init_data(form)
+    user = _app_user_from_init(
+        request,
+        x_telegram_init_data=extra_init or request.headers.get("x-telegram-init-data"),
+        authorization=request.headers.get("authorization"),
+        x_app_session=request.headers.get("x-app-session"),
+    )
     u = _support_user(user)
     allowed, retry = ratelimit.rate_limit(f"supup:{u['id']}", 30, 3600)
     if not allowed:
         raise HTTPException(429, detail={"message": f"Слишком много файлов. Повторите через {max(1, retry // 60)} мин."})
     chat = support.chat_for_user(int(u["id"]))
-    return await _stream_upload(request, int(chat["id"]), "user", str(u["id"]), name)
+    return await _stream_upload(request, int(chat["id"]), "user", str(u["id"]), name, form=form)
 
 
 @app.post("/api/app/support/messages")
@@ -9374,8 +9416,90 @@ def _work_group(t: Optional[dict[str, Any]], p: dict[str, Any]) -> str:
     return "others"
 
 
-def _panel_chat_row(c: dict[str, Any], p: dict[str, Any], t: Any = False) -> dict[str, Any]:
-    u = get_user(int(c["user_id"])) or {"id": c["user_id"]}
+_TICKET_JOIN = (
+    "t.id AS _tid, t.number AS _tnumber, t.status AS _tstatus, t.opened_at AS _topened, "
+    "t.assigned_admin AS _tadmin, t.assigned_name AS _tname, t.closed_at AS _tclosed, t.closed_by AS _tclosedby, "
+    "t.close_prompt_id AS _tcp, t.prompt_at AS _tprompt, t.escalated AS _tesc, t.escalate_note AS _tnote, "
+    "t.queue_at AS _tqueue"
+)
+
+
+def _ticket_from_join(c: dict[str, Any]) -> Optional[dict[str, Any]]:
+    if not c.get("_tid"):
+        return None
+    if (c.get("_tstatus") or "open") == "open":
+        return {"id": c["_tid"], "number": c["_tnumber"], "status": "open", "opened_at": c["_topened"],
+                "assigned_admin": c.get("_tadmin"), "assigned_name": c.get("_tname"),
+                "close_prompt": bool(c.get("_tcp")), "prompt_at": c.get("_tprompt") if c.get("_tcp") else None,
+                "escalated": bool(c.get("_tesc")), "escalate_note": c.get("_tnote"),
+                "queue_at": c.get("_tqueue") or c["_topened"]}
+    return {"id": c["_tid"], "number": c["_tnumber"], "status": "closed", "opened_at": c["_topened"],
+            "closed_at": c.get("_tclosed"), "closed_by": c.get("_tclosedby"),
+            "assigned_admin": c.get("_tadmin"), "assigned_name": c.get("_tname")}
+
+
+def _users_by_ids(ids: list[int]) -> dict[int, dict[str, Any]]:
+    uids = list({int(i) for i in ids if i})
+    if not uids:
+        return {}
+    marks = ",".join("?" * len(uids))
+    return {int(u["id"]): u for u in db.fetchall(f"SELECT * FROM users WHERE id IN ({marks})", tuple(uids))}
+
+
+def _sub_status_map(users: dict[int, dict[str, Any]]) -> dict[int, Optional[str]]:
+    """статус подписки пачкой — список чатов иначе делает по 3–4 SELECT на клиента и вешает панель."""
+    out: dict[int, Optional[str]] = {}
+    live: list[int] = []
+    for uid, u in users.items():
+        if u.get("is_banned"):
+            out[uid] = "banned"
+        elif u.get("created_at"):
+            live.append(uid)
+        else:
+            out[uid] = None
+    if not live:
+        return out
+    marks = ",".join("?" * len(live))
+    rows = db.fetchall(
+        f"SELECT user_id, status, type, expires_at, COALESCE(no_renew, 0) AS no_renew FROM subscriptions "
+        f"WHERE user_id IN ({marks})",
+        tuple(live),
+    )
+    now = utcnow()
+    banned: set[int] = set()
+    active: dict[int, dict[str, Any]] = {}
+    expired: set[int] = set()
+    any_sub: set[int] = set()
+    for r in rows:
+        uid = int(r["user_id"])
+        any_sub.add(uid)
+        if r["status"] == "Banned":
+            banned.add(uid)
+        if r["status"] == "Active":
+            exp = parse_iso(r.get("expires_at"))
+            if not exp or exp > now:
+                prev = active.get(uid)
+                if prev is None or (prev.get("expires_at") or "") < (r.get("expires_at") or "\xff"):
+                    active[uid] = r
+        if r["status"] in ("Active", "Expired") and not r["no_renew"]:
+            expired.add(uid)
+    for uid in live:
+        if uid in banned:
+            out[uid] = "blocked"
+        elif uid in active:
+            out[uid] = "trial" if active[uid].get("type") == "trial" else "active"
+        elif uid in expired:
+            out[uid] = "expired"
+        elif uid in any_sub:
+            out[uid] = "lapsed"
+        else:
+            out[uid] = "never"
+    return out
+
+
+def _panel_chat_row(c: dict[str, Any], p: dict[str, Any], t: Any = False,
+                    user: Optional[dict[str, Any]] = None, status: Any = False) -> dict[str, Any]:
+    u = user if user is not None else (get_user(int(c["user_id"])) or {"id": c["user_id"]})
     if t is False:
         t = support.ticket_info(c)
     tt = dict(t) if t else None
@@ -9389,11 +9513,12 @@ def _panel_chat_row(c: dict[str, Any], p: dict[str, Any], t: Any = False) -> dic
             and _can_manage_assigned(p, assigned)
         )
         tt.pop("assigned_admin", None)
+    st = status if status is not False else (subscription_status_for_user(u) if u.get("created_at") else None)
     return {
         "id": c["id"], "user_id": c["user_id"], "user_label": _user_label(u),
         "project": projects.of(c), "project_name": projects.get(projects.of(c)).name,
         "user_name": " ".join(filter(None, [u.get("first_name"), u.get("last_name")])) or None,
-        "is_banned": bool(u.get("is_banned")), "status": subscription_status_for_user(u) if u.get("created_at") else None,
+        "is_banned": bool(u.get("is_banned")), "status": st,
         "last_message_at": c.get("last_message_at"), "last_preview": c.get("last_preview"), "last_sender": c.get("last_sender"),
         "unread": int(c.get("unread_admin") or 0),
         "ticket": tt, "tab": _tab_of(c, t, p), "group": _work_group(t, p) if _tab_of(c, t, p) == "work" else "",
@@ -9413,16 +9538,20 @@ def panel_support_chats(q: str = Query("", max_length=100), status: str = Query(
     if status not in tabs:
         status = "open"
     pf = projects.normalize(project)
-    pw, pp = (" AND project_id = ?", (pf,)) if pf else ("", ())
-    # открытые все; закрытые последние 1000
-    rows = db.fetchall("SELECT * FROM support_chats WHERE open_ticket_id IS NOT NULL" + pw, pp)
+    pw, pp = (" AND c.project_id = ?", (pf,)) if pf else ("", ())
+    rows = db.fetchall(
+        f"SELECT c.*, {_TICKET_JOIN} FROM support_chats c "
+        "JOIN support_tickets t ON t.id = c.open_ticket_id WHERE c.open_ticket_id IS NOT NULL" + pw, pp)
     if "archive" in tabs:
-        rows += db.fetchall("SELECT * FROM support_chats WHERE open_ticket_id IS NULL AND last_message_at IS NOT NULL"
-                            + pw + " ORDER BY last_message_at DESC LIMIT 1000", pp)
+        rows += db.fetchall(
+            f"SELECT c.*, {_TICKET_JOIN} FROM support_chats c LEFT JOIN support_tickets t ON t.id = ("
+            "SELECT MAX(id) FROM support_tickets WHERE chat_id = c.id) "
+            "WHERE c.open_ticket_id IS NULL AND c.last_message_at IS NOT NULL" + pw
+            + " ORDER BY c.last_message_at DESC LIMIT 1000", pp)
     items = []
     counts = {k: 0 for k in tabs}
     for c in rows:
-        t = support.ticket_info(c)
+        t = _ticket_from_join(c)
         if not t:
             continue
         if not _chat_visible(c, p, t):
@@ -9435,8 +9564,9 @@ def panel_support_chats(q: str = Query("", max_length=100), status: str = Query(
             items.append((c, t))
     q = q.strip().lower().lstrip("@#")
     if q:
+        umap = _users_by_ids([int(c["user_id"]) for c, _ in items])
         def hit(c: dict[str, Any]) -> bool:
-            u = get_user(int(c["user_id"])) or {}
+            u = umap.get(int(c["user_id"])) or {}
             hay = " ".join(str(x or "") for x in (u.get("id"), u.get("telegram_id"), u.get("username"), u.get("email"),
                                                    u.get("first_name"), u.get("last_name"), c.get("last_preview"))).lower()
             return q in hay
@@ -9448,7 +9578,12 @@ def panel_support_chats(q: str = Query("", max_length=100), status: str = Query(
         _wg = {"escalated": 0, "mine": 1, "others": 2}
         items.sort(key=lambda ct: (_wg.get(_work_group(ct[1], p), 9) if status == "work" else 0,
                                    1 if (ct[1] or {}).get("close_prompt") else 0, (ct[1] or {}).get("queue_at") or ""))
-    return {"chats": [_panel_chat_row(c, p, t) for c, t in items[:500]], "counts": counts, "tabs": list(tabs)}
+    shown = items[:500]
+    umap = _users_by_ids([int(c["user_id"]) for c, _ in shown])
+    smap = _sub_status_map(umap)
+    return {"chats": [_panel_chat_row(c, p, t, user=umap.get(int(c["user_id"])) or {"id": c["user_id"]},
+                                      status=smap.get(int(c["user_id"]))) for c, t in shown],
+            "counts": counts, "tabs": list(tabs)}
 
 
 class TeamMessageBody(BaseModel):
@@ -9797,10 +9932,25 @@ def panel_support_send(chat_id: int, body: SupportMessageBody, p: dict = Depends
         support.mark_read(int(chat["id"]), "admin")
     user = get_user(int(chat["user_id"]))
     if user:
-        tg_id = _notify_support_user(user, msg, support.get_chat(int(chat["id"])))
-        if tg_id:
-            db.execute("UPDATE support_messages SET tg_msg_id = ? WHERE id = ?", (int(tg_id), int(msg["id"])))
+        _panel_notify_user_async(user, msg, int(chat["id"]))
     return _staff_view([msg], p)[0]
+
+
+def _panel_notify_user_async(user: dict[str, Any], msg: dict[str, Any], chat_id: int) -> None:
+    """ответ в панели не ждёт Telegram: иначе sendMessage до 30 с и сайт «висит»."""
+    pid = projects.current_id()
+    uid = int(user["id"])
+    mid = int(msg["id"])
+    payload = dict(msg)
+
+    def _run() -> None:
+        with projects.use(pid):
+            u = get_user(uid) or user
+            tg_id = _notify_support_user(u, payload, support.get_chat(int(chat_id)))
+            if tg_id:
+                db.execute("UPDATE support_messages SET tg_msg_id = ? WHERE id = ?", (int(tg_id), mid))
+
+    threading.Thread(target=_run, name="support-panel-notify", daemon=True).start()
 
 
 def _staff_view(msgs: list[dict[str, Any]], p: dict[str, Any]) -> list[dict[str, Any]]:

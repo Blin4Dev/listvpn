@@ -215,6 +215,7 @@ export default function Support() {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const lastId = useRef(0);
   const stick = useRef(true);
+  const sendingRef = useRef(false);
 
   const merge = useCallback((incoming: SupportMessage[]) => {
     if (!incoming.length) return;
@@ -332,8 +333,9 @@ export default function Support() {
   const canSend = !sending && !uploading && (text.trim().length > 0 || ready.length > 0);
 
   const send = async () => {
-    if (!canSend) return;
+    if (!canSend || sendingRef.current) return;
     const body = text.trim();
+    sendingRef.current = true;
     setSending(true);
     setError("");
     // поле очищаем сразу; при ошибке текст вернётся
@@ -356,6 +358,7 @@ export default function Support() {
       setText((cur) => (cur ? cur : body));
       setError((e as Error).message || "Не удалось отправить");
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
@@ -485,7 +488,10 @@ export default function Support() {
           <MSIcon name="attach_file" style={{ fontSize: 24, transform: "rotate(45deg)", fontVariationSettings: "'wght' 300" }} />
         </button>
         <textarea ref={taRef} value={text} onChange={onText} rows={1} placeholder="Сообщение..."
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && window.matchMedia("(pointer: fine)").matches) { e.preventDefault(); void send(); } }}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.key === "Process") return;
+            if (e.key === "Enter" && !e.shiftKey && window.matchMedia("(pointer: fine)").matches) { e.preventDefault(); void send(); }
+          }}
           style={{
             ...btnReset, flex: 1, minWidth: 0, resize: "none", minHeight: 48, maxHeight: 140, padding: "13px 16px", borderRadius: 24,
             border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 16, lineHeight: "20px", fontFamily: N.font,

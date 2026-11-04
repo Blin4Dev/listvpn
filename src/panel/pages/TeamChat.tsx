@@ -90,6 +90,7 @@ export const TeamChat: React.FC<{ onBack: () => void; onToast: (t: string, m: st
   const taRef = useRef<HTMLTextAreaElement>(null);
   const lastId = useRef(0);
   const stick = useRef(true);
+  const sendingRef = useRef(false);
 
   const markRead = (id: number) => { if (id > 0) apiFetch('/panel/team-chat/read', { method: 'POST', body: JSON.stringify({ last_id: id }) }).then(pingUnread).catch(() => {}); };
 
@@ -178,22 +179,28 @@ export const TeamChat: React.FC<{ onBack: () => void; onToast: (t: string, m: st
 
   const send = async () => {
     const t = text.trim();
-    if (!t || busy) return;
+    if (!t || busy || sendingRef.current) return;
+    sendingRef.current = true;
     setBusy(true);
     if (editing) {
       try {
         const m: TMsg = await apiFetch(`/panel/team-chat/messages/${editing.id}/edit`, { method: 'POST', body: JSON.stringify({ text: t }) });
         setMsgs((cur) => (cur || []).map((x) => (x.id === m.id ? m : x)));
         setEditing(null); setText('');
-      } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось изменить'), 'error'); } finally { setBusy(false); }
+      } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось изменить'), 'error'); } finally { sendingRef.current = false; setBusy(false); }
       return;
     }
+    const quote = reply?.id || null;
+    setText(''); setReply(null); setCaret(0);
     try {
-      const m: TMsg = await apiFetch('/panel/team-chat/messages', { method: 'POST', body: JSON.stringify({ text: t, reply_to: reply?.id || null }) });
+      const m: TMsg = await apiFetch('/panel/team-chat/messages', { method: 'POST', body: JSON.stringify({ text: t, reply_to: quote }) });
       stick.current = true;
+      if (typeof m.id === 'number') lastId.current = Math.max(lastId.current, m.id);
       setMsgs((cur) => [...(cur || []).filter((x) => x.id !== m.id), m].sort((a, b) => a.id - b.id));
-      setText(''); setReply(null); setCaret(0);
-    } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось отправить'), 'error'); } finally { setBusy(false); }
+    } catch (e) {
+      setText((cur) => (cur ? cur : t));
+      onToast('Ошибка', parseApiErr(e, 'Не удалось отправить'), 'error');
+    } finally { sendingRef.current = false; setBusy(false); }
   };
 
   const remove = async (m: TMsg) => {
@@ -215,6 +222,7 @@ export const TeamChat: React.FC<{ onBack: () => void; onToast: (t: string, m: st
       }
       if (e.key === 'Escape') { e.preventDefault(); setCaret(mentionAt ? mentionAt.start : caret); setText((t) => (mentionAt ? t.slice(0, mentionAt.start) + t.slice(caret) : t)); return; }
     }
+    if (e.nativeEvent.isComposing || e.key === 'Process') return;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
     if (e.key === 'Escape' && editing) { setEditing(null); setText(''); }
   };
@@ -332,7 +340,7 @@ export const TeamChat: React.FC<{ onBack: () => void; onToast: (t: string, m: st
             onKeyUp={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
             onKeyDown={onKeyDown}
             style={{ flex: 1, resize: 'none', minHeight: 42, maxHeight: 160, lineHeight: 1.4, paddingTop: 10, paddingBottom: 10 }} />
-          <button className="btn solid" style={{ height: 42, flex: 'none' }} disabled={!text.trim() || busy} onClick={() => void send()}>
+          <button type="button" className="btn solid" style={{ height: 42, flex: 'none' }} disabled={!text.trim() || busy} onClick={() => void send()}>
             {busy ? <Spinner size={15} /> : editing ? <Save size={15} /> : <Send size={15} />}
           </button>
         </div>

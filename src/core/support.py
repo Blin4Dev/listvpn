@@ -50,7 +50,7 @@ KEEP_AFTER_CLOSE_DAYS = 1  # переписка исчезает через 24 �
 FILL_TRIGGER = 0.90  # хранилище заполнено на 90% - чистим старые вложения…
 FILL_TARGET = 0.80  # …до 80%
 USER_MAX_PENDING = 10
-MAX_PARALLEL_UPLOADS = 2
+MAX_PARALLEL_UPLOADS = 4
 MIN_FREE_BYTES = int(_env_num("SUPPORT_MIN_FREE_GB", 2) * 1024 * MB)  # запас на диске для временных файлов
 CLOSE_PROMPT_TEXT = "Подскажите, могу ли я ещё чем-то помочь?"
 CLOSE_PROMPT_TTL = 60 * 60  # нет ответа на вопрос 60 минут - обращение закрывается само
@@ -169,7 +169,7 @@ def _new_ticket(chat: dict[str, Any], opened_by: str, tx) -> dict[str, Any]:
     cur = tx.execute("INSERT INTO support_tickets (chat_id, number, status, opened_by, opened_at, queue_at) "
                      "VALUES (?, ?, 'open', ?, ?, ?)", (int(chat["id"]), num, opened_by, now, now))
     tid = cur.lastrowid
-    tx.execute("UPDATE support_chats SET open_ticket_id = ?, assigned_admin = NULL, assigned_name = NULL WHERE id = ?",
+    tx.execute("UPDATE support_chats SET open_ticket_id = ?, assigned_admin = NULL, assigned_name = NULL, started_at = NULL WHERE id = ?",
                (tid, int(chat["id"])))
     tx.execute("INSERT INTO support_messages (chat_id, ticket_id, sender, author, text, panel_text, created_at) "
                "VALUES (?, ?, 'system', NULL, ?, '', ?)", (int(chat["id"]), tid, f"Обращение №{num} открыто", now))
@@ -292,7 +292,7 @@ def to_pool(chat: dict[str, Any], actor: str, name: str, only_own: bool, guard: 
         if not t.get("assigned_admin") and not t.get("escalated"):
             raise SupportError("Обращение и так в пуле", 409)
         tx.execute("UPDATE support_tickets SET assigned_admin = NULL, assigned_name = NULL, escalated = 0 WHERE id = ?", (t["id"],))
-        tx.execute("UPDATE support_chats SET assigned_admin = NULL, assigned_name = NULL WHERE id = ?", (int(chat["id"]),))
+        tx.execute("UPDATE support_chats SET assigned_admin = NULL, assigned_name = NULL, started_at = NULL WHERE id = ?", (int(chat["id"]),))
         msg = "Обращение возвращено в пул" + (f": {note}" if note else "")
         _internal_tx(tx, int(chat["id"]), t["id"], name, msg, now,
                      f"{name} отправил в пул" + (f": {note}" if note else ""))
@@ -618,7 +618,8 @@ def waiting_since(ticket_id: int, conn: Any = None) -> Optional[dict[str, Any]]:
     sql_last = (
         "SELECT COALESCE(MAX(id), 0) AS id FROM support_messages "
         "WHERE ticket_id = ? AND deleted_at IS NULL AND ("
-        "(sender = 'admin' AND COALESCE(internal, 0) = 0) OR kind = 'wait')"
+        "(sender = 'admin' AND COALESCE(internal, 0) = 0) OR kind = 'wait' "
+        "OR (sender = 'system' AND COALESCE(kind, '') = 'wait'))"
     )
     sql_user = (
         "SELECT id, created_at FROM support_messages WHERE ticket_id = ? AND sender = 'user' AND id > ? "

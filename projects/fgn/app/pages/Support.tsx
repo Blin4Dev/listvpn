@@ -186,6 +186,7 @@ export default function Support() {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const lastId = useRef(0);
   const stick = useRef(true);
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     void fetchConfig().then((c) => {
@@ -325,8 +326,9 @@ export default function Support() {
   const canSend = !sending && !uploading && (text.trim().length > 0 || ready.length > 0);
 
   const send = async () => {
-    if (!canSend) return;
+    if (!canSend || sendingRef.current) return;
     const body = text.trim();
+    sendingRef.current = true;
     setSending(true);
     setError("");
     // поле очищаем сразу — можно печатать следующее, пока уходит это; при ошибке текст вернётся
@@ -347,6 +349,7 @@ export default function Support() {
       setText((cur) => (cur ? cur : body));
       setError((e as Error).message || "Не удалось отправить");
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
@@ -444,7 +447,7 @@ export default function Support() {
                         <div style={{ width: `${Math.round(p.progress * 100)}%`, height: "100%", borderRadius: 2, background: C.green }} />
                       </div>
                     ) : null}
-                    {p.error ? <div style={{ position: "absolute", inset: "auto 0 0 0", fontSize: 9.5, background: "rgba(0,0,0,0.75)", color: C.danger, padding: "2px 4px" }}>{p.error}</div> : null}
+                    {p.error ? <div title={p.error} style={{ position: "absolute", inset: "auto 0 0 0", fontSize: 9.5, background: "rgba(0,0,0,0.75)", color: C.danger, padding: "2px 4px" }}>Не загрузилось</div> : null}
                     <button type="button" onClick={() => removePending(p.key)} aria-label="Убрать"
                       style={{ ...btnReset, position: "absolute", top: 3, right: 3, width: 22, height: 22, borderRadius: 11, border: "none", padding: 0,
                         background: "rgba(0,0,0,0.65)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
@@ -478,7 +481,10 @@ export default function Support() {
                 rows={1}
                 placeholder="Сообщение"
                 className="fgn-support-ta"
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && window.matchMedia("(pointer: fine)").matches) { e.preventDefault(); void send(); } }}
+                onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing || e.key === "Process") return;
+                  if (e.key === "Enter" && !e.shiftKey && window.matchMedia("(pointer: fine)").matches) { e.preventDefault(); void send(); }
+                }}
                 style={{
                   ...btnReset, flex: 1, minWidth: 0, resize: "none", height: 53, maxHeight: 150, margin: 0,
                   padding: "15px 16px", borderRadius: 20, border: "1px solid rgba(255, 255, 255, 0.1)", background: C.cardBg,

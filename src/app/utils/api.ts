@@ -768,11 +768,18 @@ export function markSupportRead(): Promise<unknown> {
 export function uploadSupportFile(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
   const xhr = new XMLHttpRequest();
   const promise = new Promise<Omit<SupportFile, "url">>((resolve, reject) => {
-    // абсолютный адрес, как в appFetch: в Telegram WebView относительный /api иногда уходит не на наш домен
-    xhr.open("POST", `${window.location.origin}/api/app/support/upload?name=${encodeURIComponent(file.name || "file")}`);
+    // FormData без Content-Type: Telegram WebView режет octet-stream + X-Telegram-Init-Data
+    const fd = new FormData();
+    fd.append("file", file, file.name || "file");
+    try {
+      const initData = (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData?.trim();
+      if (initData) fd.append("init_data", initData);
+    } catch { /* ignore */ }
+    xhr.open("POST", `${window.location.origin}/api/app/support/upload`);
     const h = initDataHeader();
-    Object.keys(h).forEach((k) => xhr.setRequestHeader(k, h[k]));
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    Object.keys(h).forEach((k) => {
+      try { xhr.setRequestHeader(k, h[k]); } catch { /* webview */ }
+    });
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       let body: any = null;
@@ -783,13 +790,13 @@ export function uploadSupportFile(file: File, onProgress: (p: number) => void): 
         const msg = (detail && typeof detail === "object" ? detail.message : typeof detail === "string" ? detail : "") || body?.error;
         // ответ не от нашего API (прокси/защита сайта) — показать, кто отказал, чтобы было видно сразу
         const who = !body ? (/cloudflare/i.test(xhr.responseText || "") || xhr.getResponseHeader("cf-ray") ? " (Cloudflare)"
-          : xhr.getResponseHeader("server") ? ` (${xhr.getResponseHeader("server")})` : " (не от сервера FGN)") : "";
-        reject(new Error(msg || (xhr.status === 413 ? "Файл слишком большой" : `Ошибка ${xhr.status}${who}`)));
+          : xhr.getResponseHeader("server") ? ` (${xhr.getResponseHeader("server")})` : "") : "";
+        reject(new Error(msg || (xhr.status === 413 ? "Файл слишком большой" : xhr.status === 401 ? "Сессия истекла, откройте чат заново" : `Не удалось загрузить${who}`)));
       }
     };
     xhr.onerror = () => reject(new Error("Нет соединения"));
     xhr.onabort = () => reject(new Error("Отменено"));
-    xhr.send(file);
+    xhr.send(fd);
   });
   return { promise, abort: () => xhr.abort() };
 }
