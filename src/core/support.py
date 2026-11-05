@@ -299,6 +299,53 @@ def to_pool(chat: dict[str, Any], actor: str, name: str, only_own: bool, guard: 
     return {"ok": True}
 
 
+def release_ended_shifts() -> int:
+    """открытые тикеты операторов, у которых смена уже кончилась, — обратно в пул."""
+    try:
+        from . import staff as staffmod
+        from . import staffpay
+    except ImportError:  # pragma: no cover
+        import staff as staffmod  # type: ignore
+        import staffpay  # type: ignore
+    n = 0
+    now = _iso()
+    for st in db.fetchall("SELECT * FROM panel_staff WHERE is_active = 1"):
+        if staffmod.role_of(st) != "operator":
+            continue
+        try:
+            if not staffpay.shift_ended(int(st["id"])):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        actor = f"staff:{int(st['id'])}"
+        name = (st.get("name") or st.get("username") or "Оператор").strip() or "Оператор"
+        tickets = db.fetchall(
+            "SELECT id, chat_id FROM support_tickets WHERE status = 'open' AND assigned_admin = ? "
+            "AND COALESCE(escalated, 0) = 0 LIMIT 500",
+            (actor,),
+        )
+        if not tickets:
+            continue
+        with db.transaction() as tx:
+            for t in tickets:
+                cur = tx.execute(
+                    "UPDATE support_tickets SET assigned_admin = NULL, assigned_name = NULL "
+                    "WHERE id = ? AND status = 'open' AND assigned_admin = ?",
+                    (t["id"], actor),
+                )
+                if cur.rowcount != 1:
+                    continue
+                tx.execute(
+                    "UPDATE support_chats SET assigned_admin = NULL, assigned_name = NULL, started_at = NULL WHERE id = ?",
+                    (t["chat_id"],),
+                )
+                _internal_tx(tx, int(t["chat_id"]), int(t["id"]), name,
+                             "Обращение возвращено в пул: смена закончилась", now,
+                             f"{name}: смена закончилась — в пул")
+                n += 1
+    return n
+
+
 def escalate(chat: dict[str, Any], actor: str, name: str, note: str) -> dict[str, Any]:
     note = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", str(note or "")).strip()[:500]
     now = _iso()

@@ -6,6 +6,7 @@ type AnyTg = {
   platform?: string;
   version?: string;
   initData?: string;
+  initDataUnsafe?: { user?: TgUser; start_param?: string };
   isFullscreen?: boolean;
   safeAreaInset?: TgInset;
   contentSafeAreaInset?: TgInset;
@@ -20,10 +21,50 @@ type AnyTg = {
   setHeaderColor?: (color: string) => void;
 };
 
-// true внутри telegram, false в браузере
+declare global {
+  interface Window {
+    __BLIN_TG_MINIAPP__?: boolean;
+    TelegramWebviewProxy?: unknown;
+    TelegramWebview?: unknown;
+  }
+}
+
+// true внутри Mini App (не сайт в обычном браузере и не in-app browser без initData)
 export function isTelegramClient(): boolean {
-  const tg = webApp();
-  return Boolean(tg?.initData && tg.initData.length > 0);
+  try {
+    if (window.__BLIN_TG_MINIAPP__) return true;
+    const tg = webApp();
+    if (tg?.initData && tg.initData.length > 0) return true;
+    if (tg?.initDataUnsafe?.user?.id) return true;
+    const blob = `${window.location.hash}\n${window.location.search}`;
+    if (/tgWebAppData=/.test(blob) || /tgWebAppPlatform=/.test(blob) || /tgWebAppStartParam=/.test(blob)) return true;
+    if (window.TelegramWebviewProxy || window.TelegramWebview) return true;
+    const platform = String(tg?.platform || "").toLowerCase();
+    if (platform && platform !== "unknown" && platform !== "web" && platform !== "weba" && platform !== "webk") return true;
+  } catch {
+    /* noop */
+  }
+  return false;
+}
+
+// UA Telegram: in-app browser или Mini App. Без initData это часто «открылся сайт вместо мини-аппа».
+export function isTelegramUserAgent(): boolean {
+  try {
+    const ua = navigator.userAgent || "";
+    return /Telegram/i.test(ua) && !/TelegramBot/i.test(ua);
+  } catch {
+    return false;
+  }
+}
+
+export function telegramStartParam(): string {
+  try {
+    const fromTg = String(webApp()?.initDataUnsafe?.start_param || "").trim();
+    if (fromTg) return fromTg;
+    return new URL(window.location.href).searchParams.get("tgWebAppStartParam")?.trim() || "";
+  } catch {
+    return "";
+  }
 }
 
 // верхний отступ только в tg fullscreen (иначе шапка tg уже закрывает)

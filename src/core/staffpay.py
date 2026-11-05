@@ -314,6 +314,35 @@ def shift_now(staff_id: int) -> dict[str, Any]:
     return {"working_today": False, "on_shift": False, "intervals": []}
 
 
+def shift_ended(staff_id: int, now: Optional[datetime] = None) -> bool:
+    """сегодняшняя смена уже полностью закончилась: не перерыв и не «смены не было»."""
+    n = (now or datetime.now(timezone.utc)).astimezone(MSK)
+    m = n.hour * 60 + n.minute
+    today = n.date()
+    sid = int(staff_id)
+    r = db.fetchone("SELECT * FROM staff_days WHERE staff_id = ? AND day = ?", (sid, today.isoformat()))
+    prev = db.fetchone("SELECT * FROM staff_days WHERE staff_id = ? AND day = ?",
+                       (sid, (today - timedelta(days=1)).isoformat()))
+    today_iv = _row(r)["intervals"] if r else []
+    prev_iv = _row(prev)["intervals"] if prev else []
+    if _on_shift_minutes(today_iv, m) or _on_spill_minutes(prev_iv, m):
+        return False
+    for a, b in today_iv:
+        try:
+            ma, mb = _minutes(a), _minutes(b)
+        except (ValueError, IndexError, AttributeError):
+            continue
+        wrap = mb < ma
+        if wrap:
+            if m < ma:
+                return False
+        elif m < ma:
+            return False
+    had_today = bool(today_iv)
+    had_overnight = _spill_end(prev_iv) is not None
+    return had_today or had_overnight
+
+
 def _shift_end_offset(intervals: list[list[str]]) -> int:
     """минуты от полуночи дня начала до полного конца смены (может быть > 1440)."""
     a, b = intervals[-1]

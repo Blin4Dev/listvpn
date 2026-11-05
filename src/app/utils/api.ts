@@ -1,5 +1,6 @@
 // клиент api мини-приложения
 import { PROJECT_ID } from "./brand";
+import { isTelegramClient } from "./telegram";
 
 export type Plan = { devices: number; price_rub: number; price_stars: number };
 export type PlansResponse = {
@@ -576,12 +577,7 @@ export async function fetchConfig(): Promise<Record<string, unknown>> {
 }
 
 export function isTelegram(): boolean {
-  try {
-    const wa = (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp;
-    return Boolean(wa?.initData && wa.initData.length > 0);
-  } catch {
-    return false;
-  }
+  return isTelegramClient();
 }
 
 export type Membership = {

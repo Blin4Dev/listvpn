@@ -25,6 +25,7 @@ import MyGifts from "./pages/MyGifts";
 import Family from "./pages/Family";
 import { checkAuth, fetchMe, fetchMembership, fetchSetupStatus, type Membership } from "./utils/api";
 import { homeIntroPending, subscribeHomeIntroReady } from "./utils/homeIntro";
+import { telegramStartParam } from "./utils/telegram";
 import { trackRoute } from "./utils/navigation";
 import DayGiftPrompt from "./components/DayGiftSheet";
 import PaymentResume from "./components/PaymentResume";
@@ -59,6 +60,22 @@ function AnimatedLayout() {
   useLayoutEffect(() => {
     skipEnterAnimation.current = false;
   }, []);
+
+  useEffect(() => {
+    const sp = telegramStartParam();
+    if (!sp) return;
+    if (sp === "support" && !location.pathname.startsWith("/support")) navigate("/support", { replace: true });
+    else if (sp === "gifts" && !location.pathname.startsWith("/gifts")) navigate("/gifts", { replace: true });
+    else if (sp === "migrate") {
+      try {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get("migrate") !== "1") {
+          url.searchParams.set("migrate", "1");
+          window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+        }
+      } catch { /* ignore */ }
+    }
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     let mounted = true;

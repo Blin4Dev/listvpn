@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import PaymentSheet, { type PendingPayment } from "./PaymentSheet";
 import { useNavigate } from "react-router-dom";
 import { fetchUnseenPayment, markPaymentSeen } from "../utils/api";
+import { telegramStartParam } from "../utils/telegram";
 
 // возврат после оплаты в ЮKassa / tg startapp pay_… читаем при старте до редиректов
 type ReturnInfo = { id: string; failed: boolean };
@@ -13,8 +14,7 @@ function readReturnId(): ReturnInfo | null {
       const id = url.searchParams.get("payment_id") || "";
       if (/^[a-f0-9]{16,64}$/.test(id)) return { id, failed: url.searchParams.get("result") === "fail" };
     }
-    const tg = (window as unknown as { Telegram?: { WebApp?: { initDataUnsafe?: { start_param?: string } } } }).Telegram?.WebApp;
-    const sp = tg?.initDataUnsafe?.start_param || url.searchParams.get("tgWebAppStartParam") || "";
+    const sp = telegramStartParam() || url.searchParams.get("tgWebAppStartParam") || "";
     const m = /^pay(fail)?_([a-f0-9]{16,64})$/.exec(sp);
     return m ? { id: m[2], failed: !!m[1] } : null;
   } catch {

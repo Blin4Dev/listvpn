@@ -6,6 +6,7 @@ import { C, FGN_DIM, FgnIcon, fgnButton } from "./fgn";
 import { useTgBack } from "./noir";
 import SetupSheet from "./SetupSheet";
 import { claimMigration, fetchMigration, notifySubscriptionChanged, type MigrationPending } from "../utils/api";
+import { telegramStartParam } from "../utils/telegram";
 import { formatDateRu } from "../utils/date";
 
 const TEXT = "#F4F4F5";

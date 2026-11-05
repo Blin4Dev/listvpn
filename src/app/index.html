@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>%LISTVPN_BRAND%</title>
+    <!-- Mini App vs сайт: не ждать telegram.org (в РФ часто не грузится) — hash/WebView уже есть -->
+    <script>
+      (function () {
+        try {
+          var h = String(location.hash || "");
+          var s = String(location.search || "");
+          var tg = window.Telegram && window.Telegram.WebApp;
+          var mini = !!(tg && tg.initData) || /tgWebAppData=/.test(h + s) || /tgWebAppPlatform=/.test(h + s)
+            || !!window.TelegramWebviewProxy || !!window.TelegramWebview;
+          if (mini) window.__BLIN_TG_MINIAPP__ = true;
+        } catch (e) {}
+      })();
+    </script>
     <!-- Официальный SDK Telegram Mini Apps: initData, expand(), requestFullscreen() -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />

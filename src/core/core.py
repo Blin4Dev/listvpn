@@ -13,7 +13,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
 
 try:
     from . import database as db
@@ -6837,6 +6837,9 @@ def app_config(request: Request) -> dict[str, Any]:
         "telegramOauthBotId": bot_id,
         "telegramOauthUrl": "",
         "botUsername": P().bot_username,
+        "miniappLink": (P().miniapp_link or "").strip(),
+        "siteDomain": (P().env("SITE_DOMAIN") or (urlparse(P().site_url).hostname or "")).lower(),
+        "miniappDomain": (P().env("MINIAPP_DOMAIN") or (urlparse(P().miniapp_url).hostname or "")).lower(),
         "prices": prices,
         "extraDevicePrice": meta["extra_device_price"],
         "basePrice": meta["base_price"],
@@ -9090,6 +9093,12 @@ def _support_autoclose_loop() -> None:
             support.auto_close_expired()
         except Exception as exc:  # noqa: BLE001
             print(f"[support] autoclose failed: {exc}", flush=True)
+        try:
+            released = support.release_ended_shifts()
+            if released:
+                print(f"[support] после смены в пул: {released}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[support] shift-release failed: {exc}", flush=True)
         try:
             r = autofine.run(_autofine_notify)
             if r["fines"]:
