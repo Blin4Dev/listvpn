@@ -4,6 +4,7 @@ import { ArrowLeft, CheckCircle, Clock, Users, Trash2, CornerUpLeft, Download, E
 import { DotsMenu, Modal, Spinner } from '../components/ui';
 import { RichText } from '../components/RichText';
 import { TEAM_CHAT_ID, TeamChat } from './TeamChat';
+import { useMe } from '../lib/access';
 import { apiFetch, getPanelToken, mergeInfo, parseApiErr } from '../lib/api';
 import { fmtDateTime, fmtMoney } from '../lib/format';
 import type { ToastType } from '../lib/types';
@@ -359,6 +360,8 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
     // 0 = чат сотрудников (у обращений id >= 1)
     const team = chatId === TEAM_CHAT_ID;
     const sid = team ? null : chatId;
+    const me = useMe();
+    const offShift = me?.role === 'operator' && !!me.shift?.has_schedule && !me.shift.on_shift;
     // высота = видимая область (на телефоне над клавиатурой); скроллятся только список и переписка
     const gridRef = useRef<HTMLDivElement>(null);
     const [vh, setVh] = useState(0);
@@ -487,6 +490,10 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
 
     const start = async (takeover = false) => {
       if (sid == null) return;
+      if (offShift) {
+        onToast('Смена закончилась', 'Брать обращения можно только в рабочее время', 'error');
+        return;
+      }
       setBusy('start');
       try {
         await apiFetch(`/panel/support/chats/${sid}/start`, { method: 'POST', body: JSON.stringify({ takeover }) });
@@ -839,7 +846,7 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
             // писать пользователю — только после «Начать» (и у админа тоже)
             const canWriteUser = !!chat.started_by_me;
             const taken = chat.ticket?.status === 'open' && !!chat.ticket.assigned_name && !chat.ticket.assigned_to_me;
-            const canStart = !chat.started_by_me && chat.ticket?.status === 'open' && (!taken || !!chat.ticket?.can_takeover);
+              const canStart = !offShift && !chat.started_by_me && chat.ticket?.status === 'open' && (!taken || !!chat.ticket?.can_takeover);
             const canReopen = !!data.me.full && chat.ticket?.status === 'closed';
             const asNote = !!editing?.internal || noteMode;
             const canNoteSend = !busy && text.trim().length > 0;
@@ -862,7 +869,8 @@ export const SupportPage: React.FC<{ chatId: number | null; setChatId: (id: numb
                 </button>
               ) : (
                 <div className="sub" style={{ fontSize: 13, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 10, textAlign: 'center' }}>
-                  {taken ? `Ведёт ${chat.ticket!.assigned_name}` : chat.ticket?.status !== 'open' ? 'Обращение закрыто' : 'Нет открытого обращения'}
+                  {offShift ? 'Смена закончилась — обращения брать нельзя'
+                    : taken ? `Ведёт ${chat.ticket!.assigned_name}` : chat.ticket?.status !== 'open' ? 'Обращение закрыто' : 'Нет открытого обращения'}
                 </div>
               )
             ) : null;

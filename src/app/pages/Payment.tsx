@@ -223,7 +223,7 @@ export default function Payment() {
   const extraDevices = isDevicesFlow
     ? Math.max(0, parseInt(searchParams.get("count") || "0", 10))
     : isSubFlow && totalDevices != null
-      ? Math.max(0, totalDevices - planDevices)
+      ? totalDevices - planDevices
       : 0;
 
   const [promoTick, setPromoTick] = useState(0);

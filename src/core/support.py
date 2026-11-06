@@ -54,7 +54,7 @@ MAX_PARALLEL_UPLOADS = 4
 MIN_FREE_BYTES = int(_env_num("SUPPORT_MIN_FREE_GB", 2) * 1024 * MB)  # запас на диске для временных файлов
 CLOSE_PROMPT_TEXT = "Подскажите, могу ли я ещё чем-то помочь?"
 CLOSE_PROMPT_TTL = 60 * 60  # нет ответа на вопрос 60 минут - обращение закрывается само
-IDLE_USER_TTL = 5 * 3600  # пользователь не отвечает агенту 5 часов — тикет закрывается
+IDLE_USER_TTL = 12 * 3600  # пользователь не отвечает агенту 12 часов — тикет закрывается
 
 
 class SupportError(Exception):
@@ -336,21 +336,24 @@ def release_ended_shifts() -> int:
         )
         if not tickets:
             continue
-        with db.transaction() as tx:
-            for t in tickets:
-                tx.execute(
-                    "UPDATE support_tickets SET assigned_admin = NULL, assigned_name = NULL, escalated = 0 "
-                    "WHERE id = ? AND status = 'open' AND assigned_admin = ?",
-                    (t["id"], actor),
-                )
-                tx.execute(
-                    "UPDATE support_chats SET assigned_admin = NULL, assigned_name = NULL, started_at = NULL WHERE id = ?",
-                    (t["chat_id"],),
-                )
-                _internal_tx(tx, int(t["chat_id"]), int(t["id"]), name,
-                             "Обращение возвращено в пул: смена закончилась", now,
-                             f"{name}: смена закончилась — в пул")
-                n += 1
+        for t in tickets:
+            try:
+                with db.transaction() as tx:
+                    tx.execute(
+                        "UPDATE support_tickets SET assigned_admin = NULL, assigned_name = NULL, escalated = 0 "
+                        "WHERE id = ? AND status = 'open' AND assigned_admin = ?",
+                        (t["id"], actor),
+                    )
+                    tx.execute(
+                        "UPDATE support_chats SET assigned_admin = NULL, assigned_name = NULL, started_at = NULL WHERE id = ?",
+                        (t["chat_id"],),
+                    )
+                    _internal_tx(tx, int(t["chat_id"]), int(t["id"]), name,
+                                 "Обращение возвращено в пул: смена закончилась", now,
+                                 f"{name}: смена закончилась — в пул")
+                    n += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"[support] shift-release ticket {t.get('id')}: {exc}", flush=True)
     return n
 
 
@@ -414,7 +417,7 @@ def auto_close_expired() -> int:
 
 
 def auto_close_idle_users() -> int:
-    """пользователь не отвечает на последнее сообщение агента 5 часов — закрыть тикет."""
+    """пользователь не отвечает на последнее сообщение агента 12 часов — закрыть тикет."""
     cutoff = _iso(_now() - timedelta(seconds=IDLE_USER_TTL))
     rows = db.fetchall(
         "SELECT t.id, t.chat_id, t.number, t.assigned_name FROM support_tickets t "
@@ -442,7 +445,7 @@ def auto_close_idle_users() -> int:
                 continue
             if t.get("close_prompt_id"):
                 _drop_prompt_tx(tx, t)
-            _close_tx(tx, int(t["chat_id"]), t, "auto", now, "Закрыто: пользователь не отвечает 5 ч")
+            _close_tx(tx, int(t["chat_id"]), t, "auto", now, "Закрыто: пользователь не отвечает 12 ч")
             n += 1
     return n
 

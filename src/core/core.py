@@ -1677,6 +1677,8 @@ def app_source(request: Optional[Request]) -> str:
 
 
 MAX_PLAN_DEVICES = 20
+PLAN_MIN_DEVICES = 3  # при новой покупке меньше нельзя
+PLAN_DEFAULT_DEVICES = 5  # стартовое число устройств на экране тарифа
 
 
 def _float_setting(key: str, default: float) -> float:
@@ -1706,6 +1708,8 @@ def get_plans_meta() -> dict[str, Any]:
         "trial_hwid_enabled": db.get_setting("trial_hwid_enabled", "1") in ("1", "true", "True", "yes"),
         "trial_hwid_max": fulfillment._int_setting("trial_hwid_max", 2, 1, 10),
         "tariff_devices": fulfillment.tariff_devices(),
+        "min_devices": PLAN_MIN_DEVICES,
+        "default_devices": PLAN_DEFAULT_DEVICES,
         "device_prices": {str(k): v for k, v in sorted(fulfillment.device_price_overrides().items())},
         "extra_device_stars": fulfillment.extra_device_stars(),
         "device_stars": {str(k): v for k, v in sorted(fulfillment.device_stars_overrides().items())},
@@ -2157,6 +2161,18 @@ def _staff_principal(st: dict[str, Any]) -> dict[str, Any]:
 def is_full(p: dict[str, Any]) -> bool:
     """полный доступ к поддержке: владелец и кураторы."""
     return p.get("role") in ("owner", "curator")
+
+
+def _require_operator_shift(p: dict[str, Any]) -> None:
+    """оператор берёт тикеты только в смену."""
+    if p.get("role") != "operator" or not p.get("staff_id"):
+        return
+    sid = int(p["staff_id"])
+    if not staffpay.has_schedule(sid):
+        return
+    if staffpay.on_shift(sid):
+        return
+    raise HTTPException(403, detail={"message": "Смена закончилась — брать обращения можно только в рабочее время"})
 
 
 def _staff_has_ticket_with(actor: str, user_id: int) -> bool:
@@ -7946,13 +7962,16 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     if purpose not in ("subscription", "extend", "devices", "traffic_reset", "gift"):
         raise HTTPException(400, detail={"message": "Неизвестный тип платежа"})
     plan_devices = fulfillment.tariff_devices() if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
-    extra = min(50, max(0, int(body.extra_devices or 0)))
+    extra_raw = int(body.extra_devices or 0)
+    extra = extra_raw if purpose in ("subscription", "extend") else min(50, max(0, extra_raw))
+    extra = max(-MAX_PLAN_DEVICES, min(50, extra))
     extra_price = float(meta["extra_device_price"])
     # разбивка для экрана оплаты (подписка/продление): тариф + доп. устройства
     base_part: Optional[float] = None
     devices_part = 0.0
     keep = 0
-    min_devices = plan_devices
+    min_devices = PLAN_MIN_DEVICES
+    default_devices = PLAN_DEFAULT_DEVICES
 
     if purpose == "traffic_reset":
         tr_price = float(db.get_setting("traffic_reset_price", "0") or 0)
@@ -8008,20 +8027,28 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         base = fulfillment.period_price(months)
         base_stars = fulfillment.period_stars(months)
         total_devices = plan_devices + extra
-        if total_devices > MAX_PLAN_DEVICES:
-            raise HTTPException(400, detail={"message": f"Устройств: не больше {MAX_PLAN_DEVICES}"})
         keep = fulfillment.retained_devices(
             int(user["id"]), purpose, body.subscription_id, total_devices)
-        # устройства, которые уже есть сверх тарифа, при продлении остаются (и оплачиваются) — меньше нельзя
-        min_devices = plan_devices + fulfillment.retained_devices(
-            int(user["id"]), purpose, body.subscription_id, plan_devices)
-        # цена устройства зависит от его номера (4-е, 5-е…) — см. «Цены» в панели
-        devices_price = fulfillment.devices_cost(plan_devices, extra + keep) * months
+        # новая покупка: от 3 устройств, по умолчанию 5; продление — не ниже уже купленных
+        min_devices = max(PLAN_MIN_DEVICES, plan_devices + fulfillment.retained_devices(
+            int(user["id"]), purpose, body.subscription_id, plan_devices))
+        default_devices = max(min_devices, PLAN_DEFAULT_DEVICES)
+        if total_devices < min_devices:
+            raise HTTPException(400, detail={"message": f"Устройств: не меньше {min_devices}"})
+        if total_devices > MAX_PLAN_DEVICES:
+            raise HTTPException(400, detail={"message": f"Устройств: не больше {MAX_PLAN_DEVICES}"})
+        add = extra + keep
+        if add >= 0:
+            devices_price = fulfillment.devices_cost(plan_devices, add) * months
+            stars_dev = fulfillment.devices_cost_stars(plan_devices, add) * months
+        else:
+            # выбрали меньше, чем в тарифе: минус цена «невзятых» слотов
+            devices_price = -fulfillment.devices_cost(total_devices, -add) * months
+            stars_dev = -fulfillment.devices_cost_stars(total_devices, -add) * months
         base_part = float(base)
         devices_part = float(devices_price)
         price = float(base) + devices_price
-        # доп. устройства в звёздах — своя цена за каждый номер (панель → Цены)
-        stars = int(base_stars) + fulfillment.devices_cost_stars(plan_devices, extra + keep) * months
+        stars = int(base_stars) + int(stars_dev)
 
     # скидка: промо/акция; reset трафика без скидки
     full_price = round(float(price), 2)
@@ -8040,6 +8067,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             "compensation_id": compensation_id,
             "plan_devices": plan_devices,
             "devices_total": plan_devices + extra + keep, "min_devices": min_devices,
+            "default_devices": default_devices,
             "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
             "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
             "base_price": base_part, "devices_price": round(devices_part, 2)}
@@ -8090,6 +8118,7 @@ def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_fr
         "plan_devices": q.get("plan_devices"),
         "devices_total": q.get("devices_total"),
         "min_devices": q.get("min_devices"),
+        "default_devices": q.get("default_devices"),
         "max_devices": q.get("max_devices"),
         "extra_device_price": q.get("extra_device_price"),
         "device_prices": q.get("device_prices"),
@@ -8739,6 +8768,8 @@ def app_plans() -> dict[str, Any]:
         "base_price": meta["base_price"],
         # тарифы по периодам
         "devices": fulfillment.tariff_devices(),
+        "min_devices": PLAN_MIN_DEVICES,
+        "default_devices": PLAN_DEFAULT_DEVICES,
         # цена n-го устройства в ₽/мес (индекс n-1) — для выбора устройств без входа (сайт)
         "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
         "max_devices": MAX_PLAN_DEVICES,
@@ -9751,6 +9782,7 @@ class SupportStartBody(BaseModel):
 def panel_support_start(chat_id: int, body: Optional[SupportStartBody] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
     chat = _panel_chat(chat_id, p)
     full = is_full(p)
+    _require_operator_shift(p)
     if not full and not support.open_ticket(chat):
         raise HTTPException(403, detail={"message": "Обращение закрыто. Оно откроется, когда пользователь напишет снова"})
     takeover = bool(body and body.takeover) and full

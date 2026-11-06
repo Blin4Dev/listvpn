@@ -71,11 +71,11 @@ export default function Tariffs() {
   const returnTo = params.get("return") || "";
 
   const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
-  const [devices, setDevices] = useState(2);
+  const [devices, setDevices] = useState(5);
   const [discount, setDiscount] = useState(0);
   // устройства: сколько всего (минимум — тариф или то, что уже есть в подписке), цена доп. устройства в месяц
   const [devTotal, setDevTotal] = useState<number | null>(null);
-  const [devMin, setDevMin] = useState(2);
+  const [devMin, setDevMin] = useState(3);
   const [devMax, setDevMax] = useState(20);
   const [devPrice, setDevPrice] = useState(0);
   const [devTable, setDevTable] = useState<number[]>([]); // цена n-го устройства в месяц
@@ -96,12 +96,12 @@ export default function Tariffs() {
         const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
           subscription_id: null, use_referral_balance: false });
         if (!q) throw new Error("no quote");
-        const min = Number(q.min_devices || q.plan_devices || 2);
+        const min = Number(q.min_devices || 3);
         setDevMin(min);
         setDevMax(Number(q.max_devices || 20));
         setDevPrice(Number(q.extra_device_price || 0));
         if (Array.isArray(q.device_prices)) setDevTable(q.device_prices.map(Number));
-        setDevTotal(min);
+        setDevTotal(Math.max(min, Number(q.default_devices || 5)));
       } catch { /* без выбора устройств */ }
     })();
   }, []);
@@ -118,9 +118,13 @@ export default function Tariffs() {
   const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
   // ₽/мес за устройства сверх тарифа: у каждого номера своя цена (панель → Цены)
   let devMonthly = 0;
-  for (let n = devices + 1; n <= devNow; n++) devMonthly += priceOf(n);
+  if (devNow >= devices) {
+    for (let n = devices + 1; n <= devNow; n++) devMonthly += priceOf(n);
+  } else {
+    for (let n = devNow + 1; n <= devices; n++) devMonthly -= priceOf(n);
+  }
   const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
-  const showDevices = devTotal != null && (devPrice > 0 || devTable.some((x) => x > 0));
+  const showDevices = devTotal != null;
   const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
 
   return (

@@ -57,6 +57,25 @@ export function isTelegramUserAgent(): boolean {
   }
 }
 
+// оболочка Telegram без initData (in-app browser / iOS WebView без слова Telegram в UA)
+export function isTelegramShell(): boolean {
+  if (isTelegramClient()) return true;
+  if (isTelegramUserAgent()) return true;
+  try {
+    const w = window as Window & { TelegramGameProxy?: unknown };
+    if (w.TelegramWebviewProxy || w.TelegramWebview || w.TelegramGameProxy) return true;
+  } catch {
+    /* noop */
+  }
+  try {
+    const ref = String(document.referrer || "");
+    if (/t\.me|telegram\.(org|me)/i.test(ref)) return true;
+  } catch {
+    /* noop */
+  }
+  return false;
+}
+
 export function telegramStartParam(): string {
   try {
     const fromTg = String(webApp()?.initDataUnsafe?.start_param || "").trim();

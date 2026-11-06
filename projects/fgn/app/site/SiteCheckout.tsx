@@ -133,7 +133,7 @@ function Checkout({ nav }: { nav: CabNav }) {
   }, [purpose]);
 
   const plan = planDevices ?? 1;
-  const extra = purpose === "devices" ? count : purpose === "subscription" && devParam > 0 ? Math.max(0, devParam - plan) : 0;
+  const extra = purpose === "devices" ? count : purpose === "subscription" && devParam > 0 ? devParam - plan : 0;
   const req = { plan_devices: plan, months, method, extra_devices: extra, purpose, subscription_id: purpose === "devices" ? subId : null };
 
   useEffect(() => {

@@ -293,6 +293,19 @@ def _on_spill_minutes(intervals: list[list[str]], m: int) -> bool:
     return end is not None and m < end
 
 
+def has_schedule(staff_id: int) -> bool:
+    """есть ли у сотрудника график (шаблон или хотя бы один день в календаре)."""
+    sid = int(staff_id)
+    if _default_intervals(sid):
+        return True
+    return db.fetchone("SELECT 1 AS x FROM staff_days WHERE staff_id = ? LIMIT 1", (sid,)) is not None
+
+
+def on_shift(staff_id: int, now: Optional[datetime] = None) -> bool:
+    n = (now or datetime.now(timezone.utc)).astimezone(MSK)
+    return any(s <= n < e for s, e in _shift_windows(int(staff_id), n))
+
+
 def shift_now(staff_id: int) -> dict[str, Any]:
     """сегодня: рабочий ли день и идёт ли смена (включая хвост вчерашней через полночь)."""
     n = now_msk()
@@ -305,13 +318,16 @@ def shift_now(staff_id: int) -> dict[str, Any]:
     today_iv = _row(r)["intervals"] if r else []
     prev_iv = _row(prev)["intervals"] if prev else []
     spill = _spill_display(prev_iv) if _on_spill_minutes(prev_iv, m) else []
-    on = _on_shift_minutes(today_iv, m) or bool(spill)
+    on = on_shift(sid, n)
+    sched = has_schedule(sid)
     if r:
         intervals = (spill + today_iv) if spill else today_iv
-        return {"working_today": True, "on_shift": on, "intervals": intervals, "pay": _row(r)["pay"]}
+        return {"working_today": True, "on_shift": on, "has_schedule": sched, "intervals": intervals, "pay": _row(r)["pay"]}
     if spill:
-        return {"working_today": True, "on_shift": True, "intervals": spill}
-    return {"working_today": False, "on_shift": False, "intervals": []}
+        return {"working_today": True, "on_shift": on, "has_schedule": sched, "intervals": spill}
+    if on:
+        return {"working_today": True, "on_shift": True, "has_schedule": sched, "intervals": today_iv}
+    return {"working_today": False, "on_shift": False, "has_schedule": sched, "intervals": []}
 
 
 def _parse_intervals(raw: Any) -> list[list[str]]:
@@ -363,21 +379,18 @@ def _shift_windows(staff_id: int, around: datetime) -> list[tuple[datetime, date
 
 
 def shift_ended(staff_id: int, now: Optional[datetime] = None) -> bool:
-    """смена закончилась: не на смене, уже отработал кусок, и до следующей части больше 2 часов (не обед)."""
-    n = (now or datetime.now(timezone.utc)).astimezone(MSK)
-    windows = _shift_windows(int(staff_id), n)
-    if not windows:
+    """не на смене: тикеты в пул. Обед (до следующей части ≤ 2 ч) не считается концом смены."""
+    sid = int(staff_id)
+    if not has_schedule(sid):
         return False
+    n = (now or datetime.now(timezone.utc)).astimezone(MSK)
+    windows = _shift_windows(sid, n)
     if any(s <= n < e for s, e in windows):
         return False
-    past_ends = [e for s, e in windows if s <= n]
-    if not past_ends:
-        return False
     future_starts = [s for s, e in windows if s > n]
-    if not future_starts:
-        return True
-    gap_min = (min(future_starts) - n).total_seconds() / 60
-    return gap_min > 120
+    if future_starts and (min(future_starts) - n).total_seconds() / 60 <= 120:
+        return False
+    return True
 
 
 def _shift_end_offset(intervals: list[list[str]]) -> int:

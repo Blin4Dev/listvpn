@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import Site from "./site/Site";
 import "./global.css";
-import { initTelegramViewport, initStageScale, isTelegramClient, isTelegramUserAgent } from "./utils/telegram";
+import { initTelegramViewport, initStageScale, isTelegramClient, isTelegramShell } from "./utils/telegram";
 import { captureWebRef } from "./utils/api";
 import { hasFeature, PROJECT_ID } from "./utils/brand";
 
@@ -40,22 +40,27 @@ function startappFromLocation(): string {
 }
 
 function bounceToMiniApp(botUsername: string, miniappLink: string): boolean {
+  if (isTelegramClient()) return false;
   try {
-    if (sessionStorage.getItem("blin_tg_bounce") === "1") return false;
-    sessionStorage.setItem("blin_tg_bounce", "1");
+    const n = Number(sessionStorage.getItem("blin_tg_bounce") || "0");
+    if (n >= 2) return false;
+    sessionStorage.setItem("blin_tg_bounce", String(n + 1));
   } catch {
     /* noop */
   }
   const start = startappFromLocation();
   const link = (miniappLink || "").trim().replace(/\/$/, "");
+  const bot = botUsername.replace(/^@/, "");
   let href = "";
   if (/^https:\/\/t\.me\/[A-Za-z0-9_]{4,32}\/[A-Za-z0-9_]{3,64}$/.test(link)) {
     href = start ? `${link}?startapp=${encodeURIComponent(start)}` : `${link}?startapp`;
-  } else {
-    const bot = botUsername.replace(/^@/, "");
-    if (!bot) return false;
-    href = start ? `https://t.me/${bot}?startapp=${encodeURIComponent(start)}` : `https://t.me/${bot}?startapp`;
+  } else if (bot) {
+    // t.me/bot?startapp открывает бота, не Mini App — нужен путь приложения
+    href = start
+      ? `https://t.me/${bot}/app?startapp=${encodeURIComponent(start)}`
+      : `https://t.me/${bot}/app`;
   }
+  if (!href) return false;
   window.location.replace(href);
   return true;
 }
@@ -63,6 +68,7 @@ function bounceToMiniApp(botUsername: string, miniappLink: string): boolean {
 async function resolveSite(): Promise<boolean> {
   if (!hasFeature("site")) return false;
   if (isTelegramClient()) return false;
+  const inTg = isTelegramShell();
   const host = (window.location.hostname || "").replace(/^www\./i, "").toLowerCase();
   let bot = "";
   let mlink = "";
@@ -80,17 +86,13 @@ async function resolveSite(): Promise<boolean> {
   } catch {
     /* noop */
   }
-  if (miniDom && siteDom && miniDom !== siteDom) {
-    if (host === miniDom) {
-      if (isTelegramUserAgent() && bounceToMiniApp(bot, mlink)) return false;
-      return false;
-    }
-    if (host === siteDom && !isTelegramUserAgent()) return true;
-  }
-  if (isTelegramUserAgent()) {
-    if (bounceToMiniApp(bot, mlink)) return false;
+  if (inTg) {
+    bounceToMiniApp(bot, mlink);
     return false;
   }
+  if (miniDom && host === miniDom) return false;
+  if (siteDom && host === siteDom) return true;
+  if (miniDom && siteDom && miniDom !== siteDom) return host === siteDom;
   return true;
 }
 

@@ -12,7 +12,7 @@ const FALLBACK: TariffPeriod[] = [
   { months: 12, days: 365, price: 2200 },
 ];
 
-type PlansInfo = { devices?: number; periods?: TariffPeriod[]; device_prices?: number[]; extra_device_price?: number; max_devices?: number };
+type PlansInfo = { devices?: number; min_devices?: number; default_devices?: number; periods?: TariffPeriod[]; device_prices?: number[]; extra_device_price?: number; max_devices?: number };
 
 function plural(n: number, one: string, few: string, many: string) {
   const a = n % 10, b = n % 100;
@@ -90,7 +90,7 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
   const [table, setTable] = useState<number[]>([]); // цена n-го устройства ₽/мес
   const [devPrice, setDevPrice] = useState(0);
   const [devMax, setDevMax] = useState(20);
-  const [devMin, setDevMin] = useState(2);
+  const [devMin, setDevMin] = useState(3);
   const [dev, setDev] = useState<number | null>(null);
   const [discount, setDiscount] = useState(0);
   const [sel, setSel] = useState(12);
@@ -102,13 +102,14 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
         const ps = Array.isArray(d?.periods) && d.periods.length ? d.periods : FALLBACK;
         setPeriods(ps);
         setSel((s) => (ps.some((p) => p.months === s) ? s : ps[ps.length - 1].months));
-        const inc = Number(d?.devices || 2);
+        const inc = Number(d?.devices || 5);
         setIncluded(inc);
-        setDevMin(inc);
+        const min = Number(d?.min_devices || 3);
+        setDevMin(min);
         if (Array.isArray(d?.device_prices)) setTable(d.device_prices.map(Number));
         setDevPrice(Number(d?.extra_device_price || 0));
         if (d?.max_devices) setDevMax(Number(d.max_devices));
-        setDev((v) => v ?? inc);
+        setDev((v) => v ?? Math.max(min, Number(d?.default_devices || 5)));
       } catch { /* запасные цены */ }
     })();
   }, []);
@@ -125,18 +126,23 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
       const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
         subscription_id: null, use_referral_balance: false });
       if (!q) return;
-      const min = Number(q.min_devices || q.plan_devices || 2);
+      const min = Number(q.min_devices || 3);
       setDevMin(min);
       if (q.max_devices) setDevMax(Number(q.max_devices));
       if (Array.isArray(q.device_prices)) setTable(q.device_prices.map(Number));
-      setDev((v) => Math.max(v ?? min, min));
+      const def = Math.max(min, Number(q.default_devices || 5));
+      setDev((v) => Math.max(min, v ?? def));
     })();
   }, [authed]);
 
   const devNow = dev ?? included;
   const priceOf = (n: number) => (table.length ? Number(table[Math.min(n, table.length) - 1] ?? devPrice) : devPrice);
   let devMonthly = 0;
-  for (let n = included + 1; n <= devNow; n++) devMonthly += priceOf(n);
+  if (devNow >= included) {
+    for (let n = included + 1; n <= devNow; n++) devMonthly += priceOf(n);
+  } else {
+    for (let n = devNow + 1; n <= included; n++) devMonthly -= priceOf(n);
+  }
   const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
   const showDevices = devPrice > 0 || table.some((x) => x > 0);
   const step = (n: number) => setDev(Math.min(devMax, Math.max(devMin, n)));

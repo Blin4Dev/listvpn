@@ -3,7 +3,7 @@ import { createContext, useContext } from 'react';
 // кто вошёл (GET /panel/auth/me)
 export type Me = {
   kind: 'owner' | 'staff'; role: 'owner' | 'curator' | 'operator'; username: string; name: string; staff_id?: number;
-  shift?: { working_today: boolean; on_shift: boolean; intervals: string[][] };
+  shift?: { working_today: boolean; on_shift: boolean; has_schedule?: boolean; intervals: string[][] };
 };
 
 export const MeContext = createContext<Me | null>(null);
