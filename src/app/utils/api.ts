@@ -209,7 +209,15 @@ export type CreatePaymentRequest = {
 
 // тарифы по периодам
 export type TariffPeriod = { months: number; days: number; price: number; stars?: number };
-export type TariffsResponse = { devices: number; min_devices?: number; default_devices?: number; periods: TariffPeriod[] };
+export type TariffsResponse = {
+  devices: number;
+  min_devices?: number;
+  default_devices?: number;
+  max_devices?: number;
+  extra_device_price?: number;
+  device_prices?: number[];
+  periods: TariffPeriod[];
+};
 
 export async function fetchTariffs(): Promise<TariffsResponse> {
   const d = await appFetch<Partial<TariffsResponse>>("/plans");
@@ -217,6 +225,9 @@ export async function fetchTariffs(): Promise<TariffsResponse> {
     devices: Number(d?.devices ?? 5),
     min_devices: Number(d?.min_devices ?? 3),
     default_devices: Number(d?.default_devices ?? 5),
+    max_devices: Number(d?.max_devices ?? 20),
+    extra_device_price: Number(d?.extra_device_price ?? 0),
+    device_prices: Array.isArray(d?.device_prices) ? d.device_prices!.map(Number) : [],
     periods: Array.isArray(d?.periods) ? d!.periods! : [],
   };
 }

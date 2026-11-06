@@ -74,7 +74,7 @@ export default function Tariffs() {
   const [devices, setDevices] = useState(5);
   const [discount, setDiscount] = useState(0);
   // устройства: сколько всего (минимум — тариф или то, что уже есть в подписке), цена доп. устройства в месяц
-  const [devTotal, setDevTotal] = useState<number | null>(null);
+  const [devTotal, setDevTotal] = useState(5);
   const [devMin, setDevMin] = useState(3);
   const [devMax, setDevMax] = useState(20);
   const [devPrice, setDevPrice] = useState(0);
@@ -86,30 +86,36 @@ export default function Tariffs() {
         const t = await fetchTariffs();
         if (t.periods.length) setPeriods(t.periods);
         setDevices(t.devices);
+        const min = Number(t.min_devices || 3);
+        setDevMin(min);
+        setDevMax(Number(t.max_devices || 20));
+        setDevPrice(Number(t.extra_device_price || 0));
+        if (t.device_prices?.length) setDevTable(t.device_prices);
+        setDevTotal(Math.max(min, Number(t.default_devices || 5)));
       } catch { /* запасные цены */ }
       try {
         const d = await fetchDiscount();
         if (d.active && d.percent > 0) setDiscount(d.percent);
       } catch { /* без скидки */ }
       try {
-        // минимум устройств и цену доп. устройства считает сервер (учитывает текущую подписку)
+        // продление: минимум — сколько устройств уже в подписке
         const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
           subscription_id: null, use_referral_balance: false });
-        if (!q) throw new Error("no quote");
+        if (!q) return;
         const min = Number(q.min_devices || 3);
         setDevMin(min);
-        setDevMax(Number(q.max_devices || 20));
-        setDevPrice(Number(q.extra_device_price || 0));
-        if (Array.isArray(q.device_prices)) setDevTable(q.device_prices.map(Number));
-        setDevTotal(Math.max(min, Number(q.default_devices || 5)));
-      } catch { /* без выбора устройств */ }
+        if (q.max_devices) setDevMax(Number(q.max_devices));
+        if (q.extra_device_price != null) setDevPrice(Number(q.extra_device_price));
+        if (Array.isArray(q.device_prices) && q.device_prices.length) setDevTable(q.device_prices.map(Number));
+        setDevTotal((n) => Math.max(min, n));
+      } catch { /* степпер уже есть из /plans */ }
     })();
   }, []);
 
   const choose = (m: number) => {
     const q = new URLSearchParams();
     q.set("months", String(m));
-    if (devTotal) q.set("dev", String(devTotal));
+    q.set("dev", String(devNow));
     if (returnTo) q.set("return", returnTo);
     navigate(`/payment?${q.toString()}`);
   };
@@ -124,15 +130,13 @@ export default function Tariffs() {
     for (let n = devNow + 1; n <= devices; n++) devMonthly -= priceOf(n);
   }
   const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
-  const showDevices = devTotal != null;
   const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
 
   return (
     <FgnPage>
       <FgnHeader title="Выбор тарифа" onBack={goBack} />
 
-      {showDevices ? (
-        <div
+      <div
           style={{
             marginTop: 20.5,
             padding: "17px 17px 16px 17px",
@@ -162,9 +166,8 @@ export default function Tariffs() {
             </div>
           ) : null}
         </div>
-      ) : null}
 
-      <div style={{ marginTop: showDevices ? 21.5 : 20, fontSize: 14.5, lineHeight: "18px", color: MUTED }}>
+      <div style={{ marginTop: 21.5, fontSize: 14.5, lineHeight: "18px", color: MUTED }}>
         Выберите период
       </div>
 

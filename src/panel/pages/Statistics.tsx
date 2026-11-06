@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { Columns, Funnel, HBarChart } from '../components/charts';
 import { Delta, Kpi, PageHead, Panel, Row, Segmented, Spinner, StatSection } from '../components/ui';
-import { apiFetch } from '../lib/api';
+import { apiFetch, parseApiErr } from '../lib/api';
 import { ScopeToggle, scopeQuery, type Scope } from '../components/ScopeToggle';
 import { fmtInt, fmtMoney, gb, hoursStr, pctStr, toSeries } from '../lib/format';
 
@@ -100,15 +100,19 @@ export const StatisticsPage: React.FC<{ onOpenUser: (id: number) => void }> = ({
   const [range, setRange] = useState<Range | null>(null);
   const [s, setS] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   const [today, setToday] = useState<any>(null);
   const [scope, setScope] = useState<Scope>('project');
+  const [tick, setTick] = useState(0);
   useEffect(() => { apiFetch(`/panel/dashboard?${scopeQuery(scope)}`).then(setToday).catch(() => { /* без блока «Сегодня» */ }); }, [scope]);
   useEffect(() => {
-    let alive = true; setLoading(true);
+    let alive = true; setLoading(true); setErr(null);
     const q = (period === 'custom' && range ? `from=${range.from}&to=${range.to}` : `period=${period}`) + (scope === 'all' ? '&scope=all' : '');
-    apiFetch(`/panel/statistics?${q}`).then((d) => { if (alive) setS(d); }).catch(console.error).finally(() => { if (alive) setLoading(false); });
+    apiFetch(`/panel/statistics?${q}`).then((d) => { if (alive) setS(d); }).catch((e) => {
+      if (alive) setErr(parseApiErr(e, 'Не удалось загрузить статистику'));
+    }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [period, range, scope]);
+  }, [period, range, scope, tick]);
 
   const head = (
     <PageHead title="Статистика" sub={s ? `${new Date(s.from).toLocaleDateString('ru-RU')} — ${new Date(s.to).toLocaleDateString('ru-RU')}` : undefined}>
@@ -117,7 +121,18 @@ export const StatisticsPage: React.FC<{ onOpenUser: (id: number) => void }> = ({
         <PeriodPicker period={period} range={range} onPreset={(p) => { setRange(null); setPeriod(p); }} onRange={(r) => { setRange(r); setPeriod('custom'); }} /></div>
     </PageHead>
   );
-  if (!s) return <div className="flex flex-col gap-6">{head}<div style={{ padding: 60, display: 'flex', justifyContent: 'center' }}><Spinner size={24} /></div></div>;
+  if (!s) return (
+    <div className="flex flex-col gap-6">{head}
+      {err ? (
+        <div className="card" style={{ padding: 24, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+          <div className="sub" style={{ textAlign: 'center' }}>{err}</div>
+          <button className="btn" onClick={() => setTick((n) => n + 1)}>Повторить</button>
+        </div>
+      ) : (
+        <div style={{ padding: 60, display: 'flex', justifyContent: 'center' }}><Spinner size={24} /></div>
+      )}
+    </div>
+  );
 
   const m = s.money; const u = s.users; const f = s.funnel; const sb = s.subs; const rf = s.referrals;
   const bucketName = s.bucket === 'day' ? 'по дням' : s.bucket === 'week' ? 'по неделям' : 'по месяцам';

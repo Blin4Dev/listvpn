@@ -1167,6 +1167,7 @@ def user_states_map(scope: Optional[str] = None) -> dict[int, str]:
     """состояние всех юзеров проекта одним запросом (scope='*' — вся сеть, None — без фильтра)."""
     now_iso = iso()
     pw, pp = _pf("u.project_id", scope) if scope else ("", ())
+    spw, spp = _pf("project_id", scope) if scope else ("", ())
     rows = db.fetchall(
         """
         SELECT u.id AS id, u.is_banned AS banned, s.total AS total, s.paid_now AS paid_now, s.trial_now AS trial_now
@@ -1176,10 +1177,11 @@ def user_states_map(scope: Optional[str] = None) -> dict[int, str]:
                              AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS paid_now,
                    MAX(CASE WHEN status = 'Active' AND type = 'trial'
                              AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS trial_now
-            FROM subscriptions GROUP BY user_id
+            FROM subscriptions WHERE 1 = 1""" + spw + """
+            GROUP BY user_id
         ) s ON s.user_id = u.id
         WHERE 1 = 1""" + pw,
-        (now_iso, now_iso, *pp),
+        (now_iso, now_iso, *spp, *pp),
     )
     out: dict[int, str] = {}
     for r in rows:
@@ -3365,7 +3367,11 @@ def panel_statistics(period: str = Query("30d", max_length=10),
             raise HTTPException(400, detail={"message": "Неверная дата"})
     sc = _scope(scope)
     data = stats_mod.statistics(period, d1, d2, scope=sc or db.pid())
-    data["subs"]["state_dist"] = _user_distribution(sc)
+    try:
+        data["subs"]["state_dist"] = _user_distribution(sc)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[stats] state_dist: {type(exc).__name__}: {exc}", flush=True)
+        data.setdefault("subs", {})["state_dist"] = []
     return data
 
 
@@ -3416,16 +3422,39 @@ def _payment_methods_chart(scope: Optional[str] = None) -> list[dict[str, Any]]:
 
 
 def _user_distribution(scope: Optional[str] = None) -> list[dict[str, Any]]:
-    """разбивка статусов по фактическим подпискам."""
-    counts = {"Active": 0, "Trial": 0, "Expired": 0, "None": 0, "Banned": 0}
-    for st in user_states_map(scope or db.pid()).values():
-        counts[st] = counts.get(st, 0) + 1
+    """разбивка статусов по фактическим подпискам — одним SQL, без словаря на каждого юзера."""
+    now_iso = iso()
+    sc = scope or db.pid()
+    pw, pp = _pf("u.project_id", sc)
+    spw, spp = _pf("project_id", sc)
+    row = db.fetchone(
+        """
+        SELECT
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) != 0 THEN 1 ELSE 0 END), 0) AS banned,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.paid_now, 0) != 0 THEN 1 ELSE 0 END), 0) AS active,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.paid_now, 0) = 0
+                            AND COALESCE(s.trial_now, 0) != 0 THEN 1 ELSE 0 END), 0) AS trial,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.total, 0) != 0
+                            AND COALESCE(s.paid_now, 0) = 0 AND COALESCE(s.trial_now, 0) = 0 THEN 1 ELSE 0 END), 0) AS expired,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.total, 0) = 0 THEN 1 ELSE 0 END), 0) AS none
+        FROM users u LEFT JOIN (
+            SELECT user_id, COUNT(*) AS total,
+                   MAX(CASE WHEN status = 'Active' AND type != 'trial'
+                             AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS paid_now,
+                   MAX(CASE WHEN status = 'Active' AND type = 'trial'
+                             AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS trial_now
+            FROM subscriptions WHERE 1 = 1""" + spw + """
+            GROUP BY user_id
+        ) s ON s.user_id = u.id
+        WHERE 1 = 1""" + pw,
+        (now_iso, now_iso, *spp, *pp),
+    ) or {}
     return [
-        {"name": "Активные", "value": counts["Active"]},
-        {"name": "Пробные", "value": counts["Trial"]},
-        {"name": "Истекла", "value": counts["Expired"]},
-        {"name": "Нет подписки", "value": counts["None"]},
-        {"name": "Забанен", "value": counts["Banned"]},
+        {"name": "Активные", "value": int(row.get("active") or 0)},
+        {"name": "Пробные", "value": int(row.get("trial") or 0)},
+        {"name": "Истекла", "value": int(row.get("expired") or 0)},
+        {"name": "Нет подписки", "value": int(row.get("none") or 0)},
+        {"name": "Забанен", "value": int(row.get("banned") or 0)},
     ]
 
 
