@@ -723,7 +723,7 @@ def grant_subscription(
     # тот же выбор цели, что при расчёте цены
     target, upgrading_trial = find_extend_target(int(user["id"]), purpose, subscription_id)
 
-    total_devices = int(plan_devices or 1) + int(extra_devices or 0)
+    total_devices = int(plan_devices or 1) + max(0, int(extra_devices or 0))
     total_devices = max(1, total_devices)
 
     if target:

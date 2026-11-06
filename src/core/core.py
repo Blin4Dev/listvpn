@@ -7990,10 +7990,11 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     months = req_months if purpose != "traffic_reset" else 1
     if purpose not in ("subscription", "extend", "devices", "traffic_reset", "gift"):
         raise HTTPException(400, detail={"message": "Неизвестный тип платежа"})
-    plan_devices = fulfillment.tariff_devices() if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
+    # период в панели — цена за минимальный пакет (3 устройства); 4-е и дальше — доплата
+    tariff_incl = fulfillment.tariff_devices() if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
+    plan_devices = min(tariff_incl, PLAN_MIN_DEVICES) if purpose in ("subscription", "extend") else tariff_incl
     extra_raw = int(body.extra_devices or 0)
-    extra = extra_raw if purpose in ("subscription", "extend") else min(50, max(0, extra_raw))
-    extra = max(-MAX_PLAN_DEVICES, min(50, extra))
+    extra = min(50, max(0, extra_raw))
     extra_price = float(meta["extra_device_price"])
     # разбивка для экрана оплаты (подписка/продление): тариф + доп. устройства
     base_part: Optional[float] = None
@@ -8066,14 +8067,9 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             raise HTTPException(400, detail={"message": f"Устройств: не меньше {min_devices}"})
         if total_devices > MAX_PLAN_DEVICES:
             raise HTTPException(400, detail={"message": f"Устройств: не больше {MAX_PLAN_DEVICES}"})
-        add = extra + keep
-        if add >= 0:
-            devices_price = fulfillment.devices_cost(plan_devices, add) * months
-            stars_dev = fulfillment.devices_cost_stars(plan_devices, add) * months
-        else:
-            # выбрали меньше, чем в тарифе: минус цена «невзятых» слотов
-            devices_price = -fulfillment.devices_cost(total_devices, -add) * months
-            stars_dev = -fulfillment.devices_cost_stars(total_devices, -add) * months
+        add = max(0, extra + keep)
+        devices_price = fulfillment.devices_cost(plan_devices, add) * months
+        stars_dev = fulfillment.devices_cost_stars(plan_devices, add) * months
         base_part = float(base)
         devices_part = float(devices_price)
         price = float(base) + devices_price
@@ -8796,7 +8792,7 @@ def app_plans() -> dict[str, Any]:
         "extra_device_price": meta["extra_device_price"],
         "base_price": meta["base_price"],
         # тарифы по периодам
-        "devices": fulfillment.tariff_devices(),
+        "devices": min(fulfillment.tariff_devices(), PLAN_MIN_DEVICES),
         "min_devices": PLAN_MIN_DEVICES,
         "default_devices": PLAN_DEFAULT_DEVICES,
         # цена n-го устройства в ₽/мес (индекс n-1) — для выбора устройств без входа (сайт)

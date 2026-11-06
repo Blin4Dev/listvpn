@@ -121,14 +121,11 @@ export default function Tariffs() {
   };
 
   const devNow = devTotal ?? devices;
+  const included = Math.min(devices, 3);
   const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
-  // ₽/мес за устройства сверх тарифа: у каждого номера своя цена (панель → Цены)
+  // период — пакет из 3 устройств; 4-е и дальше только плюсуем, не вычитаем
   let devMonthly = 0;
-  if (devNow >= devices) {
-    for (let n = devices + 1; n <= devNow; n++) devMonthly += priceOf(n);
-  } else {
-    for (let n = devNow + 1; n <= devices; n++) devMonthly -= priceOf(n);
-  }
+  for (let n = included + 1; n <= devNow; n++) devMonthly += priceOf(n);
   const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
   const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
 
@@ -158,7 +155,7 @@ export default function Tariffs() {
             <StepBtn icon="plus" label="Больше устройств" disabled={devNow >= devMax} onClick={() => setDev(devNow + 1)} />
           </div>
           <div style={{ marginTop: 13.5, fontSize: 14.5, lineHeight: "18px", color: MUTED }}>
-            {devices} в тарифе · следующее +{nextPrice}{" "}₽/мес
+            {included} в тарифе · следующее +{nextPrice}{" "}₽/мес
           </div>
           {devMin > devices ? (
             <div style={{ marginTop: 6, fontSize: 13.5, lineHeight: "17px", color: MUTED }}>

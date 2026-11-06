@@ -125,14 +125,10 @@ export default function Tariffs() {
 
   const shown = periods;
   const devNow = devTotal ?? devices;
+  const included = Math.min(devices, 3);
   const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
-  // ₽/мес за устройства сверх тарифа: у каждого номера своя цена (панель → Цены)
   let devMonthly = 0;
-  if (devNow >= devices) {
-    for (let n = devices + 1; n <= devNow; n++) devMonthly += priceOf(n);
-  } else {
-    for (let n = devNow + 1; n <= devices; n++) devMonthly -= priceOf(n);
-  }
+  for (let n = included + 1; n <= devNow; n++) devMonthly += priceOf(n);
   const nextPrice = priceOf(devNow + 1);
   const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
 
@@ -154,7 +150,7 @@ export default function Tariffs() {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 17, fontWeight: 600, color: N.text, letterSpacing: "-0.01em" }}>Устройства</div>
               <div style={{ marginTop: 4, fontSize: 13.5, lineHeight: 1.4, color: N.muted }}>
-                {devices} в тарифе · следующее +{Math.round(devNow >= devMax ? priceOf(devNow) : nextPrice)} ₽/мес
+                {included} в тарифе · следующее +{Math.round(devNow >= devMax ? priceOf(devNow) : nextPrice)} ₽/мес
               </div>
             </div>
             <StepBtn icon="remove" label="Меньше устройств" disabled={devNow <= devMin} onClick={() => setDev(devNow - 1)} />

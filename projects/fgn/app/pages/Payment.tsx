@@ -249,7 +249,7 @@ export default function Payment() {
   useEffect(() => { if (isTrafficReset) void fetchTraffic().then(setTrafficNow); }, [isTrafficReset]);
   useEffect(() => {
     if (purpose !== "subscription" && purpose !== "gift") return;
-    void fetchTariffs().then((t) => setTariffDevices(t.devices)).catch(() => { /* по умолчанию */ });
+    void fetchTariffs().then((t) => setTariffDevices(Math.min(t.devices, t.min_devices ?? 3))).catch(() => { /* по умолчанию */ });
   }, [purpose]);
 
   useEffect(() => {
@@ -278,7 +278,7 @@ export default function Payment() {
   const extraDevices = isDevicesFlow
     ? Math.max(0, parseInt(searchParams.get("count") || "0", 10))
     : isSubFlow && totalDevices != null
-      ? totalDevices - planDevices
+      ? Math.max(0, totalDevices - planDevices)
       : 0;
 
   useEffect(() => {

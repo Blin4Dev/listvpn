@@ -102,9 +102,9 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
         const ps = Array.isArray(d?.periods) && d.periods.length ? d.periods : FALLBACK;
         setPeriods(ps);
         setSel((s) => (ps.some((p) => p.months === s) ? s : ps[ps.length - 1].months));
-        const inc = Number(d?.devices || 5);
-        setIncluded(inc);
         const min = Number(d?.min_devices || 3);
+        const inc = Number(d?.devices || 5);
+        setIncluded(Math.min(inc, min));
         setDevMin(min);
         if (Array.isArray(d?.device_prices)) setTable(d.device_prices.map(Number));
         setDevPrice(Number(d?.extra_device_price || 0));
@@ -135,14 +135,11 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
     })();
   }, [authed]);
 
+  const pack = Math.min(included, 3);
   const devNow = dev ?? included;
   const priceOf = (n: number) => (table.length ? Number(table[Math.min(n, table.length) - 1] ?? devPrice) : devPrice);
   let devMonthly = 0;
-  if (devNow >= included) {
-    for (let n = included + 1; n <= devNow; n++) devMonthly += priceOf(n);
-  } else {
-    for (let n = devNow + 1; n <= included; n++) devMonthly -= priceOf(n);
-  }
+  for (let n = pack + 1; n <= devNow; n++) devMonthly += priceOf(n);
   const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
   const showDevices = devPrice > 0 || table.some((x) => x > 0);
   const step = (n: number) => setDev(Math.min(devMax, Math.max(devMin, n)));
