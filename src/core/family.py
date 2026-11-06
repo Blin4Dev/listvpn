@@ -25,9 +25,11 @@ from typing import Any, Optional
 
 try:
     from . import database as db  # type: ignore
+    from . import names  # type: ignore
     from . import projects  # type: ignore
 except ImportError:  # pragma: no cover
     import database as db  # type: ignore
+    import names  # type: ignore
     import projects  # type: ignore
 
 CODE_LEN = 8
@@ -343,7 +345,7 @@ def _insert_member(project_id: str, owner_id: int, member_id: Optional[int], inv
     встроено в сам INSERT: место проверяется и занимается атомарно.
     """
     limit = _room(project_id)
-    cur = db.execute(
+    db.execute(
         "INSERT INTO family_members (project_id, owner_id, member_id, invite_query, status, created_at, accepted_at) "
         "SELECT ?, ?, ?, ?, ?, ?, ? WHERE ("
         "  SELECT COUNT(*) FROM family_members WHERE owner_id = ? "
@@ -352,7 +354,7 @@ def _insert_member(project_id: str, owner_id: int, member_id: Optional[int], inv
         (project_id, int(owner_id), member_id, invite_query, status, _now(), accepted_at,
          int(owner_id), _stale_before(), limit),
     )
-    return int(cur.rowcount or 0) > 0
+    return db.changes() > 0
 
 
 def _candidates(user: dict[str, Any]) -> list[str]:
@@ -360,15 +362,39 @@ def _candidates(user: dict[str, Any]) -> list[str]:
     if user.get("telegram_id"):
         out.append(str(user["telegram_id"]))
     if user.get("username"):
-        uname = str(user["username"]).lower()
-        out += [uname, f"@{uname}", f"https://t.me/{uname}"]
+        uname = str(user["username"]).strip().lstrip("@").lower()
+        if uname:
+            out += [uname, f"@{uname}", f"t.me/{uname}", f"https://t.me/{uname}"]
     if user.get("email"):
-        out.append(str(user["email"]).lower())
+        out.append(str(user["email"]).strip().lower())
     return list(dict.fromkeys(x for x in out if x))
 
 
+def normalize_invite_query(raw: Any) -> str:
+    """почта / @username / t.me/… → канонический ключ для поиска и приглашения."""
+    q = re.sub(r"[\s\u200b-\u200d\ufeff]+", "", str(raw or "")).strip()
+    if not q:
+        return ""
+    low = q.lower()
+    m = re.fullmatch(
+        r"(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/@?([a-z0-9_]{4,32})/?",
+        low,
+    )
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"tg://resolve\?domain=([a-z0-9_]{4,32})", low)
+    if m:
+        return m.group(1)
+    if "@" in q[1:] and "." in q.rsplit("@", 1)[-1]:
+        return low
+    uname = names.tg_username(q)
+    if uname:
+        return uname.lower()
+    return q
+
+
 def _find_user(project_id: str, query: str) -> Optional[dict[str, Any]]:
-    q = query.strip()
+    q = normalize_invite_query(query)
     if not q:
         return None
     if q.isdigit():
@@ -376,14 +402,9 @@ def _find_user(project_id: str, query: str) -> Optional[dict[str, Any]]:
         if row:
             return row
         return db.fetchone("SELECT * FROM users WHERE telegram_id = ? AND project_id = ?", (int(q), project_id))
-    low = q.lower()
-    if re.fullmatch(r"https?://(t\.me|telegram\.me)/[A-Za-z0-9_]+/?", low):
-        uname = low.rstrip("/").rsplit("/", 1)[-1]
-        return db.fetchone("SELECT * FROM users WHERE lower(username) = ? AND project_id = ?", (uname, project_id))
-    if "@" in low[1:] and "." in low.rsplit("@", 1)[-1]:
-        return db.fetchone("SELECT * FROM users WHERE lower(email) = ? AND project_id = ?", (low, project_id))
-    uname = low.lstrip("@")
-    return db.fetchone("SELECT * FROM users WHERE lower(username) = ? AND project_id = ?", (uname, project_id))
+    if "@" in q and "." in q.rsplit("@", 1)[-1]:
+        return db.fetchone("SELECT * FROM users WHERE lower(email) = ? AND project_id = ?", (q, project_id))
+    return db.fetchone("SELECT * FROM users WHERE lower(username) = ? AND project_id = ?", (q, project_id))
 
 
 def _check_owner(owner_id: int) -> dict[str, Any]:
@@ -405,11 +426,13 @@ def add_member(owner_id: int, project_id: str, query: str) -> Optional[dict[str,
 
     Возвращает аккаунт приглашённого (если он уже есть) — чтобы отправить ему сообщение.
     """
-    q = str(query or "").strip()
+    q = normalize_invite_query(query)
     if len(q) < 2:
         raise FamilyError("Укажите @username, почту или ID пользователя")
     if len(q) > 120:
         raise FamilyError("Слишком длинный запрос")
+    if not q.isdigit() and "@" not in q and not re.fullmatch(r"[A-Za-z0-9_]{4,32}", q):
+        raise FamilyError("Укажите @username Telegram или почту")
     _check_owner(int(owner_id))
     target = _find_user(project_id, q)
     if target is not None:

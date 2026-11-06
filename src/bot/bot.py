@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -460,8 +461,11 @@ def _send_day_gift(chat_id: int, days: int, source: str) -> bool:
 
 def _ensure_user(telegram_id: int, frm: dict[str, Any]) -> int:
     """создаёт пользователя в бд при отсутствии; возвращает internal id."""
+    uname = names.tg_username(frm.get("username"))
     row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND project_id = ?", (telegram_id, P().id))
     if row:
+        if uname:
+            db.execute("UPDATE users SET username = ? WHERE id = ?", (uname, row["id"]))
         return int(row["id"])
     import secrets
     import string
@@ -473,21 +477,29 @@ def _ensure_user(telegram_id: int, frm: dict[str, Any]) -> int:
             if not db.fetchone("SELECT id FROM users WHERE referral_code = ?", (code,)):
                 return code
 
-    db.execute(
-        "INSERT INTO users (project_id, telegram_id, username, first_name, last_name, balance, status, is_banned, "
-        "referral_code, is_partner, partner_balance, partner_rate, autopay_enabled, created_at) "
-        "VALUES (?, ?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
-        (
-            P().id,
-            telegram_id,
-            names.tg_username(frm.get("username")),
-            None,  # имя/фамилию не храним
-            None,
-            _ref_code(),
-            db.utcnow_iso(),
-        ),
-    )
-    return db.last_id()
+    try:
+        db.execute(
+            "INSERT INTO users (project_id, telegram_id, username, first_name, last_name, balance, status, is_banned, "
+            "referral_code, is_partner, partner_balance, partner_rate, autopay_enabled, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
+            (
+                P().id,
+                telegram_id,
+                uname,
+                None,  # имя/фамилию не храним
+                None,
+                _ref_code(),
+                db.utcnow_iso(),
+            ),
+        )
+        return db.last_id()
+    except sqlite3.IntegrityError:
+        row = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND project_id = ?", (telegram_id, P().id))
+        if not row:
+            raise
+        if uname:
+            db.execute("UPDATE users SET username = ? WHERE id = ?", (uname, row["id"]))
+        return int(row["id"])
 
 
 def _apply_referral(user: dict[str, Any], code: str, is_new: bool = True) -> None:

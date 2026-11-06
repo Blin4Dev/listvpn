@@ -110,6 +110,7 @@ export default function Family() {
     try {
       apply(await appFetch<FamilyResponse>("/family/members", { method: "POST", body: JSON.stringify({ query: q }) }));
       setQuery("");
+      setAddMsg({ ok: true, text: "Приглашение отправлено. Когда человек откроет приложение — сможет принять." });
       haptic("success");
     } catch (e) {
       haptic("error");

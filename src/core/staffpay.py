@@ -314,33 +314,70 @@ def shift_now(staff_id: int) -> dict[str, Any]:
     return {"working_today": False, "on_shift": False, "intervals": []}
 
 
-def shift_ended(staff_id: int, now: Optional[datetime] = None) -> bool:
-    """сегодняшняя смена уже полностью закончилась: не перерыв и не «смены не было»."""
-    n = (now or datetime.now(timezone.utc)).astimezone(MSK)
-    m = n.hour * 60 + n.minute
-    today = n.date()
-    sid = int(staff_id)
-    r = db.fetchone("SELECT * FROM staff_days WHERE staff_id = ? AND day = ?", (sid, today.isoformat()))
-    prev = db.fetchone("SELECT * FROM staff_days WHERE staff_id = ? AND day = ?",
-                       (sid, (today - timedelta(days=1)).isoformat()))
-    today_iv = _row(r)["intervals"] if r else []
-    prev_iv = _row(prev)["intervals"] if prev else []
-    if _on_shift_minutes(today_iv, m) or _on_spill_minutes(prev_iv, m):
-        return False
-    for a, b in today_iv:
+def _parse_intervals(raw: Any) -> list[list[str]]:
+    if isinstance(raw, str):
         try:
-            ma, mb = _minutes(a), _minutes(b)
-        except (ValueError, IndexError, AttributeError):
-            continue
-        wrap = mb < ma
-        if wrap:
-            if m < ma:
-                return False
-        elif m < ma:
-            return False
-    had_today = bool(today_iv)
-    had_overnight = _spill_end(prev_iv) is not None
-    return had_today or had_overnight
+            raw = json.loads(raw)
+        except ValueError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    out: list[list[str]] = []
+    for it in raw:
+        if isinstance(it, (list, tuple)) and len(it) == 2:
+            out.append([str(it[0]), str(it[1])])
+    return out
+
+
+def _default_intervals(staff_id: int) -> list[list[str]]:
+    st = db.fetchone("SELECT default_intervals FROM panel_staff WHERE id = ?", (int(staff_id),))
+    return _parse_intervals((st or {}).get("default_intervals"))
+
+
+def _day_intervals(staff_id: int, day: date, *, use_default: bool) -> list[list[str]]:
+    r = db.fetchone("SELECT * FROM staff_days WHERE staff_id = ? AND day = ?", (int(staff_id), day.isoformat()))
+    if r:
+        return _row(r)["intervals"]
+    return _default_intervals(staff_id) if use_default else []
+
+
+def _shift_windows(staff_id: int, around: datetime) -> list[tuple[datetime, datetime]]:
+    """абсолютные окна смены вокруг around (вчера/сегодня/завтра), МСК."""
+    around = around.astimezone(MSK)
+    sid = int(staff_id)
+    use_default = db.fetchone("SELECT 1 AS x FROM staff_days WHERE staff_id = ? LIMIT 1", (sid,)) is None
+    out: list[tuple[datetime, datetime]] = []
+    for delta in (-1, 0, 1):
+        day = around.date() + timedelta(days=delta)
+        d0 = datetime.combine(day, datetime.min.time(), tzinfo=MSK)
+        for a, b in _day_intervals(sid, day, use_default=use_default):
+            try:
+                ma, mb = _minutes(a), _minutes(b)
+            except (ValueError, IndexError, AttributeError):
+                continue
+            if mb <= ma:
+                mb += 24 * 60
+            out.append((d0 + timedelta(minutes=ma), d0 + timedelta(minutes=mb)))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def shift_ended(staff_id: int, now: Optional[datetime] = None) -> bool:
+    """смена закончилась: не на смене, уже отработал кусок, и до следующей части больше 2 часов (не обед)."""
+    n = (now or datetime.now(timezone.utc)).astimezone(MSK)
+    windows = _shift_windows(int(staff_id), n)
+    if not windows:
+        return False
+    if any(s <= n < e for s, e in windows):
+        return False
+    past_ends = [e for s, e in windows if s <= n]
+    if not past_ends:
+        return False
+    future_starts = [s for s, e in windows if s > n]
+    if not future_starts:
+        return True
+    gap_min = (min(future_starts) - n).total_seconds() / 60
+    return gap_min > 120
 
 
 def _shift_end_offset(intervals: list[list[str]]) -> int:

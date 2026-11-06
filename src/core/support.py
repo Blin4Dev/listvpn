@@ -54,6 +54,7 @@ MAX_PARALLEL_UPLOADS = 4
 MIN_FREE_BYTES = int(_env_num("SUPPORT_MIN_FREE_GB", 2) * 1024 * MB)  # запас на диске для временных файлов
 CLOSE_PROMPT_TEXT = "Подскажите, могу ли я ещё чем-то помочь?"
 CLOSE_PROMPT_TTL = 60 * 60  # нет ответа на вопрос 60 минут - обращение закрывается само
+IDLE_USER_TTL = 5 * 3600  # пользователь не отвечает агенту 5 часов — тикет закрывается
 
 
 class SupportError(Exception):
@@ -307,34 +308,41 @@ def release_ended_shifts() -> int:
     except ImportError:  # pragma: no cover
         import staff as staffmod  # type: ignore
         import staffpay  # type: ignore
+    held = db.fetchall(
+        "SELECT assigned_admin, COUNT(*) AS c FROM support_tickets "
+        "WHERE status = 'open' AND assigned_admin LIKE 'staff:%' GROUP BY assigned_admin")
+    if not held:
+        return 0
+    by_actor = {str(r["assigned_admin"]): int(r["c"]) for r in held}
     n = 0
     now = _iso()
     for st in db.fetchall("SELECT * FROM panel_staff WHERE is_active = 1"):
         if staffmod.role_of(st) != "operator":
             continue
-        try:
-            if not staffpay.shift_ended(int(st["id"])):
-                continue
-        except Exception:  # noqa: BLE001
-            continue
         actor = f"staff:{int(st['id'])}"
+        if actor not in by_actor:
+            continue
+        try:
+            ended = staffpay.shift_ended(int(st["id"]))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[support] shift_ended staff {st['id']}: {exc}", flush=True)
+            continue
+        if not ended:
+            continue
         name = (st.get("name") or st.get("username") or "Оператор").strip() or "Оператор"
         tickets = db.fetchall(
-            "SELECT id, chat_id FROM support_tickets WHERE status = 'open' AND assigned_admin = ? "
-            "AND COALESCE(escalated, 0) = 0 LIMIT 500",
+            "SELECT id, chat_id FROM support_tickets WHERE status = 'open' AND assigned_admin = ? LIMIT 500",
             (actor,),
         )
         if not tickets:
             continue
         with db.transaction() as tx:
             for t in tickets:
-                cur = tx.execute(
-                    "UPDATE support_tickets SET assigned_admin = NULL, assigned_name = NULL "
+                tx.execute(
+                    "UPDATE support_tickets SET assigned_admin = NULL, assigned_name = NULL, escalated = 0 "
                     "WHERE id = ? AND status = 'open' AND assigned_admin = ?",
                     (t["id"], actor),
                 )
-                if cur.rowcount != 1:
-                    continue
                 tx.execute(
                     "UPDATE support_chats SET assigned_admin = NULL, assigned_name = NULL, started_at = NULL WHERE id = ?",
                     (t["chat_id"],),
@@ -401,6 +409,40 @@ def auto_close_expired() -> int:
             t = dict(row)
             tx.execute("UPDATE support_tickets SET close_prompt_id = NULL, prompt_at = NULL WHERE id = ?", (t["id"],))
             _close_tx(tx, int(t["chat_id"]), t, "auto", now)
+            n += 1
+    return n
+
+
+def auto_close_idle_users() -> int:
+    """пользователь не отвечает на последнее сообщение агента 5 часов — закрыть тикет."""
+    cutoff = _iso(_now() - timedelta(seconds=IDLE_USER_TTL))
+    rows = db.fetchall(
+        "SELECT t.id, t.chat_id, t.number, t.assigned_name FROM support_tickets t "
+        "JOIN support_messages m ON m.id = ("
+        "  SELECT MAX(id) FROM support_messages WHERE ticket_id = t.id AND deleted_at IS NULL "
+        "  AND ((sender = 'admin' AND COALESCE(internal, 0) = 0) OR sender = 'user')"
+        ") WHERE t.status = 'open' AND m.sender = 'admin' AND m.created_at < ? LIMIT 500",
+        (cutoff,),
+    )
+    n = 0
+    for r in rows:
+        now = _iso()
+        with db.transaction() as tx:
+            row = tx.execute("SELECT * FROM support_tickets WHERE id = ? AND status = 'open'", (r["id"],)).fetchone()
+            if not row:
+                continue
+            t = dict(row)
+            last = tx.execute(
+                "SELECT sender, created_at FROM support_messages WHERE ticket_id = ? AND deleted_at IS NULL "
+                "AND ((sender = 'admin' AND COALESCE(internal, 0) = 0) OR sender = 'user') "
+                "ORDER BY id DESC LIMIT 1",
+                (t["id"],),
+            ).fetchone()
+            if not last or last["sender"] != "admin" or str(last["created_at"] or "") >= cutoff:
+                continue
+            if t.get("close_prompt_id"):
+                _drop_prompt_tx(tx, t)
+            _close_tx(tx, int(t["chat_id"]), t, "auto", now, "Закрыто: пользователь не отвечает 5 ч")
             n += 1
     return n
 

@@ -841,12 +841,11 @@ def upsert_telegram_user(
 ) -> dict[str, Any]:
     # имя/фамилию из telegram не храним (параметры для совместимости)
     first_name = last_name = None
+    uname = names.tg_username(username)
     existing = find_user_by_tg(telegram_id)
     if existing:
-        db.execute(
-            "UPDATE users SET username = COALESCE(?, username) WHERE id = ?",
-            (names.tg_username(username), existing["id"]),
-        )
+        if uname:
+            db.execute("UPDATE users SET username = ? WHERE id = ?", (uname, existing["id"]))
         user = get_user(int(existing["id"]))
         assert user is not None
         if not user.get("is_banned"):
@@ -854,22 +853,33 @@ def upsert_telegram_user(
             user = get_user(int(existing["id"])) or user
         return user
 
+    import sqlite3
+
     code = gen_ref_code()
-    db.execute(
-        "INSERT INTO users (project_id, telegram_id, username, first_name, last_name, balance, status, is_banned, "
-        "referral_code, is_partner, partner_balance, partner_rate, "
-        "autopay_enabled, created_at) VALUES (?, ?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
-        (
-            db.pid(),
-            telegram_id,
-            names.tg_username(username),
-            first_name,
-            last_name,
-            code,
-            db.utcnow_iso(),
-        ),
-    )
-    user = get_user(db.last_id())
+    try:
+        db.execute(
+            "INSERT INTO users (project_id, telegram_id, username, first_name, last_name, balance, status, is_banned, "
+            "referral_code, is_partner, partner_balance, partner_rate, "
+            "autopay_enabled, created_at) VALUES (?, ?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
+            (
+                db.pid(),
+                telegram_id,
+                uname,
+                first_name,
+                last_name,
+                code,
+                db.utcnow_iso(),
+            ),
+        )
+        uid = db.last_id()
+    except sqlite3.IntegrityError:
+        existing = find_user_by_tg(telegram_id)
+        if not existing:
+            raise
+        if uname:
+            db.execute("UPDATE users SET username = ? WHERE id = ?", (uname, existing["id"]))
+        uid = int(existing["id"])
+    user = get_user(uid)
     assert user is not None
     _enforce_blacklist(user)
     return get_user(int(user["id"])) or user
@@ -8174,7 +8184,7 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
                     "WHERE id = ? AND partner_balance >= ?",
                     (referral_applied, int(user["id"]), referral_applied),
                 )
-                if frozen.rowcount == 0:
+                if db.changes() == 0:
                     referral_applied = 0.0  # баланс изменился между чтением и списанием
 
     charge = round(float(price) - referral_applied, 2)
@@ -9086,13 +9096,18 @@ def _support_cleanup_loop() -> None:
 
 
 def _support_autoclose_loop() -> None:
-    """раз в минуту: закрыть тикеты без ответа 60 мин."""
+    """раз в минуту: автозакрытие, возврат в пул после смены, автоштрафы."""
     while True:
-        time.sleep(60)
         try:
             support.auto_close_expired()
         except Exception as exc:  # noqa: BLE001
             print(f"[support] autoclose failed: {exc}", flush=True)
+        try:
+            idle = support.auto_close_idle_users()
+            if idle:
+                print(f"[support] закрыто без ответа пользователя: {idle}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[support] idle-close failed: {exc}", flush=True)
         try:
             released = support.release_ended_shifts()
             if released:
@@ -9105,6 +9120,7 @@ def _support_autoclose_loop() -> None:
                 print(f"[autofine] выписано штрафов: {r['fines']}", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"[autofine] failed: {exc}", flush=True)
+        time.sleep(60)
 
 
 def _autofine_notify(st: dict[str, Any], text: str) -> None:

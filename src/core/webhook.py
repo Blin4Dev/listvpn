@@ -160,7 +160,13 @@ def _process(event: str, yk_id: str, payment: dict[str, Any]) -> JSONResponse:
             provider_payment_id=yk_id,
             amount=yookassa.YooKassaClient.payment_amount(yp),
         )
-        return JSONResponse(status_code=200, content={"ok": bool(result.get("ok"))})
+        if result.get("ok"):
+            return _ack()
+        # выдача не состоялась — 503, чтобы ЮKassa повторила уведомление
+        err = str(result.get("error") or "fulfill_failed")
+        if err in ("grant_failed", "already_processing"):
+            return JSONResponse(status_code=503, content={"error": err})
+        return JSONResponse(status_code=200, content={"ok": False, "error": err})
     if norm == "failed":
         fulfillment.mark_failed(payment["payment_id"], "provider_canceled")
         return _ack()

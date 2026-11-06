@@ -131,6 +131,18 @@ def execute(sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
         raise
 
 
+def changes() -> int:
+    """сколько строк изменил последний INSERT/UPDATE/DELETE на этом соединении.
+
+    cursor.rowcount у sqlite3 часто -1 (INSERT…SELECT, UPDATE…WHERE) — по нему нельзя судить об успехе.
+    """
+    row = connect().execute("SELECT changes() AS n").fetchone()
+    try:
+        return int(row["n"] if row else 0)
+    except (TypeError, ValueError, KeyError):
+        return 0
+
+
 def executemany(sql: str, seq: list) -> None:
     conn = connect()
     if _in_tx():

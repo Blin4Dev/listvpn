@@ -380,16 +380,17 @@ def _release_referral_hold(payment: dict[str, Any]) -> None:
 @projects.scoped(_payment_project)
 def mark_failed(payment_id: str, reason: str = "") -> None:
     payment = get_payment(payment_id)
-    cur = db.execute(
+    db.execute(
         "UPDATE payments SET status = 'failed', error = ? WHERE payment_id = ? AND status IN ('pending', 'processing')",
         (reason[:500], payment_id),
     )
+    failed = db.changes() > 0
     db.execute(
         "UPDATE transactions SET status = 'failed' WHERE payment_id = ? AND status = 'pending'",
         (payment_id,),
     )
     # снять реф. холд только если статус стал failed
-    if payment and cur.rowcount:
+    if payment and failed:
         _release_referral_hold(payment)
 
 
@@ -848,12 +849,13 @@ def fulfill_payment(
             return {"ok": False, "error": "amount_mismatch", "payment_id": payment_id}
 
     # claim pending→processing (один победитель); сразу сохранить id charge stars
-    claim = db.execute(
+    now_iso = db.utcnow_iso()
+    db.execute(
         "UPDATE payments SET status = 'processing', processing_at = ?, "
         "provider_payment_id = COALESCE(provider_payment_id, ?) WHERE payment_id = ? AND status = 'pending'",
-        (db.utcnow_iso(), stars_charge_id if payment.get("provider") == "tg_stars" else None, payment_id),
+        (now_iso, stars_charge_id if payment.get("provider") == "tg_stars" else None, payment_id),
     )
-    if claim.rowcount == 0:
+    if db.changes() == 0:
         fresh = get_payment(payment_id)
         st = (fresh or {}).get("status")
         if (stars_charge_id and fresh and fresh.get("provider") == "tg_stars" and st in ("paid", "processing")
@@ -863,8 +865,16 @@ def fulfill_payment(
         if st == "paid":
             return {"ok": True, "already": True, "payment_id": payment_id,
                     "subscription_id": (fresh or {}).get("subscription_id")}
-        # уже processing или финальный статус
-        return {"ok": False, "error": "already_processing", "payment_id": payment_id}
+        # зависли в processing без выдачи (упал процесс / sqlite rowcount врал) — перехватить через 45 сек
+        steal_before = iso(utcnow() - timedelta(seconds=45))
+        db.execute(
+            "UPDATE payments SET processing_at = ? WHERE payment_id = ? AND status = 'processing' "
+            "AND subscription_id IS NULL AND (processing_at IS NULL OR processing_at < ?)",
+            (now_iso, payment_id, steal_before),
+        )
+        if db.changes() == 0:
+            return {"ok": False, "error": "already_processing", "payment_id": payment_id}
+        payment = fresh or payment
 
     user = get_user(int(payment["user_id"]))
     if not user:
@@ -1041,7 +1051,7 @@ def confirm_via_provider(payment_id: str) -> dict[str, Any]:
         return {"ok": True, "status": "pending", "note": f"{type(exc).__name__}"}
 
 
-STUCK_PROCESSING_MIN = 10  # «processing» дольше - процесс упал посреди выдачи
+STUCK_PROCESSING_MIN = 2  # «processing» дольше — процесс упал посреди выдачи
 RECHECK_AFTER_MIN = 3  # перепроверять у ЮKassa не раньше чем через 3 мин
 UNPAID_EXPIRE_HOURS = 24  # неоплаченный платёж через сутки отменяется
 RECONCILE_BATCH = 50
@@ -1057,7 +1067,7 @@ def reconcile_payments(log=print) -> dict[str, int]:
         "AND (processing_at IS NULL OR processing_at < ?)",
         (stuck_before,),
     )
-    stats["unstuck"] = cur.rowcount or 0
+    stats["unstuck"] = db.changes()
 
     recheck_before = iso(now - timedelta(minutes=RECHECK_AFTER_MIN))
     rows = db.fetchall(
