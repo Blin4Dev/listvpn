@@ -9,8 +9,9 @@ import {
   createPayment,
   fetchConfig,
   fetchMe,
+  extraAbovePack,
   fetchQuote,
-  fetchTariffs,
+  PLAN_PACK_DEVICES,
   fetchTraffic,
   formatBytesRu,
   openPayUrl,
@@ -188,13 +189,13 @@ export default function Payment() {
   const [quoteReady, setQuoteReady] = useState(false);
   const [paying, setPaying] = useState(false);
   const [pending, setPending] = useState<PendingPayment | null>(null);
-  const [tariffDevices, setTariffDevices] = useState(3);
+  const [tariffDevices, setTariffDevices] = useState(PLAN_PACK_DEVICES);
   const [trafficNow, setTrafficNow] = useState<TrafficInfo | null>(null);
 
   useEffect(() => { if (isTrafficReset) void fetchTraffic().then(setTrafficNow); }, [isTrafficReset]);
   useEffect(() => {
     if (purpose !== "subscription" && purpose !== "gift") return;
-    void fetchTariffs().then((t) => setTariffDevices(Math.min(t.devices, t.min_devices ?? 3))).catch(() => { /* по умолчанию */ });
+    setTariffDevices(PLAN_PACK_DEVICES);
   }, [purpose]);
 
   useEffect(() => {
@@ -223,7 +224,7 @@ export default function Payment() {
   const extraDevices = isDevicesFlow
     ? Math.max(0, parseInt(searchParams.get("count") || "0", 10))
     : isSubFlow && totalDevices != null
-      ? Math.max(0, totalDevices - planDevices)
+      ? extraAbovePack(totalDevices, planDevices)
       : 0;
 
   const [promoTick, setPromoTick] = useState(0);

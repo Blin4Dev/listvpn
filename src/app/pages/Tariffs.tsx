@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
-import { applyDiscount, fetchDiscount, fetchQuote, fetchTariffs, type TariffPeriod } from "../utils/api";
+import { applyDiscount, extraAbovePack, fetchDiscount, fetchQuote, fetchTariffs, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
 import { MSIcon, btnReset } from "../components/ui";
 import { N, NoirBack, NoirCard, NoirScreen } from "../components/noir";
 
@@ -100,7 +100,7 @@ export default function Tariffs() {
         if (d.active && d.percent > 0) setDiscount(d.percent);
       } catch { /* без скидки */ }
       try {
-        const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
+        const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: extraAbovePack(5), purpose: "subscription",
           subscription_id: null, use_referral_balance: false });
         if (q) {
           const min = Number(q.min_devices || 3);
@@ -124,11 +124,10 @@ export default function Tariffs() {
   };
 
   const shown = periods;
+  const pack = PLAN_PACK_DEVICES;
   const devNow = devTotal ?? devices;
-  const included = Math.min(devices, 3);
+  const included = pack;
   const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
-  let devMonthly = 0;
-  for (let n = included + 1; n <= devNow; n++) devMonthly += priceOf(n);
   const nextPrice = priceOf(devNow + 1);
   const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
 
@@ -172,7 +171,8 @@ export default function Tariffs() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {shown.map((p, i) => {
-          const full = Math.round(p.price + devMonthly * p.months);
+          const fb = FALLBACK.find((x) => x.months === p.months)?.price ?? 0;
+          const full = periodTotalRub(p, devNow, devTable, devPrice, fb);
           const final = discount > 0 ? applyDiscount(full, discount) : full;
           return (
             <button

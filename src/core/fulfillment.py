@@ -144,9 +144,22 @@ def _float_setting(key: str, default: float) -> float:
         return float(default)
 
 
+PACK_DEVICES = 3  # цена периода — пакет из 3 устройств; 4-е и дальше только плюсуются
+
+
 def period_price(months: int) -> float:
     m = int(months)
-    return _float_setting(f"period_price_{m}", PERIOD_DEFAULT_PRICE.get(m, 180 * m))
+    v = _float_setting(f"period_price_{m}", PERIOD_DEFAULT_PRICE.get(m, 180 * m))
+    if v <= 0:
+        return float(PERIOD_DEFAULT_PRICE.get(m, 180 * m))
+    return v
+
+
+def subscription_price(months: int, total_devices: int, pack: int = PACK_DEVICES) -> float:
+    """₽ за период: тариф пакета + доплата только за слоты выше pack (никогда не вычитаем)."""
+    pack = max(1, int(pack))
+    extra = max(0, int(total_devices or pack) - pack)
+    return round(float(period_price(months)) + devices_cost(pack, extra) * int(months), 2)
 
 
 def period_stars(months: int) -> int:

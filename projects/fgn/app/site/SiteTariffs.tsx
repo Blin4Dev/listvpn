@@ -2,7 +2,7 @@
 // Цены — /api/app/plans (без входа); вошедшему — /payment/quote: минимум устройств с учётом текущей подписки.
 // «Оформить» → /checkout?months=&dev= (без входа — сначала /login?next=…).
 import React, { useEffect, useState } from "react";
-import { applyDiscount, appFetch, fetchDiscount, fetchQuote, type TariffPeriod } from "../utils/api";
+import { applyDiscount, appFetch, extraAbovePack, fetchDiscount, fetchQuote, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
 import { C } from "../components/fgn";
 
 const FALLBACK: TariffPeriod[] = [
@@ -86,7 +86,7 @@ function StepIcon({ plus }: { plus?: boolean }) {
 
 export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | null; onCheckout: (months: number, dev: number) => void }) {
   const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
-  const [included, setIncluded] = useState(2); // устройств в тарифе
+  const [included, setIncluded] = useState(PLAN_PACK_DEVICES);
   const [table, setTable] = useState<number[]>([]); // цена n-го устройства ₽/мес
   const [devPrice, setDevPrice] = useState(0);
   const [devMax, setDevMax] = useState(20);
@@ -102,9 +102,8 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
         const ps = Array.isArray(d?.periods) && d.periods.length ? d.periods : FALLBACK;
         setPeriods(ps);
         setSel((s) => (ps.some((p) => p.months === s) ? s : ps[ps.length - 1].months));
-        const min = Number(d?.min_devices || 3);
-        const inc = Number(d?.devices || 5);
-        setIncluded(Math.min(inc, min));
+        const min = Number(d?.min_devices || PLAN_PACK_DEVICES);
+        setIncluded(PLAN_PACK_DEVICES);
         setDevMin(min);
         if (Array.isArray(d?.device_prices)) setTable(d.device_prices.map(Number));
         setDevPrice(Number(d?.extra_device_price || 0));
@@ -123,10 +122,10 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
     void (async () => {
       const d = await fetchDiscount();
       setDiscount(d.active && d.percent > 0 ? d.percent : 0);
-      const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
+      const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: extraAbovePack(5), purpose: "subscription",
         subscription_id: null, use_referral_balance: false });
       if (!q) return;
-      const min = Number(q.min_devices || 3);
+      const min = Number(q.min_devices || PLAN_PACK_DEVICES);
       setDevMin(min);
       if (q.max_devices) setDevMax(Number(q.max_devices));
       if (Array.isArray(q.device_prices)) setTable(q.device_prices.map(Number));
@@ -135,16 +134,17 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
     })();
   }, [authed]);
 
-  const pack = Math.min(included, 3);
+  const pack = PLAN_PACK_DEVICES;
   const devNow = dev ?? included;
   const priceOf = (n: number) => (table.length ? Number(table[Math.min(n, table.length) - 1] ?? devPrice) : devPrice);
-  let devMonthly = 0;
-  for (let n = pack + 1; n <= devNow; n++) devMonthly += priceOf(n);
   const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
   const showDevices = devPrice > 0 || table.some((x) => x > 0);
   const step = (n: number) => setDev(Math.min(devMax, Math.max(devMin, n)));
 
-  const full = (p: TariffPeriod) => Math.round(p.price + devMonthly * p.months);
+  const full = (p: TariffPeriod) => {
+    const fb = FALLBACK.find((x) => x.months === p.months)?.price ?? 0;
+    return periodTotalRub(p, devNow, table, devPrice, fb);
+  };
   const final = (p: TariffPeriod) => (discount > 0 ? applyDiscount(full(p), discount) : full(p));
   const cur = periods.find((p) => p.months === sel) || periods[periods.length - 1];
   const monthly = periods.find((p) => p.months === 1);

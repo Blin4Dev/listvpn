@@ -207,8 +207,9 @@ export type CreatePaymentRequest = {
   return_to?: string;
 };
 
-// тарифы по периодам
-export type TariffPeriod = { months: number; days: number; price: number; stars?: number };
+// тарифы по периодам. цена периода — пакет из 3 устройств; 4-е и дальше только плюсуются
+export const PLAN_PACK_DEVICES = 3;
+export type TariffPeriod = { months: number; days: number; price: number; stars?: number; by_devices?: Record<string, number> };
 export type TariffsResponse = {
   devices: number;
   min_devices?: number;
@@ -219,11 +220,34 @@ export type TariffsResponse = {
   periods: TariffPeriod[];
 };
 
+export function extraAbovePack(total: number, pack = PLAN_PACK_DEVICES): number {
+  return Math.max(0, Math.round(Number(total) || 0) - pack);
+}
+
+export function periodTotalRub(
+  p: TariffPeriod,
+  selected: number,
+  table: number[],
+  extraPrice: number,
+  fallbackPrice: number,
+  pack = PLAN_PACK_DEVICES,
+): number {
+  const n = Math.max(pack, Math.round(Number(selected) || pack));
+  const listed = p.by_devices?.[String(n)];
+  if (listed != null && Number(listed) > 0) return Math.round(Number(listed));
+  const base = Number(p.price) > 0 ? Number(p.price) : Number(fallbackPrice) || 0;
+  let monthly = 0;
+  for (let i = pack + 1; i <= n; i++) {
+    monthly += table.length ? Number(table[Math.min(i, table.length) - 1] ?? extraPrice) : extraPrice;
+  }
+  return Math.round(base + monthly * p.months);
+}
+
 export async function fetchTariffs(): Promise<TariffsResponse> {
   const d = await appFetch<Partial<TariffsResponse>>("/plans");
   return {
-    devices: Number(d?.devices ?? 5),
-    min_devices: Number(d?.min_devices ?? 3),
+    devices: Number(d?.devices ?? PLAN_PACK_DEVICES),
+    min_devices: Number(d?.min_devices ?? PLAN_PACK_DEVICES),
     default_devices: Number(d?.default_devices ?? 5),
     max_devices: Number(d?.max_devices ?? 20),
     extra_device_price: Number(d?.extra_device_price ?? 0),

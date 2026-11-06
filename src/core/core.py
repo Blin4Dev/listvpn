@@ -1679,7 +1679,7 @@ def app_source(request: Optional[Request]) -> str:
 
 
 MAX_PLAN_DEVICES = 20
-PLAN_MIN_DEVICES = 3  # при новой покупке меньше нельзя
+PLAN_MIN_DEVICES = fulfillment.PACK_DEVICES  # при новой покупке меньше нельзя
 PLAN_DEFAULT_DEVICES = 5  # стартовое число устройств на экране тарифа
 
 
@@ -7990,9 +7990,9 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     months = req_months if purpose != "traffic_reset" else 1
     if purpose not in ("subscription", "extend", "devices", "traffic_reset", "gift"):
         raise HTTPException(400, detail={"message": "Неизвестный тип платежа"})
-    # период в панели — цена за минимальный пакет (3 устройства); 4-е и дальше — доплата
-    tariff_incl = fulfillment.tariff_devices() if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
-    plan_devices = min(tariff_incl, PLAN_MIN_DEVICES) if purpose in ("subscription", "extend") else tariff_incl
+    # период — пакет из PLAN_MIN_DEVICES; extra — только слоты сверх пакета (отрицательные с клиента игнор.)
+    pack = PLAN_MIN_DEVICES
+    plan_devices = pack if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
     extra_raw = int(body.extra_devices or 0)
     extra = min(50, max(0, extra_raw))
     extra_price = float(meta["extra_device_price"])
@@ -8053,23 +8053,24 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         target, upgrading_trial = fulfillment.find_extend_target(int(user["id"]), purpose, body.subscription_id)
         if target and target.get("no_renew"):
             raise HTTPException(400, detail={"message": "Продление этой подписки недоступно"})
-        # тариф = период (фикс. число устройств); устройства сверх тарифа, что уже есть, — по цене доп.
+        # тариф = период за пакет; слоты сверх пакета — доплата. ниже минимума не 400, а поднимаем до min
+        # (иначе quote падает → на оплате 0 ₽, если в подписке уже 5, а выбрали 3)
         base = fulfillment.period_price(months)
         base_stars = fulfillment.period_stars(months)
-        total_devices = plan_devices + extra
-        keep = fulfillment.retained_devices(
-            int(user["id"]), purpose, body.subscription_id, total_devices)
-        # новая покупка: от 3 устройств, по умолчанию 5; продление — не ниже уже купленных
-        min_devices = max(PLAN_MIN_DEVICES, plan_devices + fulfillment.retained_devices(
-            int(user["id"]), purpose, body.subscription_id, plan_devices))
+        total_devices = pack + extra
+        min_devices = max(pack, pack + fulfillment.retained_devices(
+            int(user["id"]), purpose, body.subscription_id, pack))
         default_devices = max(min_devices, PLAN_DEFAULT_DEVICES)
         if total_devices < min_devices:
-            raise HTTPException(400, detail={"message": f"Устройств: не меньше {min_devices}"})
+            extra = min_devices - pack
+            total_devices = min_devices
         if total_devices > MAX_PLAN_DEVICES:
             raise HTTPException(400, detail={"message": f"Устройств: не больше {MAX_PLAN_DEVICES}"})
-        add = max(0, extra + keep)
-        devices_price = fulfillment.devices_cost(plan_devices, add) * months
-        stars_dev = fulfillment.devices_cost_stars(plan_devices, add) * months
+        keep = fulfillment.retained_devices(
+            int(user["id"]), purpose, body.subscription_id, total_devices)
+        add = max(0, extra)
+        devices_price = fulfillment.devices_cost(pack, add) * months
+        stars_dev = fulfillment.devices_cost_stars(pack, add) * months
         base_part = float(base)
         devices_part = float(devices_price)
         price = float(base) + devices_price
@@ -8792,15 +8793,23 @@ def app_plans() -> dict[str, Any]:
         "extra_device_price": meta["extra_device_price"],
         "base_price": meta["base_price"],
         # тарифы по периодам
-        "devices": min(fulfillment.tariff_devices(), PLAN_MIN_DEVICES),
+        "devices": PLAN_MIN_DEVICES,
+        "pack_devices": PLAN_MIN_DEVICES,
         "min_devices": PLAN_MIN_DEVICES,
         "default_devices": PLAN_DEFAULT_DEVICES,
         # цена n-го устройства в ₽/мес (индекс n-1) — для выбора устройств без входа (сайт)
         "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
         "max_devices": MAX_PLAN_DEVICES,
         "periods": [
-            {"months": m, "days": fulfillment.period_days(m), "price": fulfillment.period_price(m),
-             "stars": fulfillment.period_stars(m)}
+            {
+                "months": m, "days": fulfillment.period_days(m),
+                "price": fulfillment.period_price(m),
+                "stars": fulfillment.period_stars(m),
+                "by_devices": {
+                    str(n): fulfillment.subscription_price(m, n)
+                    for n in range(PLAN_MIN_DEVICES, MAX_PLAN_DEVICES + 1)
+                },
+            }
             for m in fulfillment.SUB_PERIODS
         ],
     }

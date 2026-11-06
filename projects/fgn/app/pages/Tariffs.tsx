@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
-import { applyDiscount, fetchDiscount, fetchQuote, fetchTariffs, type TariffPeriod } from "../utils/api";
+import { applyDiscount, extraAbovePack, fetchDiscount, fetchQuote, fetchTariffs, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
 import { C, FgnCard, FgnHeader, FgnIcon, FgnPage } from "../components/fgn";
 
 const FALLBACK: TariffPeriod[] = [
@@ -99,10 +99,10 @@ export default function Tariffs() {
       } catch { /* без скидки */ }
       try {
         // продление: минимум — сколько устройств уже в подписке
-        const q = await fetchQuote({ plan_devices: 1, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
+        const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: extraAbovePack(5), purpose: "subscription",
           subscription_id: null, use_referral_balance: false });
         if (!q) return;
-        const min = Number(q.min_devices || 3);
+        const min = Number(q.min_devices || PLAN_PACK_DEVICES);
         setDevMin(min);
         if (q.max_devices) setDevMax(Number(q.max_devices));
         if (q.extra_device_price != null) setDevPrice(Number(q.extra_device_price));
@@ -120,12 +120,10 @@ export default function Tariffs() {
     navigate(`/payment?${q.toString()}`);
   };
 
+  const pack = PLAN_PACK_DEVICES;
   const devNow = devTotal ?? devices;
-  const included = Math.min(devices, 3);
+  const included = pack;
   const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
-  // период — пакет из 3 устройств; 4-е и дальше только плюсуем, не вычитаем
-  let devMonthly = 0;
-  for (let n = included + 1; n <= devNow; n++) devMonthly += priceOf(n);
   const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
   const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
 
@@ -170,7 +168,8 @@ export default function Tariffs() {
 
       <div style={{ marginTop: 13.5, display: "flex", flexDirection: "column", gap: 8 }}>
         {periods.map((p, i) => {
-          const full = Math.round(p.price + devMonthly * p.months);
+          const fb = FALLBACK.find((x) => x.months === p.months)?.price ?? 0;
+          const full = periodTotalRub(p, devNow, devTable, devPrice, fb);
           const final = discount > 0 ? applyDiscount(full, discount) : full;
           return (
             <FgnCard

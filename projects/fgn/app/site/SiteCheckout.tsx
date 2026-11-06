@@ -6,7 +6,7 @@
 // Звёзды Telegram на сайте не предлагаем. Перед оплатой — acceptTerms() (оферта принимается кнопкой «Оплатить»).
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  acceptTerms, claimDayGift, createPayment, fetchConfig, fetchMe, fetchPaymentStatus, fetchQuote, fetchTariffs, markPaymentSeen, redeemPromo,
+  acceptTerms, claimDayGift, createPayment, extraAbovePack, fetchConfig, fetchMe, fetchPaymentStatus, fetchQuote, markPaymentSeen, PLAN_PACK_DEVICES, redeemPromo,
   type PayMethodInfo, type PaymentMethod, type PaymentPurpose, type PaymentQuote, type PaymentStatusResponse,
 } from "../utils/api";
 import { formatDateRu } from "../utils/date";
@@ -93,7 +93,7 @@ function Checkout({ nav }: { nav: CabNav }) {
   const [methods, setMethods] = useState<PayMethodInfo[]>(FALLBACK_METHODS);
   const [method, setMethod] = useState<PaymentMethod>("sbp");
   const [providerMin, setProviderMin] = useState<Record<string, number>>({ card: 50, sbp: 10 });
-  const [planDevices, setPlanDevices] = useState<number | null>(purpose === "subscription" ? null : 1);
+  const [planDevices, setPlanDevices] = useState<number | null>(purpose === "subscription" ? PLAN_PACK_DEVICES : 1);
   const [ready, setReady] = useState(false);
   const [balance, setBalance] = useState(0);
   const [useBal, setUseBal] = useState(false);
@@ -119,14 +119,7 @@ function Checkout({ nav }: { nav: CabNav }) {
           if (first) setMethod(first.id);
         }
       } catch { /* запасной список */ }
-      if (purpose === "subscription") {
-        try {
-          const t = await fetchTariffs();
-          setPlanDevices(Math.min(t.devices, t.min_devices ?? 3));
-        } catch {
-          setPlanDevices(3);
-        }
-      }
+      if (purpose === "subscription") setPlanDevices(PLAN_PACK_DEVICES);
       setReady(true);
       const me = await fetchMe();
       if (me && typeof me.partner_balance === "number") setBalance(me.partner_balance);
@@ -134,7 +127,7 @@ function Checkout({ nav }: { nav: CabNav }) {
   }, [purpose]);
 
   const plan = planDevices ?? 1;
-  const extra = purpose === "devices" ? count : purpose === "subscription" && devParam > 0 ? Math.max(0, devParam - plan) : 0;
+  const extra = purpose === "devices" ? count : purpose === "subscription" && devParam > 0 ? extraAbovePack(devParam, plan) : 0;
   const req = { plan_devices: plan, months, method, extra_devices: extra, purpose, subscription_id: purpose === "devices" ? subId : null };
 
   useEffect(() => {
