@@ -4342,8 +4342,12 @@ def panel_user_remnawave(user_id: int, _: dict = Depends(require_panel)) -> dict
         return out
     out["found"] = True
     rw = grace.mask_rw(int(user_id), rw)
-    out["online_at"] = rw.get("onlineAt") or rw.get("online_at")
-    out["first_connected_at"] = rw.get("firstConnectedAt") or rw.get("first_connected_at")
+    # в новых версиях remnawave onlineAt/firstConnectedAt лежат в userTraffic, а не на верхнем уровне
+    ut = rw.get("userTraffic") if isinstance(rw.get("userTraffic"), dict) else {}
+    out["online_at"] = (rw.get("onlineAt") or rw.get("online_at") or ut.get("onlineAt")
+                        or ut.get("online_at") or rw.get("lastConnectedAt"))
+    out["first_connected_at"] = (rw.get("firstConnectedAt") or rw.get("first_connected_at")
+                                 or ut.get("firstConnectedAt") or ut.get("first_connected_at"))
     out["last_user_agent"] = rw.get("subLastUserAgent") or rw.get("sub_last_user_agent")
     out["status"] = rw.get("status")
     _tr = _rw_traffic(rw)
@@ -4356,7 +4360,13 @@ def panel_user_remnawave(user_id: int, _: dict = Depends(require_panel)) -> dict
     except Exception:  # noqa: BLE001
         pass
     try:
-        raw = unwrap_rw(client.get_user_hwid_devices(_rw_num_id(rw)))
+        # ручка hwid в одних версиях ждёт числовой id, в других — uuid
+        rw_key: Any = _rw_num_id(rw)
+        if rw_key is None:
+            rw_key = rw.get("uuid")
+        if rw_key is None:
+            raise ValueError("no remnawave user id")
+        raw = unwrap_rw(client.get_user_hwid_devices(rw_key))
         devices = raw.get("devices") if isinstance(raw, dict) else raw
         out["devices"] = [
             {
@@ -4370,6 +4380,12 @@ def panel_user_remnawave(user_id: int, _: dict = Depends(require_panel)) -> dict
             }
             for d in (devices or [])
         ]
+        # devices_used в базе никто не обновлял — синхронизируем с remnawave, чтобы списки не показывали 0
+        try:
+            db.execute("UPDATE subscriptions SET devices_used = ? WHERE user_id = ? AND status != 'Deleted'",
+                       (len(out["devices"]), int(user_id)))
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"hwid_error: {type(exc).__name__}"
     return out
