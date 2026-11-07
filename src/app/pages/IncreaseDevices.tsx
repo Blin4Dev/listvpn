@@ -78,6 +78,8 @@ export default function IncreaseDevices() {
   const [isTrial, setIsTrial] = useState(false);
 
   const [add, setAdd] = useState(1);
+  // участник семьи: степпер виден, но число устройств меняет только владелец
+  const [devLocked, setDevLocked] = useState(false);
   const [months, setMonths] = useState(1);
 
   const [quote, setQuote] = useState<{ price: number; full: number; discount: number } | null>(null);
@@ -131,6 +133,7 @@ export default function IncreaseDevices() {
       }).then((q) => {
         if (!alive) return;
         setQuote(q ? { price: Math.round(q.price), full: Math.round(q.full_price ?? q.price), discount: Number(q.discount_percent || 0) } : null);
+        if (q?.devices_locked) { setDevLocked(true); setAdd(1); }
         setQuoteBusy(false);
       });
     }, 180);
@@ -189,13 +192,15 @@ export default function IncreaseDevices() {
           <NoirCard style={{ ...rise(1), marginTop: 22, padding: "16px 16px 16px 18px", display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 17, fontWeight: 500, color: N.text }}>Сколько добавить</div>
-              <div style={{ marginTop: 5, fontSize: 14.5, color: N.muted }}>Станет {current + count}</div>
+              <div style={{ marginTop: 5, fontSize: 14.5, color: N.muted }}>
+                {devLocked ? "Число устройств меняет владелец семьи" : `Станет ${current + count}`}
+              </div>
             </div>
-            <StepBtn kind="minus" disabled={count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
+            <StepBtn kind="minus" disabled={devLocked || count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
             <div style={{ width: 40, textAlign: "center", fontSize: 19, fontWeight: 500, color: N.text, fontVariantNumeric: "tabular-nums" }}>
               {count}
             </div>
-            <StepBtn kind="plus" disabled={count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
+            <StepBtn kind="plus" disabled={devLocked || count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
           </NoirCard>
 
           <div style={{ ...rise(2), margin: "22px 0 12px", fontSize: 15, color: N.muted }}>На сколько месяцев</div>

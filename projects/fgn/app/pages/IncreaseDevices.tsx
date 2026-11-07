@@ -108,6 +108,8 @@ export default function IncreaseDevices() {
   const [isTrial, setIsTrial] = useState(false);
 
   const [add, setAdd] = useState(1);
+  // участник семьи: степпер виден, но число устройств меняет только владелец
+  const [devLocked, setDevLocked] = useState(false);
   const [months, setMonths] = useState(1);
 
   const [quote, setQuote] = useState<{ price: number; full: number; discount: number } | null>(null);
@@ -165,6 +167,7 @@ export default function IncreaseDevices() {
       }).then((q) => {
         if (!alive) return;
         setQuote(q ? { price: Math.round(q.price), full: Math.round(q.full_price ?? q.price), discount: Number(q.discount_percent || 0) } : null);
+        if (q?.devices_locked) { setDevLocked(true); setAdd(1); }
       });
     }, 180);
     return () => {
@@ -220,13 +223,15 @@ export default function IncreaseDevices() {
               <div style={{ flex: 1, minWidth: 0, fontSize: 16, fontWeight: 500, lineHeight: "20px", color: TEXT, whiteSpace: "nowrap" }}>
                 Сколько добавить
               </div>
-              <StepBtn icon="minus" label="Меньше" disabled={count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
+              <StepBtn icon="minus" label="Меньше" disabled={devLocked || count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
               <div style={{ width: 48, textAlign: "center", fontSize: 18, fontWeight: 500, lineHeight: "22px", color: TEXT, fontVariantNumeric: "tabular-nums" }}>
                 {count}
               </div>
-              <StepBtn icon="plus" label="Больше" disabled={count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
+              <StepBtn icon="plus" label="Больше" disabled={devLocked || count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
             </div>
-            <div style={{ marginTop: 7, fontSize: 14, lineHeight: "20px", color: MUTED }}>Станет {current + count}</div>
+            <div style={{ marginTop: 7, fontSize: 14, lineHeight: "20px", color: MUTED }}>
+              {devLocked ? "Вы в семейной подписке — число устройств меняет владелец семьи." : `Станет ${current + count}`}
+            </div>
           </div>
 
           {/* на сколько месяцев */}

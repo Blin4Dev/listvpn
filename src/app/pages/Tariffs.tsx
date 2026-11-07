@@ -81,6 +81,8 @@ export default function Tariffs() {
   const [devMax, setDevMax] = useState(20);
   const [devPrice, setDevPrice] = useState(0);
   const [devTable, setDevTable] = useState<number[]>([]); // цена n-го устройства в месяц
+  // участник семьи: степпер виден, но число устройств меняет только владелец
+  const [devLocked, setDevLocked] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -109,6 +111,10 @@ export default function Tariffs() {
           if (q.extra_device_price != null) setDevPrice(Number(q.extra_device_price));
           if (Array.isArray(q.device_prices) && q.device_prices.length) setDevTable(q.device_prices.map(Number));
           setDevTotal((n) => Math.max(min, n));
+          if (q.devices_locked) {
+            setDevLocked(true);
+            if (q.devices_total) setDevTotal(Number(q.devices_total));
+          }
         }
       } catch { /* степпер уже есть из /plans */ }
       setLoaded(true);
@@ -152,13 +158,17 @@ export default function Tariffs() {
                 {included} в тарифе · следующее +{Math.round(devNow >= devMax ? priceOf(devNow) : nextPrice)} ₽/мес
               </div>
             </div>
-            <StepBtn icon="remove" label="Меньше устройств" disabled={devNow <= devMin} onClick={() => setDev(devNow - 1)} />
+            <StepBtn icon="remove" label="Меньше устройств" disabled={devLocked || devNow <= devMin} onClick={() => setDev(devNow - 1)} />
             <div style={{ minWidth: 34, textAlign: "center", fontSize: 21, fontWeight: 600, color: N.text, fontVariantNumeric: "tabular-nums" }}>
               {devNow}
             </div>
-            <StepBtn icon="add" label="Больше устройств" disabled={devNow >= devMax} onClick={() => setDev(devNow + 1)} />
+            <StepBtn icon="add" label="Больше устройств" disabled={devLocked || devNow >= devMax} onClick={() => setDev(devNow + 1)} />
           </div>
-          {devMin > devices ? (
+          {devLocked ? (
+            <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.4, color: N.dim }}>
+              Вы в семейной подписке — число устройств меняет владелец семьи.
+            </div>
+          ) : devMin > devices ? (
             <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.4, color: N.dim }}>
               Сейчас в подписке {devMin} {devicesWord(devMin)} — при продлении они сохраняются.
             </div>
