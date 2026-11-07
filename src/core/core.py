@@ -8005,8 +8005,8 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         (view["id"],),
     )
     limit = max((int(k.get("devices_limit") or 0) for k in keys), default=1)
-    # докупка устройств — к платной подписке; и владельцу, и гостям семьи
-    can_buy = any(str(k.get("type") or "") != "trial" for k in keys)
+    # докупка устройств — к платной подписке и только владельцу (участник семьи меняет число устройств не может)
+    can_buy = owner is None and any(str(k.get("type") or "") != "trial" for k in keys)
 
     # реальные hwid из remnawave
     devices: list[dict[str, Any]] = []
@@ -8036,6 +8036,7 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' ORDER BY id DESC LIMIT 1", (view["id"],))
     addons = fulfillment.device_addons_for((active_sub or {}).get("id"))
     return {"devices": devices, "used": len(devices), "limit": limit, "can_buy": can_buy, "can_delete": owner is None,
+            "family_member": owner is not None,
             "extra_device_price": float(meta["extra_device_price"]),
             "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
             "addon_months": list(fulfillment.DEVICE_ADDON_MONTHS),
@@ -8115,8 +8116,10 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     keep = 0
     min_devices = PLAN_MIN_DEVICES
     default_devices = PLAN_DEFAULT_DEVICES
-    # участник семьи число устройств не выбирает — это делает владелец (степпер у него выключен)
-    devices_locked = purpose in ("subscription", "extend", "devices") and family_owner_for(user) is not None
+    # участник семьи число устройств не выбирает: платит ровно за столько, сколько сейчас в семейной
+    # подписке, а докупать устройства может только владелец (степпер у участника выключен)
+    fam_owner = family_owner_for(user) if purpose in ("subscription", "extend", "devices") else None
+    devices_locked = fam_owner is not None
 
     if purpose == "traffic_reset":
         tr_price = float(db.get_setting("traffic_reset_price", "0") or 0)
@@ -8134,7 +8137,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     elif purpose == "devices":
         # доп. устройства со своим сроком: цена × кол-во × месяцы
         if devices_locked:
-            extra = 1
+            raise HTTPException(403, detail={"message": "Докупить устройства может только владелец семьи"})
         if extra <= 0:
             raise HTTPException(400, detail={"message": "Не указано число устройств"})
         # гость семьи докупает слоты к общей подписке — подписке владельца
@@ -8179,8 +8182,13 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             int(user["id"]), purpose, body.subscription_id, pack))
         default_devices = max(min_devices, PLAN_DEFAULT_DEVICES)
         if devices_locked:
-            extra = default_devices - pack
-            total_devices = default_devices
+            fam_sub = db.fetchone(
+                "SELECT devices_limit FROM subscriptions WHERE user_id = ? AND status = 'Active' "
+                "ORDER BY expires_at DESC, id DESC LIMIT 1", (int(fam_owner["id"]),))
+            fam_devices = int((fam_sub or {}).get("devices_limit") or PLAN_DEFAULT_DEVICES)
+            fam_devices = min(MAX_PLAN_DEVICES, max(pack, fam_devices, min_devices))
+            min_devices = default_devices = total_devices = fam_devices
+            extra = fam_devices - pack
         if total_devices < min_devices:
             extra = min_devices - pack
             total_devices = min_devices

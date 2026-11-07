@@ -30,6 +30,7 @@ const rub = (n: number) => `${String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d)
 type DevicesInfo = {
   limit?: number;
   can_buy?: boolean;
+  family_member?: boolean; // участник семьи: докупает только владелец
   extra_device_price?: number;
   device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
   addon_months?: number[];
@@ -122,6 +123,7 @@ export default function IncreaseDevices() {
         if (d.extra_device_price) setPrice(Number(d.extra_device_price));
         if (Array.isArray(d.device_prices)) setTable(d.device_prices.map(Number));
         if (Array.isArray(d.addon_months) && d.addon_months.length) setPeriods(d.addon_months);
+        if (d.family_member) setDevLocked(true);
       } catch { /* значения по умолчанию */ }
       try {
         const sub = await fetchSubscription();
@@ -152,7 +154,7 @@ export default function IncreaseDevices() {
 
   // цена с сервера (скидки), с небольшой задержкой при щёлканье
   useEffect(() => {
-    if (!loaded || isTrial || maxAdd <= 0) return;
+    if (!loaded || isTrial || maxAdd <= 0 || devLocked) return;
     let alive = true;
     setQuote(null);
     const t = window.setTimeout(() => {
@@ -167,7 +169,6 @@ export default function IncreaseDevices() {
       }).then((q) => {
         if (!alive) return;
         setQuote(q ? { price: Math.round(q.price), full: Math.round(q.full_price ?? q.price), discount: Number(q.discount_percent || 0) } : null);
-        if (q?.devices_locked) { setDevLocked(true); setAdd(1); }
       });
     }, 180);
     return () => {
@@ -230,7 +231,7 @@ export default function IncreaseDevices() {
               <StepBtn icon="plus" label="Больше" disabled={devLocked || count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
             </div>
             <div style={{ marginTop: 7, fontSize: 14, lineHeight: "20px", color: MUTED }}>
-              {devLocked ? "Вы в семейной подписке — число устройств меняет владелец семьи." : `Станет ${current + count}`}
+              {devLocked ? "Вы в семейной подписке — докупить устройства может только владелец семьи." : `Станет ${current + count}`}
             </div>
           </div>
 
@@ -317,8 +318,9 @@ export default function IncreaseDevices() {
           <button
             type="button"
             className="blin-press"
-            onClick={pay}
-            style={{ ...fgnButton, ...fade, marginTop: 21, flexShrink: 0, height: 52, borderRadius: 16, background: "#F3F3F4", fontSize: 16, letterSpacing: 0 }}
+            onClick={devLocked ? undefined : pay}
+            disabled={devLocked}
+            style={{ ...fgnButton, ...fade, opacity: devLocked ? 0.45 : (fade.opacity ?? 1), marginTop: 21, flexShrink: 0, height: 52, borderRadius: 16, background: "#F3F3F4", fontSize: 16, letterSpacing: 0 }}
           >
             Оплатить {rub(total)}
           </button>

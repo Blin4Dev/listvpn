@@ -163,7 +163,7 @@ export default function Tariffs() {
           </div>
           {devLocked ? (
             <div style={{ marginTop: 6, fontSize: 13.5, lineHeight: "17px", color: MUTED }}>
-              Вы в семейной подписке — число устройств меняет владелец семьи.
+              Вы в семейной подписке — оплатить можно только столько устройств, сколько в ней сейчас. Менять число устройств может владелец семьи.
             </div>
           ) : devMin > devices ? (
             <div style={{ marginTop: 6, fontSize: 13.5, lineHeight: "17px", color: MUTED }}>

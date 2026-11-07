@@ -19,6 +19,7 @@ function monthsWord(n: number) {
 type DevicesInfo = {
   limit?: number;
   can_buy?: boolean;
+  family_member?: boolean; // участник семьи: докупает только владелец
   extra_device_price?: number;
   device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
   addon_months?: number[];
@@ -93,6 +94,7 @@ export default function IncreaseDevices() {
         if (d.extra_device_price) setPrice(Number(d.extra_device_price));
         if (Array.isArray(d.device_prices)) setTable(d.device_prices.map(Number));
         if (Array.isArray(d.addon_months) && d.addon_months.length) setPeriods(d.addon_months);
+        if (d.family_member) setDevLocked(true);
       } catch { /* defaults */ }
       try {
         const sub = await fetchSubscription();
@@ -118,7 +120,7 @@ export default function IncreaseDevices() {
 
   // цена с сервера (скидки), с небольшой задержкой при щёлканье
   useEffect(() => {
-    if (!loaded || isTrial || maxAdd <= 0) return;
+    if (!loaded || isTrial || maxAdd <= 0 || devLocked) return;
     let alive = true;
     setQuoteBusy(true);
     const t = window.setTimeout(() => {
@@ -133,7 +135,6 @@ export default function IncreaseDevices() {
       }).then((q) => {
         if (!alive) return;
         setQuote(q ? { price: Math.round(q.price), full: Math.round(q.full_price ?? q.price), discount: Number(q.discount_percent || 0) } : null);
-        if (q?.devices_locked) { setDevLocked(true); setAdd(1); }
         setQuoteBusy(false);
       });
     }, 180);
@@ -193,7 +194,7 @@ export default function IncreaseDevices() {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 17, fontWeight: 500, color: N.text }}>Сколько добавить</div>
               <div style={{ marginTop: 5, fontSize: 14.5, color: N.muted }}>
-                {devLocked ? "Число устройств меняет владелец семьи" : `Станет ${current + count}`}
+                {devLocked ? "Докупить устройства может только владелец семьи" : `Станет ${current + count}`}
               </div>
             </div>
             <StepBtn kind="minus" disabled={devLocked || count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
@@ -268,7 +269,7 @@ export default function IncreaseDevices() {
           ) : null}
 
           <div style={{ ...rise(4), marginTop: 22 }}>
-            <NoirButton primary disabled={!loaded || quoteBusy} onClick={pay}>
+            <NoirButton primary disabled={!loaded || quoteBusy || devLocked} onClick={pay}>
               {quoteBusy ? "Считаем…" : `Оплатить ${total} ₽`}
             </NoirButton>
           </div>
