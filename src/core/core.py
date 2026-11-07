@@ -1680,7 +1680,7 @@ def app_source(request: Optional[Request]) -> str:
 
 MAX_PLAN_DEVICES = 20
 PLAN_MIN_DEVICES = fulfillment.PACK_DEVICES  # при новой покупке меньше нельзя
-PLAN_DEFAULT_DEVICES = 5  # стартовое число устройств на экране тарифа
+PLAN_DEFAULT_DEVICES = PLAN_MIN_DEVICES  # стартовое число устройств на экране тарифа: цена за пакет, дальше докупка
 
 
 def _float_setting(key: str, default: float) -> float:
@@ -8173,20 +8173,19 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         target, upgrading_trial = fulfillment.find_extend_target(int(user["id"]), purpose, body.subscription_id)
         if target and target.get("no_renew"):
             raise HTTPException(400, detail={"message": "Продление этой подписки недоступно"})
-        # тариф = период за пакет; слоты сверх пакета — доплата. ниже минимума не 400, а поднимаем до min
-        # (иначе quote падает → на оплате 0 ₽, если в подписке уже 5, а выбрали 3)
+        # тариф = период за пакет (3 устройства); сверх пакета — доплата. при продлении число устройств
+        # выбирается заново: можно и уменьшить до пакета, и увеличить до MAX_PLAN_DEVICES
         base = fulfillment.period_price(months)
         base_stars = fulfillment.period_stars(months)
         total_devices = pack + extra
-        min_devices = max(pack, pack + fulfillment.retained_devices(
-            int(user["id"]), purpose, body.subscription_id, pack))
-        default_devices = max(min_devices, PLAN_DEFAULT_DEVICES)
+        min_devices = pack
+        default_devices = max(pack, PLAN_DEFAULT_DEVICES)
         if devices_locked:
             fam_sub = db.fetchone(
                 "SELECT devices_limit FROM subscriptions WHERE user_id = ? AND status = 'Active' "
                 "ORDER BY expires_at DESC, id DESC LIMIT 1", (int(fam_owner["id"]),))
             fam_devices = int((fam_sub or {}).get("devices_limit") or PLAN_DEFAULT_DEVICES)
-            fam_devices = min(MAX_PLAN_DEVICES, max(pack, fam_devices, min_devices))
+            fam_devices = min(MAX_PLAN_DEVICES, max(pack, fam_devices))
             min_devices = default_devices = total_devices = fam_devices
             extra = fam_devices - pack
         if total_devices < min_devices:
@@ -8194,8 +8193,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             total_devices = min_devices
         if total_devices > MAX_PLAN_DEVICES:
             raise HTTPException(400, detail={"message": f"Устройств: не больше {MAX_PLAN_DEVICES}"})
-        keep = fulfillment.retained_devices(
-            int(user["id"]), purpose, body.subscription_id, total_devices)
+        keep = 0
         add = max(0, extra)
         devices_price = fulfillment.devices_cost(pack, add) * months
         stars_dev = fulfillment.devices_cost_stars(pack, add) * months

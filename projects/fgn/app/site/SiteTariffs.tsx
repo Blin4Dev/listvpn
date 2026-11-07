@@ -2,7 +2,7 @@
 // Цены — /api/app/plans (без входа); вошедшему — /payment/quote: минимум устройств с учётом текущей подписки.
 // «Оформить» → /checkout?months=&dev= (без входа — сначала /login?next=…).
 import React, { useEffect, useState } from "react";
-import { applyDiscount, appFetch, extraAbovePack, fetchDiscount, fetchQuote, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
+import { applyDiscount, appFetch, fetchDiscount, fetchQuote, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
 import { C } from "../components/fgn";
 
 const FALLBACK: TariffPeriod[] = [
@@ -108,7 +108,7 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
         if (Array.isArray(d?.device_prices)) setTable(d.device_prices.map(Number));
         setDevPrice(Number(d?.extra_device_price || 0));
         if (d?.max_devices) setDevMax(Number(d.max_devices));
-        setDev((v) => v ?? Math.max(min, Number(d?.default_devices || 5)));
+        setDev((v) => v ?? Math.max(min, Number(d?.default_devices || PLAN_PACK_DEVICES)));
       } catch { /* запасные цены */ }
     })();
   }, []);
@@ -122,14 +122,14 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
     void (async () => {
       const d = await fetchDiscount();
       setDiscount(d.active && d.percent > 0 ? d.percent : 0);
-      const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: extraAbovePack(5), purpose: "subscription",
+      const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
         subscription_id: null, use_referral_balance: false });
       if (!q) return;
       const min = Number(q.min_devices || PLAN_PACK_DEVICES);
       setDevMin(min);
       if (q.max_devices) setDevMax(Number(q.max_devices));
       if (Array.isArray(q.device_prices)) setTable(q.device_prices.map(Number));
-      const def = Math.max(min, Number(q.default_devices || 5));
+      const def = Math.max(min, Number(q.default_devices || PLAN_PACK_DEVICES));
       setDev((v) => Math.max(min, v ?? def));
     })();
   }, [authed]);

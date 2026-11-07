@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
-import { applyDiscount, extraAbovePack, fetchDiscount, fetchQuote, fetchTariffs, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
+import { applyDiscount, fetchDiscount, fetchQuote, fetchTariffs, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
 import { C, FgnCard, FgnHeader, FgnIcon, FgnPage } from "../components/fgn";
 
 const FALLBACK: TariffPeriod[] = [
@@ -74,7 +74,7 @@ export default function Tariffs() {
   const [devices, setDevices] = useState(5);
   const [discount, setDiscount] = useState(0);
   // устройства: сколько всего (минимум — тариф или то, что уже есть в подписке), цена доп. устройства в месяц
-  const [devTotal, setDevTotal] = useState(5);
+  const [devTotal, setDevTotal] = useState(PLAN_PACK_DEVICES);
   const [devMin, setDevMin] = useState(3);
   const [devMax, setDevMax] = useState(20);
   const [devPrice, setDevPrice] = useState(0);
@@ -93,7 +93,7 @@ export default function Tariffs() {
         setDevMax(Number(t.max_devices || 20));
         setDevPrice(Number(t.extra_device_price || 0));
         if (t.device_prices?.length) setDevTable(t.device_prices);
-        setDevTotal(Math.max(min, Number(t.default_devices || 5)));
+        setDevTotal(Math.max(min, Number(t.default_devices || PLAN_PACK_DEVICES)));
       } catch { /* запасные цены */ }
       try {
         const d = await fetchDiscount();
@@ -101,7 +101,7 @@ export default function Tariffs() {
       } catch { /* без скидки */ }
       try {
         // продление: минимум — сколько устройств уже в подписке
-        const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: extraAbovePack(5), purpose: "subscription",
+        const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
           subscription_id: null, use_referral_balance: false });
         if (!q) return;
         const min = Number(q.min_devices || PLAN_PACK_DEVICES);
