@@ -433,7 +433,7 @@ export const UserDetailPage: React.FC<{
               ) : <span className="faint">нет ссылки</span>}
             </InfoRow>
             <InfoRow label="Устройств">
-              <span className="mono">{sub.devices_used ?? 0} / {sub.devices_limit ?? 1}</span>
+              <span className="mono">{rw?.found ? rw.devices.length : (sub.devices_used ?? 0)} / {sub.devices_limit ?? 1}</span>
               {canEdit && <button className="icon-btn" title="Изменить лимит" onClick={() => setAction('SET_DEVICES')}><Edit2 size={14} /></button>}
             </InfoRow>
             {canEdit && (

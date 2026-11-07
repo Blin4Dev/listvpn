@@ -616,7 +616,7 @@ class RemnawaveAPI:
     def get_hwid_devices(self, **params: Any) -> Any:
         return self.get("/api/hwid/devices", params=params or None)
 
-    def get_user_hwid_devices(self, user_id: int) -> Any:
+    def get_user_hwid_devices(self, user_id: "int | str") -> Any:
         return self.get(f"/api/hwid/devices/{user_id}")
 
     def _assert_hwid_body(self, body: dict[str, Any]) -> None:
