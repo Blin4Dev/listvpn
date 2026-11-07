@@ -31,6 +31,7 @@ export interface KeyItem {
 export interface Promo {
   type?: 'discount' | 'days';
   id: number; code: string; name: string; value: string; uses: number; limit: number; expires: string;
+  family?: boolean; // «1 раз на семью»
 }
 
 export interface TrackingLink {

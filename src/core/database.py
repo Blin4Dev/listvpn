@@ -1197,10 +1197,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     add_columns = {
         "promocodes": {
             "name": "ALTER TABLE promocodes ADD COLUMN name TEXT",
+            # «1 раз на семью»: после активации ни владелец, ни участники семьи код больше не применят
+            "once_per_family": "ALTER TABLE promocodes ADD COLUMN once_per_family INTEGER NOT NULL DEFAULT 0",
         },
         "promocode_activations": {
             "discount_percent": "ALTER TABLE promocode_activations ADD COLUMN discount_percent REAL NOT NULL DEFAULT 0",
             "expires_at": "ALTER TABLE promocode_activations ADD COLUMN expires_at TEXT",
+            # владелец семьи, в которой был активировавший (или он сам) — на случай, если потом выйдет из семьи
+            "family_owner_id": "ALTER TABLE promocode_activations ADD COLUMN family_owner_id INTEGER",
         },
         "users": {
             "tracking_code": "ALTER TABLE users ADD COLUMN tracking_code TEXT",

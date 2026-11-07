@@ -282,11 +282,12 @@ ADMIN_PERMS: list[tuple[str, str, str, str, list[tuple]]] = [
         ("GET PUT", r"/app-api"), ("POST", r"/app-api/keys"), ("DELETE", r"/app-api/keys/\d+"),
         ("POST", r"/app-api/sessions/revoke")]),
     ("Настройки", "settings.price", "Цены и тарифы", "project", [("GET PUT", r"/plans"), ("GET", r"/plans/meta")]),
-    ("Настройки", "settings.antiabuse", "Антиабуз", "network", [("GET PUT", r"/plans"), ("GET", r"/plans/meta")]),
+    # часть настроек анти-абуза (пробный по HWID) и сквады — свои у каждого проекта: проект проверяется
+    ("Настройки", "settings.antiabuse", "Антиабуз", "network", [("GET PUT", r"/plans", "project"), ("GET", r"/plans/meta", "project")]),
     ("Настройки", "settings.legal", "Оферта и политика", "project", [("GET PUT", r"/content/(?:offer|privacy)")]),
     ("Настройки", "settings.squads", "Сквады и льготный период", "network", [
-        ("GET", r"/squads(?:/external)?"), ("PUT", r"/squads/(?:external|mapping|[0-9a-fA-F-]{8,64})"),
-        ("POST", r"/squads/sync"), ("GET PUT", r"/grace"), ("GET", r"/remnawave/squads")]),
+        ("GET", r"/squads(?:/external)?", "project"), ("PUT", r"/squads/(?:external|mapping|[0-9a-fA-F-]{8,64})", "project"),
+        ("POST", r"/squads/sync", "project"), ("GET PUT", r"/grace", "project"), ("GET", r"/remnawave/squads", "project")]),
     ("Настройки", "settings.mail", "Почта", "network", [
         ("GET PUT", r"/mail"), ("POST", r"/mail/(?:dns|login-test|port25|send-test)")]),
     ("Настройки", "settings.captcha", "Капча", "network", [("GET PUT", r"/settings/captcha")]),

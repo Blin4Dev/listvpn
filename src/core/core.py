@@ -1937,6 +1937,7 @@ def serialize_promocode(p: dict[str, Any]) -> dict[str, Any]:
         "uses_count": p.get("uses_count", 0),
         "expires_at": p.get("expires_at"),  # срок, до которого промокод можно активировать
         "is_active": bool(p.get("is_active")),
+        "once_per_family": bool(p.get("once_per_family")),
         "created_at": p.get("created_at"),
     }
 
@@ -2371,6 +2372,7 @@ class PromocodeBody(BaseModel):
     uses_limit: Optional[int] = None
     expires_at: Optional[str] = None  # срок активации промокода
     is_active: Any = 1
+    once_per_family: Any = None       # «1 раз на семью»; None при правке — не менять
 
 
 class PromotionBody(BaseModel):
@@ -5665,7 +5667,9 @@ def panel_keys(
 
 @app.post("/api/panel/keys")
 def panel_create_key(body: CreateKeyBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
-    if not get_user(body.user_id):
+    owner = get_user(body.user_id)
+    # пользователь — только из открытого проекта (иначе ключ выдался бы в чужом проекте)
+    if not owner or projects.of(owner) != db.pid():
         raise HTTPException(404, detail="User not found")
     key = create_key(
         user_id=body.user_id,
@@ -6001,8 +6005,8 @@ def panel_promo_create(body: PromocodeBody, _: dict = Depends(require_panel)) ->
         raise HTTPException(409, detail={"message": f"Промокод с таким кодом уже есть{where}"})
     ptype, pval = _promo_type_value(body)
     db.execute(
-        "INSERT INTO promocodes (code, name, type, value, uses_limit, uses_count, expires_at, is_active, created_at) "
-        "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+        "INSERT INTO promocodes (code, name, type, value, uses_limit, uses_count, expires_at, is_active, created_at, "
+        "once_per_family) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
         (
             body.code.upper().strip(),
             (body.name or "").strip() or None,
@@ -6012,6 +6016,7 @@ def panel_promo_create(body: PromocodeBody, _: dict = Depends(require_panel)) ->
             body.expires_at,
             1 if _as_bool(body.is_active, True) else 0,
             now,
+            1 if _as_bool(body.once_per_family, False) else 0,
         ),
     )
     item = db.fetchone("SELECT * FROM promocodes WHERE id = ?", (db.last_id(),))
@@ -6027,7 +6032,7 @@ def panel_promo_update(promo_id: int, body: PromocodeBody, _: dict = Depends(req
     ptype, pval = _promo_type_value(body)
     db.execute(
         "UPDATE promocodes SET code = ?, name = ?, type = ?, value = ?, uses_limit = ?, "
-        "expires_at = ?, is_active = ? WHERE id = ?",
+        "expires_at = ?, is_active = ?, once_per_family = ? WHERE id = ?",
         (
             body.code.upper().strip(),
             (body.name or "").strip() or None,
@@ -6036,6 +6041,7 @@ def panel_promo_update(promo_id: int, body: PromocodeBody, _: dict = Depends(req
             body.uses_limit,
             body.expires_at,
             1 if _as_bool(body.is_active, bool(item.get("is_active"))) else 0,
+            1 if _as_bool(body.once_per_family, bool(item.get("once_per_family"))) else 0,
             promo_id,
         ),
     )
@@ -6889,8 +6895,20 @@ def panel_plans_meta(_: dict = Depends(require_owner)) -> dict[str, Any]:
     return get_plans_meta()
 
 
+# поля вкладки «Анти-абуз»; всё остальное в PUT /plans — цены и пробный период
+_AA_PLAN_FIELDS = {"antiabuse_enabled", "aa_hwid_multiplier", "aa_ip_extra", "aa_grace_hours", "aa_warn_days",
+                   "trial_hwid_enabled", "trial_hwid_max"}
+
+
 @app.put("/api/panel/plans")
-def panel_put_plans(body: PlansUpdateBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+def panel_put_plans(body: PlansUpdateBody, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    if is_admin(p):
+        # цены и анти-абуз сохраняются одной ручкой: право на одно не даёт менять другое
+        sent = {k for k, v in body.model_dump(exclude_unset=True).items() if v is not None} - {"whitelist_squad_uuid"}
+        if sent & _AA_PLAN_FIELDS and not admin_has(p, "settings.antiabuse"):
+            raise HTTPException(403, detail={"message": "Нет права менять анти-абуз"})
+        if sent - _AA_PLAN_FIELDS and not admin_has(p, "settings.price"):
+            raise HTTPException(403, detail={"message": "Нет права менять цены"})
     def _num(v: Any, lo: float, hi: float) -> float:
         try:
             f = float(v)

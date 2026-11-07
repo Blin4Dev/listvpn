@@ -200,11 +200,11 @@ def _staff_last_reply(sid: int) -> Optional[datetime]:
 
 def _check_inbox(cfg, sid, st, waits, now, need, warn_at, notify, res) -> None:
     """один штраф за все взятые тикеты сотрудника, не за каждый; «Ожидание» уже выкинуто из waits."""
+    # сотрудник разгребает пачку: отсчёт — от его последнего ответа клиенту.
+    # раньше тут был ранний выход «ответил меньше need минут назад — не проверяем», из-за него
+    # проверка пропускала окно предупреждения (need-5…need) и сразу выписывала штраф без «скоро штраф».
+    # для штрафа он лишний: от last_reply ниже и так считаются рабочие минуты.
     last_reply = _staff_last_reply(int(sid))
-    if last_reply:
-        _, recent = staffpay.work_minutes(int(sid), last_reply, now, need)
-        if recent is None:
-            return
     oldest_start = min(start for _, _, start in waits)
     if last_reply and last_reply > oldest_start:
         oldest_start = last_reply

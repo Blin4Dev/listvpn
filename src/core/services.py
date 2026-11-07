@@ -55,38 +55,49 @@ def activate_promocode(user_id: int, code: str) -> dict[str, Any]:
     is_days = str(promo.get("type") or "discount") == "days"
     if is_days and not db.projects.get(db.projects.of(promo)).feature("promo_days"):
         raise ServiceError("Промокод не найден", 404)
-    already = db.fetchone(
-        "SELECT id FROM promocode_activations WHERE promocode_id = ? AND user_id = ?",
-        (promo["id"], user_id),
-    )
-    if already:
-        raise ServiceError("Промокод уже активирован", 400)
-
     percent = 0.0 if is_days else float(promo.get("value") or 0)
     expires_at = (_utcnow() + timedelta(days=PROMO_DISCOUNT_DAYS)).isoformat()
 
-    # атомарный uses_count с проверкой uses_limit
-    if promo.get("uses_limit") is not None:
-        cur = db.execute(
-            "UPDATE promocodes SET uses_count = uses_count + 1 "
-            "WHERE id = ? AND uses_count < uses_limit",
-            (promo["id"],),
+    # проверки и запись — одной транзакцией (BEGIN IMMEDIATE): двое из семьи одновременно не активируют
+    with db.transaction():
+        already = db.fetchone(
+            "SELECT id FROM promocode_activations WHERE promocode_id = ? AND user_id = ?",
+            (promo["id"], user_id),
         )
-        if cur.rowcount == 0:
-            raise ServiceError("Лимит использований исчерпан", 400)
-    else:
-        db.execute("UPDATE promocodes SET uses_count = uses_count + 1 WHERE id = ?", (promo["id"],))
+        if already:
+            raise ServiceError("Промокод уже активирован", 400)
+        owner_id, group = family_group(int(user_id))
+        if promo.get("once_per_family"):
+            marks = ",".join("?" * len(group))
+            used = db.fetchone(
+                f"SELECT id FROM promocode_activations WHERE promocode_id = ? "
+                f"AND (user_id IN ({marks}) OR family_owner_id IN ({marks})) LIMIT 1",
+                (promo["id"], *group, *group),
+            )
+            if used:
+                raise ServiceError("Этот промокод уже использован в вашей семье", 400)
 
-    try:
-        db.execute(
-            "INSERT INTO promocode_activations (promocode_id, user_id, discount_percent, expires_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (promo["id"], user_id, percent, expires_at, db.utcnow_iso()),
-        )
-    except Exception:  # noqa: BLE001
-        # откатить uses_count при гонке unique-index
-        db.execute("UPDATE promocodes SET uses_count = uses_count - 1 WHERE id = ?", (promo["id"],))
-        raise ServiceError("Промокод уже активирован", 400)
+        # атомарный uses_count с проверкой uses_limit
+        if promo.get("uses_limit") is not None:
+            cur = db.execute(
+                "UPDATE promocodes SET uses_count = uses_count + 1 "
+                "WHERE id = ? AND uses_count < uses_limit",
+                (promo["id"],),
+            )
+            if cur.rowcount == 0:
+                raise ServiceError("Лимит использований исчерпан", 400)
+        else:
+            db.execute("UPDATE promocodes SET uses_count = uses_count + 1 WHERE id = ?", (promo["id"],))
+
+        try:
+            db.execute(
+                "INSERT INTO promocode_activations (promocode_id, user_id, discount_percent, expires_at, created_at, "
+                "family_owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (promo["id"], user_id, percent, expires_at, db.utcnow_iso(), owner_id),
+            )
+        except Exception:  # noqa: BLE001
+            # гонка unique-index: транзакция откатится целиком (и uses_count тоже)
+            raise ServiceError("Промокод уже активирован", 400)
     if is_days:
         # дни к подписке: подарок ждёт кнопку «Забрать» (в мини-приложении или из сообщения бота)
         days = max(1, int(float(promo.get("value") or 0)))
@@ -94,6 +105,18 @@ def activate_promocode(user_id: int, code: str) -> dict[str, Any]:
         return {"type": "days", "days": days, "gift_id": gift["id"], "code": code, "name": promo.get("name"),
                 "percent": 0, "expires_at": gift.get("expires_at")}
     return {"type": "discount", "percent": percent, "expires_at": expires_at, "code": code, "name": promo.get("name")}
+
+
+def family_group(user_id: int) -> tuple[int, list[int]]:
+    """(владелец семьи, [владелец + активные участники]); не в семье — (сам, [сам])."""
+    try:
+        import family  # type: ignore
+    except ImportError:  # pragma: no cover
+        from . import family  # type: ignore
+    uid = int(user_id)
+    owner = family.active_owner_id(uid) or uid
+    group = {owner, uid, *family.member_ids(owner)}
+    return owner, sorted(group)
 
 
 DAY_GIFT_VALID_DAYS = 14  # сколько дней подарок ждёт кнопку «Забрать»
