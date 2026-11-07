@@ -8,7 +8,7 @@ import { useOutside } from '../lib/hooks';
 import { mapApiUser } from '../lib/mappers';
 import { usePaginatedList } from '../lib/pagination';
 import type { User } from '../lib/types';
-import { isFull, isOwner, useMe } from '../lib/access';
+import { can, isAdmin, isFull, isOwner, useMe } from '../lib/access';
 
 export const MASS_ACTIONS = [
   { t: 'MASS_ADD_DAYS', icon: Calendar, label: 'Добавить дни всем' },
@@ -26,7 +26,9 @@ export const UsersPage: React.FC<{
   const [showMass, setShowMass] = useState(false);
   const me = useMe();
   const owner = isOwner(me);  // массовые действия — owner; компенсация всем — ещё и куратор
-  const massList = MASS_ACTIONS.filter((a) => owner || (isFull(me) && (a as { curator?: boolean }).curator));
+  const massList = isAdmin(me)
+    ? (can(me, 'users.mass') ? MASS_ACTIONS : [])
+    : MASS_ACTIONS.filter((a) => owner || (isFull(me) && (a as { curator?: boolean }).curator));
   const canEdit = massList.length > 0;
   const massRef = useOutside<HTMLDivElement>(() => setShowMass(false));
   const filterRef = useOutside<HTMLDivElement>(() => setShowFilter(false));

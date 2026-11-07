@@ -6,7 +6,7 @@ import {
 import { UserActionModal } from './components/UserActionModal';
 import { Spinner, ToastContainer } from './components/ui';
 import { apiFetch, clearPanelToken, getPanelToken, parseApiErr, setWriteGuard } from './lib/api';
-import { MeContext, canOpenPage, isOwner, type Me } from './lib/access';
+import { MeContext, ROLE_LABEL, canOpenPage, canSettingsTab, isOwner, pageReadOnly, type Me } from './lib/access';
 import { NETWORK_PAGES, NETWORK_SETTINGS, ProjectContext, getProjectId, rememberProject, switchProject, type ProjectsState } from './lib/project';
 import { disablePush, enablePush, pushSupported, syncPush } from './lib/push';
 import type { Toast, ToastType } from './lib/types';
@@ -165,6 +165,11 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [route0] = useState(() => {
     const r = parseRoute(window.location.pathname, window.location.search);
+    // раздел настроек без доступа → первый доступный
+    if (r.page === 'Настройки' && !canSettingsTab(me, r.tab)) {
+      const t = SETTINGS_SECTIONS.find((x) => canSettingsTab(me, x.id));
+      if (t) r.tab = t.id;
+    }
     if (r.userId != null || canOpenPage(me, r.page)) return r;
     // нет доступа: первая доступная страница
     const first = NAV.flatMap((g) => g.items).find((i) => canOpenPage(me, i.name));
@@ -221,8 +226,11 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
     if (detailUserId == null || me.role !== 'operator') return;
     apiFetch(`/panel/users/${detailUserId}/can-manage`).then((r) => setCanManage(!!r?.can_manage)).catch(() => setCanManage(false));
   }, [detailUserId, me.role]);
-  const readOnly = me.role === 'operator' && detailUserId != null && canManage !== true;
-  setWriteGuard(readOnly ? 'Менять можно только пользователя, чьё обращение у вас в работе' : null);
+  // администратор без права на изменения в разделе — только просмотр
+  const adminReadOnly = detailUserId == null && pageReadOnly(me, activePage);
+  const readOnly = (me.role === 'operator' && detailUserId != null && canManage !== true) || adminReadOnly;
+  setWriteGuard(adminReadOnly ? 'В этом разделе у вас доступ только на просмотр'
+    : readOnly ? 'Менять можно только пользователя, чьё обращение у вас в работе' : null);
   const pageAllowed = detailUserId != null ? canOpenPage(me, 'Пользователи') : canOpenPage(me, activePage);
 
   // web push
@@ -282,7 +290,7 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
                     </button>
                     {settingsOpen && (
                       <div className="flex flex-col gap-1" style={{ paddingLeft: 14, borderLeft: '1px solid var(--border)', marginLeft: 18 }}>
-                        {SETTINGS_SECTIONS.map((t) => (
+                        {SETTINGS_SECTIONS.filter((t) => canSettingsTab(me, t.id)).map((t) => (
                           <button key={t.id} className={`nav-item ${activePage === 'Настройки' && settingsTab === t.id ? 'on' : ''}`} style={{ padding: '7px 10px', fontSize: 13 }}
                             onClick={() => { setActivePage('Настройки'); setSettingsTab(t.id); setDetailUserId(null); setMonNodeId(null); setChatId(null); setIsMobileMenuOpen(false); }}>
                             <t.icon size={15} className={activePage === 'Настройки' && settingsTab === t.id ? '' : 'faint'} /> {t.label}
@@ -322,8 +330,8 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
               {pushOn ? <Bell size={16} /> : <BellOff size={16} className="faint" />}
             </button>
           )}
-          <span className="sub" style={{ fontSize: 13, marginRight: 12 }} title={isOwner(me) ? 'Владелец панели' : `${me.role === 'curator' ? 'Куратор' : 'Оператор'} · ${me.username}`}>
-            {isOwner(me) ? 'Администратор' : `${me.name} · ${me.role === 'curator' ? 'куратор' : 'оператор'}`}
+          <span className="sub" style={{ fontSize: 13, marginRight: 12 }} title={isOwner(me) ? 'Владелец панели' : `${ROLE_LABEL[me.role] || 'Сотрудник'} · ${me.username}`}>
+            {isOwner(me) ? 'Администратор' : `${me.name} · ${(ROLE_LABEL[me.role] || 'сотрудник').toLowerCase()}`}
           </span>
           <button className="icon-btn danger" onClick={onLogout} title="Выход"><Lock size={16} /></button>
         </div>
@@ -351,7 +359,10 @@ export function AuthenticatedApp({ onLogout, me }: { onLogout: () => void; me: M
               {activePage === 'Акции' && <PromotionsPage onToast={addToast} />}
               {activePage === 'Ссылки' && <TrackingLinksPage onToast={addToast} />}
               {activePage === 'Мониторинг' && <MonitoringPage onToast={addToast} nodeId={monNodeId} setNodeId={setMonNodeId} />}
-              {activePage === 'Настройки' && <SettingsPage onToast={addToast} tab={settingsTab} onTab={setSettingsTab} />}
+              {activePage === 'Настройки' && !canSettingsTab(me, settingsTab) && (
+                <div className="card flex flex-col items-center justify-center sub" style={{ padding: 40, gap: 10 }}><Lock size={28} className="faint" /><div>Нет доступа к этому разделу настроек</div></div>
+              )}
+              {activePage === 'Настройки' && canSettingsTab(me, settingsTab) && <SettingsPage onToast={addToast} tab={settingsTab} onTab={setSettingsTab} />}
               {activePage === 'Сотрудники' && <StaffPage onToast={addToast} />}
               {activePage === 'Зарплата' && <SalaryPage />}
             </>

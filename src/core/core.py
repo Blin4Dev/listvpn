@@ -2156,13 +2156,34 @@ def _owner_principal(username: str) -> dict[str, Any]:
 
 
 def _staff_principal(st: dict[str, Any]) -> dict[str, Any]:
-    return {"kind": "staff", "role": staffmod.role_of(st), "actor": f"staff:{int(st['id'])}", "staff_id": int(st["id"]),
-            "username": st["username"], "name": staffmod.display_name(st)}
+    p = {"kind": "staff", "role": staffmod.role_of(st), "actor": f"staff:{int(st['id'])}", "staff_id": int(st["id"]),
+         "username": st["username"], "name": staffmod.display_name(st)}
+    if p["role"] == "admin":
+        acc = staffmod.admin_access(st)
+        p["perms"] = staffmod.effective_perms(acc["perms"])
+        p["projects"] = acc["projects"]
+    return p
+
+
+def is_admin(p: dict[str, Any]) -> bool:
+    return p.get("role") == "admin"
+
+
+def admin_has(p: dict[str, Any], perm: str) -> bool:
+    return is_admin(p) and perm in (p.get("perms") or set())
+
+
+def admin_project_ok(p: dict[str, Any], pid: Optional[str]) -> bool:
+    """администратору открыт этот проект (владельцу и сотрудникам поддержки — все)."""
+    if not is_admin(p):
+        return True
+    allowed = p.get("projects") or []
+    return "*" in allowed or (pid or "") in allowed
 
 
 def is_full(p: dict[str, Any]) -> bool:
-    """полный доступ к поддержке: владелец и кураторы."""
-    return p.get("role") in ("owner", "curator")
+    """полный доступ к поддержке: владелец, кураторы и администраторы с правом «Поддержка»."""
+    return p.get("role") in ("owner", "curator") or admin_has(p, "support")
 
 
 def _require_operator_shift(p: dict[str, Any]) -> None:
@@ -2185,9 +2206,24 @@ def _staff_has_ticket_with(actor: str, user_id: int) -> bool:
 
 
 def can_manage_user(p: dict[str, Any], user_id: int) -> bool:
-    if is_full(p):
+    if is_full(p) or is_admin(p):  # администратора ограничивают права на действия, а не тикеты
         return True
     return 0 < int(user_id) < 10 ** 18 and _staff_has_ticket_with(p["actor"], int(user_id))
+
+
+def _authorize_admin(p: dict[str, Any], request: Request, path: str) -> None:
+    """администратор: путь открыт его правами, проект запроса — из разрешённых."""
+    deny = HTTPException(403, detail={"message": "Недостаточно прав"})
+    scope = staffmod.admin_route(request.method, path[len("/api/panel"):], p.get("perms") or set())
+    if scope is None:
+        raise deny
+    if scope == "project":
+        if not admin_project_ok(p, db.pid()):
+            raise HTTPException(403, detail={"message": "Нет доступа к этому проекту"})
+        # сводка «вся сеть» — только с доступом ко всем проектам
+        if str(request.query_params.get("scope") or "") == "all" and "*" not in (p.get("projects") or []):
+            raise HTTPException(403, detail={"message": "Сводка по всей сети доступна только с доступом ко всем проектам"})
+    p["authorized"] = True
 
 
 def _authorize_staff(p: dict[str, Any], method: str, path: str) -> None:
@@ -2237,12 +2273,25 @@ def require_panel(request: Request, authorization: Optional[str] = Header(None))
     except Exception:  # noqa: BLE001
         pass
     if p["kind"] != "owner":
-        _authorize_staff(p, request.method, request.scope.get("path") or "")
+        path = request.scope.get("path") or ""
+        if not path.startswith("/api/panel/"):
+            raise HTTPException(403, detail={"message": "Недостаточно прав"})
+        if is_admin(p):
+            _authorize_admin(p, request, path)
+        else:
+            _authorize_staff(p, request.method, path)
     return p
 
 
 def require_owner(p: dict[str, Any] = Depends(require_panel)) -> dict[str, Any]:
-    """только владелец панели."""
+    """владелец панели — или администратор, которому этот путь открыт его правами (проверено в require_panel)."""
+    if p.get("kind") == "owner" or (is_admin(p) and p.get("authorized")):
+        return p
+    raise HTTPException(403, detail={"message": "Недостаточно прав"})
+
+
+def require_real_owner(p: dict[str, Any] = Depends(require_panel)) -> dict[str, Any]:
+    """только сам владелец: сотрудники и администраторы, их права, проекты и серверы."""
     if p.get("kind") != "owner":
         raise HTTPException(403, detail={"message": "Недостаточно прав"})
     return p
@@ -2765,6 +2814,9 @@ def panel_me(p: dict = Depends(require_panel)) -> dict[str, Any]:
     if p["kind"] == "staff":
         out["staff_id"] = int(p["staff_id"])
         out["shift"] = staffpay.shift_now(int(p["staff_id"]))
+    if is_admin(p):
+        out["perms"] = sorted(p.get("perms") or [])
+        out["projects"] = list(p.get("projects") or [])
     return out
 
 
@@ -2776,6 +2828,7 @@ class StaffCreateBody(BaseModel):
     role: str = "operator"
     default_pay: Any = 0
     default_intervals: Optional[list[Any]] = None
+    permissions: Optional[dict[str, Any]] = None   # администратор: {"perms": [...], "projects": ["*"] | [...]}
 
 
 class StaffUpdateBody(BaseModel):
@@ -2786,6 +2839,7 @@ class StaffUpdateBody(BaseModel):
     is_active: Optional[bool] = None
     default_pay: Any = None
     default_intervals: Optional[list[Any]] = None
+    permissions: Optional[dict[str, Any]] = None
 
 
 class StaffDayBody(BaseModel):
@@ -2863,12 +2917,20 @@ def panel_staff_list(p: dict = Depends(require_panel)) -> dict[str, Any]:
     if not owner:
         # куратору только активные операторы
         rows = [r for r in rows if r.get("is_active") and staffmod.role_of(r) == "operator"]
-    return {"staff": [_staff_card(r, owner) for r in rows], "roles": staffmod.ROLES, "bot_ready": bool(projects.get(projects.DEFAULT).bot_token),
-            "today": staffpay.today_msk().isoformat()}
+    out = {"staff": [_staff_card(r, owner) for r in rows], "roles": staffmod.ROLES, "bot_ready": bool(projects.get(projects.DEFAULT).bot_token),
+           "today": staffpay.today_msk().isoformat()}
+    if owner:
+        out["admin_perms"] = staffmod.perms_catalog()
+        out["projects"] = [{"id": pr.id, "name": pr.public().get("name") or pr.id} for pr in projects.all_projects()]
+    return out
+
+
+def _known_project_ids() -> set[str]:
+    return {pr.id for pr in projects.all_projects()}
 
 
 @app.post("/api/panel/staff")
-def panel_staff_create(body: StaffCreateBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+def panel_staff_create(body: StaffCreateBody, _: dict = Depends(require_real_owner)) -> dict[str, Any]:
     admin = get_admin() or {}
     username = _staff_call(staffmod.validate_username, body.username, admin.get("username") or "")
     password = _staff_call(staffmod.validate_password, body.password)
@@ -2877,20 +2939,23 @@ def panel_staff_create(body: StaffCreateBody, _: dict = Depends(require_owner)) 
     role = _staff_call(staffmod.validate_role, body.role)
     iv = _staff_call(staffpay.validate_intervals, body.default_intervals if body.default_intervals is not None else [["10:00", "19:00"]])
     pay = _staff_call(staffpay.validate_money, body.default_pay, "Базовая ставка")
+    perms_json = "{}"
+    if role == "admin":
+        perms_json = _staff_call(staffmod.validate_access, body.permissions, _known_project_ids())
     if staffmod.by_username(username):
         raise HTTPException(409, detail={"message": "Сотрудник с таким логином уже есть"})
     digest, salt = hash_password(password)
     now = iso()
     cur = db.execute(
         "INSERT INTO panel_staff (username, name, password_hash, password_salt, telegram_id, permissions, role, "
-        "is_active, created_at, updated_at, default_pay, default_intervals) VALUES (?, ?, ?, ?, ?, '{}', ?, 1, ?, ?, ?, ?)",
-        (username, name, digest, salt, tg, role, now, now, pay, json.dumps(iv)),
+        "is_active, created_at, updated_at, default_pay, default_intervals) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+        (username, name, digest, salt, tg, perms_json, role, now, now, pay, json.dumps(iv)),
     )
     return staffmod.public(staffmod.get(int(cur.lastrowid)))
 
 
 @app.put("/api/panel/staff/{staff_id}")
-def panel_staff_update(staff_id: int, body: StaffUpdateBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+def panel_staff_update(staff_id: int, body: StaffUpdateBody, _: dict = Depends(require_real_owner)) -> dict[str, Any]:
     st = _staff_or_404(staff_id)
     sets: dict[str, Any] = {}
     kill = False
@@ -2907,6 +2972,16 @@ def panel_staff_update(staff_id: int, body: StaffUpdateBody, _: dict = Depends(r
         kill = True
     if body.role is not None:
         sets["role"] = _staff_call(staffmod.validate_role, body.role)
+    new_role = sets.get("role") or staffmod.role_of(st)
+    if new_role == "admin":
+        if body.permissions is not None:
+            sets["permissions"] = _staff_call(staffmod.validate_access, body.permissions, _known_project_ids())
+        elif staffmod.role_of(st) != "admin":
+            raise HTTPException(400, detail={"message": "Укажите права администратора"})
+    elif staffmod.role_of(st) == "admin":
+        sets["permissions"] = "{}"   # больше не администратор — права стираем
+    if "role" in sets and sets["role"] != staffmod.role_of(st):
+        kill = True   # роль сменилась — пусть войдёт заново
     if body.is_active is not None:
         sets["is_active"] = 1 if body.is_active else 0
         if not body.is_active:
@@ -3147,11 +3222,13 @@ def panel_push_test(p: dict = Depends(require_panel)) -> dict[str, Any]:
 
 
 @app.get("/api/panel/projects")
-def panel_projects(_: dict = Depends(require_panel)) -> dict[str, Any]:
-    """проекты сети для переключателя в панели (без секретов)."""
+def panel_projects(me: dict = Depends(require_panel)) -> dict[str, Any]:
+    """проекты сети для переключателя в панели (без секретов); администратору — только его проекты."""
     items = []
     any_ready = False
     for p in projects.all_projects():
+        if not admin_project_ok(me, p.id):
+            continue
         d = p.public()
         try:
             with projects.use(p.id):
@@ -4565,6 +4642,8 @@ def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(requ
     action = str(body.action or "").upper()
     if p["role"] == "operator" and action in staffmod.OPERATOR_FORBIDDEN_ACTIONS:
         raise HTTPException(403, detail={"message": "Оператору это действие недоступно — передайте обращение админу"})
+    if is_admin(p) and not admin_has(p, f"users.action.{action}"):
+        raise HTTPException(403, detail={"message": "Нет права на это действие"})
     value = body.value
 
     if action in ("ADD_BALANCE", "SUB_BALANCE"):
@@ -5467,7 +5546,7 @@ def _mass_compensate_run(user_ids: list[int], p: dict[str, Any], notify: bool) -
 
 @app.post("/api/panel/users/mass-compensate")
 def panel_mass_compensate(body: Optional[CompensateBody] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
-    if p.get("role") not in ("owner", "curator"):
+    if p.get("role") not in ("owner", "curator") and not admin_has(p, "users.mass"):
         raise HTTPException(403, detail={"message": "Компенсацию всем выдают только администратор и куратор"})
     since = iso(utcnow() - timedelta(seconds=COMPENSATION_COOLDOWN_SEC))
     busy = HTTPException(409, detail={"message": "Компенсация всем уже выдаётся — подождите несколько минут"})
@@ -9671,6 +9750,8 @@ def panel_support_chats(q: str = Query("", max_length=100), status: str = Query(
             continue
         if not _chat_visible(c, p, t):
             continue
+        if not admin_project_ok(p, c.get("project_id")):
+            continue
         tab = _tab_of(c, t, p)
         if tab not in counts:
             continue
@@ -9969,7 +10050,7 @@ def _can_manage_assigned(p: dict[str, Any], assigned: Optional[str]) -> bool:
         return True
     if p.get("kind") == "owner" or p.get("role") == "owner":
         return True
-    if p.get("role") == "curator":
+    if p.get("role") == "curator" or admin_has(p, "support"):
         return _holder_role(assigned) == "operator"
     return False
 
@@ -10132,8 +10213,11 @@ def panel_support_storage(_: dict = Depends(require_owner)) -> dict[str, Any]:
 @app.get("/api/panel/users/{user_id}/can-manage")
 def panel_user_can_manage(user_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
     """может ли сотрудник менять этого юзера."""
-    return {"can_manage": can_manage_user(p, user_id), "restricted_actions":
-            sorted(staffmod.OPERATOR_FORBIDDEN_ACTIONS) if p["role"] == "operator" else []}
+    if is_admin(p):
+        restricted = sorted(a for a in staffmod.USER_ACTION_KEYS if not admin_has(p, f"users.action.{a}"))
+    else:
+        restricted = sorted(staffmod.OPERATOR_FORBIDDEN_ACTIONS) if p["role"] == "operator" else []
+    return {"can_manage": can_manage_user(p, user_id), "restricted_actions": restricted}
 
 
 class S3ConfigBody(BaseModel):

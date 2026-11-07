@@ -8,7 +8,7 @@ import { DCard, InfoRow, Modal, PaymentStatusBadge, Spinner, refundedRowStyle } 
 import { apiFetch, copyToClipboard, mergeInfo, parseErr } from '../../lib/api';
 import { DEFAULT_REF_RATE, fmtDateTime, relTime, whenRu } from '../../lib/format';
 import type { PaymentRow, ToastType } from '../../lib/types';
-import { isOwner, useMe } from '../../lib/access';
+import { can, canUserAction, isAdmin, isOwner, useMe } from '../../lib/access';
 import { ExchangeModal, TransferModal } from './SubscriptionActions';
 import { PaymentActions } from '../../components/PaymentActions';
 
@@ -82,7 +82,12 @@ export const UserDetailPage: React.FC<{
   userId: number; onBack: () => void; onToast: (t: string, m: string, ty?: ToastType) => void; onOpenUser: (id: number) => void;
   canEdit?: boolean;
 }> = ({ userId, onBack, onToast, onOpenUser, canEdit = true }) => {
-  const owner = isOwner(useMe());  // возвраты только owner
+  const me = useMe();
+  const owner = isOwner(me);  // возвраты только owner
+  // администратор: каждая кнопка — по его правам; остальным — как раньше (canEdit)
+  const ca = (action: string) => canEdit && canUserAction(me, action);
+  const cp = (perm: string) => canEdit && (!isAdmin(me) || can(me, perm));
+  const ownerOr = (perm: string) => owner || can(me, perm);
   const [detail, setDetail] = useState<UserDetailData | null>(null);
   const [payments, setPayments] = useState<PaymentRow[]>([]);
   const [rw, setRw] = useState<RwInfo | null>(null);
@@ -185,13 +190,13 @@ export const UserDetailPage: React.FC<{
       <div className="flex items-center justify-between gap-3" style={{ flexWrap: 'wrap' }}>
         <button className="btn" onClick={onBack}><ArrowLeft size={16} /> К пользователям</button>
         <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          {!detail.is_banned && <button className="btn" disabled={busy} onClick={() => void compensate()} title="+1 день к подписке и скидка 7% на следующую покупку"><Gift size={15} /> Компенсация</button>}
+          {!detail.is_banned && cp('users.compensate') && <button className="btn" disabled={busy} onClick={() => void compensate()} title="+1 день к подписке и скидка 7% на следующую покупку"><Gift size={15} /> Компенсация</button>}
         {canEdit && (
           <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             {detail.key_blocked
-              ? <button className="btn" disabled={busy} onClick={() => void doAction('UNBLOCK_KEY', null, false)}><CheckCircle size={15} /> Разблокировать ключ</button>
-              : <button className="btn danger" disabled={busy} onClick={() => void doAction('BLOCK_KEY', null, false, 'Заблокировать ключ (подписку) пользователя?')}><Ban size={15} /> Заблокировать ключ</button>}
-            {owner && <button className="btn danger" disabled={busy} onClick={() => void doAction('DELETE_USER', null, false, 'Удалить аккаунт безвозвратно из базы и Remnawave?')}><Trash2 size={15} /> Удалить</button>}
+              ? ca('UNBLOCK_KEY') && <button className="btn" disabled={busy} onClick={() => void doAction('UNBLOCK_KEY', null, false)}><CheckCircle size={15} /> Разблокировать ключ</button>
+              : ca('BLOCK_KEY') && <button className="btn danger" disabled={busy} onClick={() => void doAction('BLOCK_KEY', null, false, 'Заблокировать ключ (подписку) пользователя?')}><Ban size={15} /> Заблокировать ключ</button>}
+            {ca('DELETE_USER') && <button className="btn danger" disabled={busy} onClick={() => void doAction('DELETE_USER', null, false, 'Удалить аккаунт безвозвратно из базы и Remnawave?')}><Trash2 size={15} /> Удалить</button>}
           </div>
         )}
         </div>
@@ -215,7 +220,7 @@ export const UserDetailPage: React.FC<{
               <div className="sub">
                 Участник семьи <button className="link" style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }} onClick={() => onOpenUser((detail.family as any).owner_id)}>{detail.family.owner_name}</button>
                 {detail.family.active ? '' : ' (сейчас не действует)'}
-                {canEdit && <> · <button style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove()}>вывести из семьи</button></>}
+                {cp('users.family') && <> · <button style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove()}>вывести из семьи</button></>}
               </div>
             )}
             {detail.family && detail.family.role === 'owner' && (
@@ -226,7 +231,7 @@ export const UserDetailPage: React.FC<{
                     {i > 0 && ', '}
                     {m.user_id ? <button style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }} onClick={() => onOpenUser(Number(m.user_id))}>{m.name}</button> : m.name}
                     {m.status === 'pending' ? ' (приглашён)' : ''}
-                    {canEdit && <button title="Убрать из семьи" style={{ background: 'none', border: 0, padding: '0 2px', cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove(m.id)}>×</button>}
+                    {cp('users.family') && <button title="Убрать из семьи" style={{ background: 'none', border: 0, padding: '0 2px', cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove(m.id)}>×</button>}
                   </span>
                 ))}
               </div>
@@ -239,7 +244,7 @@ export const UserDetailPage: React.FC<{
             {!detail.is_banned && detail.blacklist_ignored && detail.blacklist_reason != null && <div className="sub">В общем чёрном списке ({detail.blacklist_reason || 'без причины'}) — разблокирован вручную</div>}
             {!canEdit && <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>Только просмотр — менять данные можно, когда обращение у вас в работе</div>}
           </div>
-          {canEdit && <button className="btn solid" onClick={() => setAction('NOTIFY')}><Send size={15} /> Написать</button>}
+          {ca('NOTIFY') && <button className="btn solid" onClick={() => setAction('NOTIFY')}><Send size={15} /> Написать</button>}
         </div>
       </div>
 
@@ -247,7 +252,7 @@ export const UserDetailPage: React.FC<{
         <DCard title="Профиль" icon={Hash}>
           <InfoRow label="Внутренний ID"><span className="mono">{detail.id}</span></InfoRow>
           <InfoRow label="Telegram ID">
-            {canEdit && editTg ? (
+            {ca('SET_TELEGRAM_ID') && editTg ? (
               <>
                 <input className="input mono sm" style={{ width: 150 }} value={tgDraft} onChange={(e) => setTgDraft(e.target.value)} placeholder="123456789" />
                 <button className="icon-btn" title="Сохранить" onClick={async () => { await doAction('SET_TELEGRAM_ID', tgDraft); setEditTg(false); }}><Save size={15} /></button>
@@ -256,13 +261,13 @@ export const UserDetailPage: React.FC<{
             ) : (
               <>
                 <span className="mono">{detail.telegram_id ?? '—'}</span>
-                {canEdit && <button className="icon-btn" title={detail.telegram_id ? 'Изменить' : 'Привязать'} onClick={() => { setTgDraft(String(detail.telegram_id ?? '')); setEditTg(true); }}><Edit2 size={14} /></button>}
-                {canEdit && detail.telegram_id && detail.email && <button className="btn sm danger" onClick={() => void doAction('UNBIND_TELEGRAM', null, false, 'Отвязать Telegram от аккаунта?')}>Отвязать</button>}
+                {ca('SET_TELEGRAM_ID') && <button className="icon-btn" title={detail.telegram_id ? 'Изменить' : 'Привязать'} onClick={() => { setTgDraft(String(detail.telegram_id ?? '')); setEditTg(true); }}><Edit2 size={14} /></button>}
+                {ca('UNBIND_TELEGRAM') && detail.telegram_id && detail.email && <button className="btn sm danger" onClick={() => void doAction('UNBIND_TELEGRAM', null, false, 'Отвязать Telegram от аккаунта?')}>Отвязать</button>}
               </>
             )}
           </InfoRow>
           <InfoRow label="Email">
-            {canEdit && editEmail ? (
+            {ca('SET_EMAIL') && editEmail ? (
               <>
                 <input className="input mono sm" style={{ width: 190 }} value={emailDraft} onChange={(e) => setEmailDraft(e.target.value)} placeholder="user@mail.com" />
                 <button className="icon-btn" title="Сохранить" onClick={async () => { await doAction('SET_EMAIL', emailDraft); setEditEmail(false); }}><Save size={15} /></button>
@@ -271,8 +276,8 @@ export const UserDetailPage: React.FC<{
             ) : (
               <>
                 <span className="mono">{detail.email ?? '—'}</span>
-                {canEdit && <button className="icon-btn" title={detail.email ? 'Изменить' : 'Привязать'} onClick={() => { setEmailDraft(detail.email ?? ''); setEditEmail(true); }}><Edit2 size={14} /></button>}
-                {canEdit && detail.email && detail.telegram_id && <button className="btn sm danger" onClick={() => void doAction('UNBIND_EMAIL', null, false, 'Отвязать email от аккаунта?')}>Отвязать</button>}
+                {ca('SET_EMAIL') && <button className="icon-btn" title={detail.email ? 'Изменить' : 'Привязать'} onClick={() => { setEmailDraft(detail.email ?? ''); setEditEmail(true); }}><Edit2 size={14} /></button>}
+                {ca('UNBIND_EMAIL') && detail.email && detail.telegram_id && <button className="btn sm danger" onClick={() => void doAction('UNBIND_EMAIL', null, false, 'Отвязать email от аккаунта?')}>Отвязать</button>}
               </>
             )}
           </InfoRow>
@@ -293,7 +298,7 @@ export const UserDetailPage: React.FC<{
               </span>
             </InfoRow>
           )}
-          {canEdit && (
+          {ca('RESET_TRIAL') && (
             <div className="flex gap-2 mt-3">
               <button className="btn sm" title={(detail.trial_resettable ?? detail.has_trial) ? '' : 'Сбрасывать нечего — пробный и так доступен'} disabled={!(detail.trial_resettable ?? detail.has_trial)} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
             </div>
@@ -303,14 +308,14 @@ export const UserDetailPage: React.FC<{
         <DCard title="Реферальная программа" icon={Percent}>
           <InfoRow label="Процент реферала">
             <span className="mono">{detail.partner_rate}%</span>
-            {canEdit && owner && <button className="icon-btn" title="Изменить" onClick={() => setAction('SET_PARTNER_RATE')}><Edit2 size={14} /></button>}
+            {canEdit && ownerOr('users.action.SET_PARTNER_RATE') && <button className="icon-btn" title="Изменить" onClick={() => setAction('SET_PARTNER_RATE')}><Edit2 size={14} /></button>}
           </InfoRow>
           <InfoRow label="Реферальный баланс">
             <span className="mono">{detail.partner_balance} ₽</span>
-            {canEdit && owner && (<>
-              <button className="icon-btn" title="Начислить" onClick={() => setAction('ADD_PARTNER_BALANCE')}><Plus size={14} /></button>
-              <button className="icon-btn" title="Списать" onClick={() => setAction('SUB_PARTNER_BALANCE')}><ArrowDownLeft size={14} /></button>
-              <button className="icon-btn" title="Установить" onClick={() => setAction('SET_PARTNER_BALANCE')}><Wallet size={14} /></button>
+            {canEdit && (owner || isAdmin(me)) && (<>
+              {ca('ADD_PARTNER_BALANCE') && <button className="icon-btn" title="Начислить" onClick={() => setAction('ADD_PARTNER_BALANCE')}><Plus size={14} /></button>}
+              {ca('SUB_PARTNER_BALANCE') && <button className="icon-btn" title="Списать" onClick={() => setAction('SUB_PARTNER_BALANCE')}><ArrowDownLeft size={14} /></button>}
+              {ca('SET_PARTNER_BALANCE') && <button className="icon-btn" title="Установить" onClick={() => setAction('SET_PARTNER_BALANCE')}><Wallet size={14} /></button>}
             </>)}
           </InfoRow>
           <div className="mt-3">
@@ -320,7 +325,7 @@ export const UserDetailPage: React.FC<{
                 {detail.referrals.map((r) => (
                   <div key={r.id} className="inset flex items-center justify-between" style={{ padding: '8px 10px' }}>
                     <button className="btn sm" style={{ background: 'transparent', border: 'none', padding: 0 }} onClick={() => onOpenUser(r.id)}>{r.username ? `@${r.username}` : (r.telegram_id ? `id${r.telegram_id}` : `#${r.id}`)}</button>
-                    {canEdit && owner && <button className="icon-btn danger" title="Отвязать" onClick={() => void unlinkReferral(r.id)}><X size={14} /></button>}
+                    {canEdit && ownerOr('users.referrals') && <button className="icon-btn danger" title="Отвязать" onClick={() => void unlinkReferral(r.id)}><X size={14} /></button>}
                   </div>
                 ))}
               </div>
@@ -335,12 +340,12 @@ export const UserDetailPage: React.FC<{
             <span style={{ fontWeight: 700, color: 'var(--accent, #F18726)' }}>{detail.discount.percent}%</span>
             <span className="sub">{detail.discount.code}{detail.discount.name ? `${detail.discount.code ? ' · ' : ''}${detail.discount.name}` : ''}</span>
             <span className="sub">{detail.discount.compensation_id ? 'на одну покупку' : `до ${fmtDateTime(detail.discount.expires_at)}`}</span>
-            {canEdit && <button className="btn sm danger" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', detail.discount?.compensation_id ? '@compensation' : (detail.discount?.code || null), false, 'Снять скидку у пользователя?')}>Снять</button>}
+            {ca('REMOVE_PROMO') && <button className="btn sm danger" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', detail.discount?.compensation_id ? '@compensation' : (detail.discount?.code || null), false, 'Снять скидку у пользователя?')}>Снять</button>}
           </InfoRow>
         ) : (
           <div className="muted sm" style={{ marginBottom: 10 }}>Активной скидки нет.</div>
         )}
-        {canEdit && (
+        {ca('APPLY_PROMO') && (
           <div className="flex items-center gap-2 mt-3" style={{ flexWrap: 'wrap' }}>
             <input className="input mono sm" style={{ width: 170 }} value={promoDraft} onChange={(e) => setPromoDraft(e.target.value.toUpperCase())} placeholder="ПРОМОКОД" />
             <button className="btn sm solid" disabled={busy || !promoDraft.trim()} onClick={async () => { await doAction('APPLY_PROMO', promoDraft.trim()); setPromoDraft(''); }}>Выдать промокод</button>
@@ -358,7 +363,7 @@ export const UserDetailPage: React.FC<{
                     <span className={`badge ${a.active ? 'solid' : 'line'}`}>{a.active ? 'активна' : 'истекла'}</span>
                     <span className="sub">до {fmtDateTime(a.expires_at)}</span>
                   </span>
-                  {canEdit && a.active && <button className="icon-btn danger" title="Снять" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', a.code || null)}><X size={14} /></button>}
+                  {ca('REMOVE_PROMO') && a.active && <button className="icon-btn danger" title="Снять" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', a.code || null)}><X size={14} /></button>}
                 </div>
               ))}
             </div>
@@ -397,7 +402,7 @@ export const UserDetailPage: React.FC<{
         {!sub ? (
           <div className="flex flex-col gap-3">
             <div className="muted sm">Активной подписки нет.</div>
-            {canEdit && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Выдать подписку</button>}
+            {ca('EXTEND_ALL') && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Выдать подписку</button>}
           </div>
         ) : (
           <>
@@ -406,17 +411,17 @@ export const UserDetailPage: React.FC<{
               {typeof sub.days_left === 'number' && <span className="sub">({sub.days_left} дн.)</span>}
             </InfoRow>
             <InfoRow label="Срок">
-              {canEdit ? (<>
-                <button className="btn sm solid" onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Продлить</button>
-                <button className="btn sm" onClick={() => setAction('REDUCE_SUB')}>Уменьшить</button>
+              {ca('EXTEND_ALL') || ca('REDUCE_SUB') ? (<>
+                {ca('EXTEND_ALL') && <button className="btn sm solid" onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Продлить</button>}
+                {ca('REDUCE_SUB') && <button className="btn sm" onClick={() => setAction('REDUCE_SUB')}>Уменьшить</button>}
               </>) : <span className="faint">—</span>}
             </InfoRow>
             <InfoRow label="Трафик (ГБ)">
               <span className="mono">{sub.traffic_used ?? 0} / {sub.traffic_limit ? sub.traffic_limit : '∞'}</span>
               {canEdit && (<>
-                <button className="icon-btn" title="Добавить" onClick={() => setAction('ADD_TRAFFIC')}><Plus size={14} /></button>
-                <button className="icon-btn" title="Убавить" onClick={() => setAction('SUB_TRAFFIC')}><ArrowDownLeft size={14} /></button>
-                <button className="icon-btn" title="Установить лимит" onClick={() => setAction('SET_TRAFFIC')}><Database size={14} /></button>
+                {ca('ADD_TRAFFIC') && <button className="icon-btn" title="Добавить" onClick={() => setAction('ADD_TRAFFIC')}><Plus size={14} /></button>}
+                {ca('SUB_TRAFFIC') && <button className="icon-btn" title="Убавить" onClick={() => setAction('SUB_TRAFFIC')}><ArrowDownLeft size={14} /></button>}
+                {ca('SET_TRAFFIC') && <button className="icon-btn" title="Установить лимит" onClick={() => setAction('SET_TRAFFIC')}><Database size={14} /></button>}
               </>)}
             </InfoRow>
             <InfoRow label="Ссылка на подписку">
@@ -434,24 +439,24 @@ export const UserDetailPage: React.FC<{
             </InfoRow>
             <InfoRow label="Устройств">
               <span className="mono">{rw?.found ? rw.devices.length : (sub.devices_used ?? 0)} / {sub.devices_limit ?? 1}</span>
-              {canEdit && <button className="icon-btn" title="Изменить лимит" onClick={() => setAction('SET_DEVICES')}><Edit2 size={14} /></button>}
+              {ca('SET_DEVICES') && <button className="icon-btn" title="Изменить лимит" onClick={() => setAction('SET_DEVICES')}><Edit2 size={14} /></button>}
             </InfoRow>
             {canEdit && (
               <InfoRow label="Особые действия">
-                <button className="btn sm" onClick={() => setSpecial('exchange')}><RefreshCw size={14} /> Устройства ⇄ дни</button>
-                <button className="btn sm" onClick={() => setSpecial('transfer')}><ArrowUpRight size={14} /> Перенести</button>
+                {cp('users.devices') && <button className="btn sm" onClick={() => setSpecial('exchange')}><RefreshCw size={14} /> Устройства ⇄ дни</button>}
+                {cp('users.transfer') && <button className="btn sm" onClick={() => setSpecial('transfer')}><ArrowUpRight size={14} /> Перенести</button>}
               </InfoRow>
             )}
             <InfoRow label="Продление пользователем">
               {sub.no_renew ? (
                 <>
                   <span className="badge danger">Запрещено</span>
-                  {canEdit && <button className="btn sm" disabled={busy} onClick={() => void doAction('SET_NO_RENEW', 0, false)}>Разрешить</button>}
+                  {ca('SET_NO_RENEW') && <button className="btn sm" disabled={busy} onClick={() => void doAction('SET_NO_RENEW', 0, false)}>Разрешить</button>}
                 </>
               ) : (
                 <>
                   <span className="badge solid">Разрешено</span>
-                  {canEdit && (
+                  {ca('SET_NO_RENEW') && (
                     <button className="btn sm danger" disabled={busy}
                       onClick={() => void doAction('SET_NO_RENEW', 1, false,
                         'Запретить продление?\n\nПодписка работает до конца срока, но продлить её пользователь не сможет. После окончания она сразу удалится (без 7 дней ожидания).\n\nДокупать устройства, сбрасывать трафик и добавлять подписку в приложение — можно. Сами вы продлить можете, как и раньше.')}>
@@ -535,7 +540,7 @@ export const UserDetailPage: React.FC<{
                     {rw.subscription_url.replace(/^https?:\/\//, '')}
                   </button>
                 : <span className="faint">—</span>}
-              {canEdit && (
+              {ca('RESET_SUB') && (
                 <button className="btn sm danger" disabled={busy}
                   onClick={() => void doAction('RESET_SUB', null, true,
                     'Сбросить подписку?\n\nRemnawave выдаст новый ключ: старая ссылка и все настроенные на неё приложения перестанут работать. Пользователь получит сообщение в Telegram, что нужно заново добавить подписку.')}>
@@ -557,7 +562,7 @@ export const UserDetailPage: React.FC<{
                         </div>
                         <div className="faint mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 280, fontSize: 11 }}>{d.hwid}</div>
                       </div>
-                      {canEdit && <button className="icon-btn danger" title="Отвязать" onClick={() => void unlinkDevice(d.hwid)}><Trash2 size={14} /></button>}
+                      {cp('users.devices') && <button className="icon-btn danger" title="Отвязать" onClick={() => void unlinkDevice(d.hwid)}><Trash2 size={14} /></button>}
                     </div>
                   ))}
                 </div>
@@ -585,7 +590,7 @@ export const UserDetailPage: React.FC<{
                     <td className="sub">{pm.description || pm.purpose || '—'}{pm.provider_payment_id ? <div className="faint mono" style={{ fontSize: 11 }}>{pm.provider_payment_id}</div> : null}</td>
                     <td><PaymentStatusBadge status={pm.status} />{pm.chargeback_reported && pm.status === 'paid' && <div className="badge danger" style={{ marginTop: 4 }}>пришёл чарджбек</div>}</td>
                     <td style={{ textAlign: 'right' }}>
-                      {owner && <PaymentActions pm={pm} onToast={onToast} onDone={() => { void loadPayments(); void load(); void loadRw(); }} />}
+                      {ownerOr('finance.refund') && <PaymentActions pm={pm} onToast={onToast} onDone={() => { void loadPayments(); void load(); void loadRw(); }} />}
                     </td>
                   </tr>
                 ))}

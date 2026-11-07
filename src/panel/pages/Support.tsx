@@ -4,7 +4,7 @@ import { ArrowLeft, CheckCircle, Clock, Users, Trash2, CornerUpLeft, Download, E
 import { DotsMenu, Modal, Spinner } from '../components/ui';
 import { RichText } from '../components/RichText';
 import { TEAM_CHAT_ID, TeamChat } from './TeamChat';
-import { useMe } from '../lib/access';
+import { canUserAction, useMe } from '../lib/access';
 import { apiFetch, getPanelToken, mergeInfo, parseApiErr } from '../lib/api';
 import { fmtDateTime, fmtMoney } from '../lib/format';
 import type { ToastType } from '../lib/types';
@@ -245,7 +245,8 @@ const UserInfo: React.FC<{ userId: number; onOpenUser: (id: number) => void; rel
   }, [userId]);
   useEffect(() => { setD(null); setPays(null); return load(); }, [load, reloadKey]);
   // оператор правит только лимит устройств (tg/почта/реф. ставка: curator/admin)
-  const allow = (act: EditKey) => canManage && (role !== 'operator' || act === 'SET_DEVICES');
+  const me = useMe();
+  const allow = (act: EditKey) => canManage && (role !== 'operator' || act === 'SET_DEVICES') && (role !== 'admin' || canUserAction(me, act));
   const save = async (act: EditKey, value: string, confirm = false): Promise<boolean> => {
     try {
       await apiFetch(`/panel/users/${userId}/action`, { method: 'POST', body: JSON.stringify({ action: act, value, confirm }) });

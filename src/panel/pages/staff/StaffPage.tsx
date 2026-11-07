@@ -6,13 +6,15 @@ import { isOwner, useMe } from '../../lib/access';
 import { fmtDateTime } from '../../lib/format';
 import type { ToastType } from '../../lib/types';
 import { AutofineCard } from './AutofineCard';
+import { AdminAccessEditor, accessSummary, type AdminAccessValue, type PermCatalog, type ProjectRef } from './AdminAccess';
 import {
   addDays, Day, hoursText, Interval, IntervalsEditor, money, monthEnd, monthStart, MonthCalendar, ROLE_RU, ruDate, ShiftBadge, spillFromPrev, StatBox, WEEK,
 } from './common';
 
 type Toast = (t: string, m: string, ty: ToastType) => void;
 type Staff = {
-  id: number; username: string; name: string; role: 'curator' | 'operator'; is_active: boolean; telegram_id?: number;
+  id: number; username: string; name: string; role: 'admin' | 'curator' | 'operator'; is_active: boolean; telegram_id?: number;
+  permissions?: AdminAccessValue | null;
   last_login_at?: string | null; last_login_ip?: string | null; balance?: number; tickets_in_work: number;
   shift?: { working_today: boolean; on_shift: boolean; intervals: string[][] };
   default_pay?: number; default_intervals?: Interval[];
@@ -38,13 +40,16 @@ const genPassword = () => {
 };
 
 // создание / правка сотрудника (owner)
-const StaffEditor: React.FC<{ staff: Staff | null; onClose: () => void; onSaved: (s: Staff, pw?: string) => void; onToast: Toast }> = ({ staff, onClose, onSaved, onToast }) => {
+type AccessRefs = { catalog: PermCatalog | null; projects: ProjectRef[] };
+
+const StaffEditor: React.FC<{ staff: Staff | null; onClose: () => void; onSaved: (s: Staff, pw?: string) => void; onToast: Toast; refs: AccessRefs }> = ({ staff, onClose, onSaved, onToast, refs }) => {
   const isNew = !staff;
   const defs = staffDefaults(staff);
   const [username, setUsername] = useState(staff?.username || '');
   const [name, setName] = useState(staff?.name || '');
   const [tg, setTg] = useState(staff?.telegram_id ? String(staff.telegram_id) : '');
-  const [role, setRole] = useState<'curator' | 'operator'>(staff?.role || 'operator');
+  const [role, setRole] = useState<'admin' | 'curator' | 'operator'>(staff?.role || 'operator');
+  const [access, setAccess] = useState<AdminAccessValue>(staff?.permissions || { perms: [], projects: ['*'] });
   const [password, setPassword] = useState(isNew ? genPassword() : '');
   const [active, setActive] = useState(staff ? staff.is_active : true);
   const [defIv, setDefIv] = useState<Interval[]>(defs.intervals);
@@ -58,6 +63,7 @@ const StaffEditor: React.FC<{ staff: Staff | null; onClose: () => void; onSaved:
         default_pay: Number(defPay || 0),
         default_intervals: defIv,
       };
+      if (role === 'admin') body.permissions = access;
       if (password) body.password = password;
       const r: Staff = isNew
         ? await apiFetch('/panel/staff', { method: 'POST', body: JSON.stringify({ ...body, username: username.trim() }) })
@@ -66,18 +72,20 @@ const StaffEditor: React.FC<{ staff: Staff | null; onClose: () => void; onSaved:
     } catch (e) { onToast('Ошибка', parseApiErr(e, 'Не удалось сохранить'), 'error'); } finally { setBusy(false); }
   };
   return (
-    <Modal onClose={onClose} title={isNew ? 'Новый сотрудник поддержки' : `Сотрудник ${staff!.username}`} icon={isNew ? UserPlus : Pencil} width={560}
+    <Modal onClose={onClose} title={isNew ? (role === 'admin' ? 'Новый администратор' : 'Новый сотрудник') : `Сотрудник ${staff!.username}`} icon={isNew ? UserPlus : Pencil} width={role === 'admin' ? 760 : 560}
       footer={<><button className="btn" onClick={onClose}>Отмена</button>
-        <button className="btn solid" disabled={busy || (isNew && (!username.trim() || !password)) || !tg.trim()} onClick={save}>
+        <button className="btn solid" disabled={busy || (isNew && (!username.trim() || !password)) || !tg.trim() || (role === 'admin' && !access.projects.length)} onClick={save}>
           {busy ? <Spinner size={15} /> : <Save size={15} />} {isNew ? 'Создать' : 'Сохранить'}</button></>}>
       <div className="flex flex-col gap-4">
         <div>
           <label className="field-label">Роль</label>
-          <Segmented value={role} onChange={setRole} options={[{ value: 'operator', label: 'Оператор' }, { value: 'curator', label: 'Куратор' }]} />
+          <Segmented value={role} onChange={setRole} options={[{ value: 'operator', label: 'Оператор' }, { value: 'curator', label: 'Куратор' }, { value: 'admin', label: 'Администратор' }]} />
           <div className="faint" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
             {role === 'operator'
               ? 'Берёт обращения из пула, закрывает через вопрос пользователю, может вернуть в пул или передать админу. Видит всех пользователей, менять может только тех, чьё обращение у него в работе (без денег, объединения и удаления).'
-              : 'Админ поддержки: видит все обращения (и чужие, и закрытые), забирает, пишет в чужих, закрывает сразу, штрафует операторов. Видит и меняет всех пользователей.'}
+              : role === 'curator'
+                ? 'Админ поддержки: видит все обращения (и чужие, и закрытые), забирает, пишет в чужих, закрывает сразу, штрафует операторов. Видит и меняет всех пользователей.'
+                : 'Доступ к панели по отдельным правам: вы сами отмечаете, какие разделы он видит и какие действия может делать, и в каких проектах. Сотрудников, их права, проекты и серверы меняет только владелец.'}
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -95,6 +103,10 @@ const StaffEditor: React.FC<{ staff: Staff | null; onClose: () => void; onSaved:
             <input className="input mono" value={tg} onChange={(e) => setTg(e.target.value.replace(/[^\d]/g, ''))} placeholder="123456789" inputMode="numeric" />
             <div className="faint" style={{ fontSize: 12, marginTop: 4 }}>Сотрудник должен запустить бота (/start)</div></div>
         </div>
+        {role === 'admin' && (refs.catalog
+          ? <AdminAccessEditor catalog={refs.catalog} projects={refs.projects} value={access} onChange={setAccess} />
+          : <div className="faint">Загрузка прав…</div>)}
+        {role !== 'admin' && <>
         <div>
           <label className="field-label">Базовые часы работы (по Москве)</label>
           <IntervalsEditor value={defIv} onChange={setDefIv} />
@@ -104,6 +116,7 @@ const StaffEditor: React.FC<{ staff: Staff | null; onClose: () => void; onSaved:
           <label className="field-label">Базовая ставка за день, ₽</label>
           <input className="input" type="number" min={0} value={defPay} onChange={(e) => setDefPay(e.target.value)} placeholder="1000" />
         </div>
+        </>}
         {!isNew && (
           <div className="flex items-center justify-between gap-3 inset" style={{ padding: 12 }}>
             <div><div style={{ fontWeight: 500 }}>Доступ включён</div><div className="sub" style={{ fontSize: 12 }}>Выключите — сеансы завершатся, обращения вернутся в пул</div></div>
@@ -258,8 +271,8 @@ const FinesList: React.FC<{ fines: Fine[]; canCancel: (f: Fine) => boolean; onCa
   )
 );
 
-const StaffDetail: React.FC<{ staff: Staff; today: string; owner: boolean; myActor: string; onBack: () => void; onChanged: () => void; onToast: Toast }> =
-  ({ staff, today, owner, myActor, onBack, onChanged, onToast }) => {
+const StaffDetail: React.FC<{ staff: Staff; today: string; owner: boolean; myActor: string; onBack: () => void; onChanged: () => void; onToast: Toast; refs: AccessRefs }> =
+  ({ staff, today, owner, myActor, onBack, onChanged, onToast, refs }) => {
     const [tab, setTab] = useState<'schedule' | 'money' | 'profile'>('schedule');
     const [month, setMonth] = useState(monthStart(today));
     const [days, setDays] = useState<Record<string, Day>>({});
@@ -403,7 +416,7 @@ const StaffDetail: React.FC<{ staff: Staff; today: string; owner: boolean; myAct
         {bulk && <BulkModal staffId={staff.id} today={today} defaults={staffDefaults(staff)} onToast={onToast} onClose={() => setBulk(false)} onSaved={(n) => { setBulk(false); loadDays(); onChanged(); onToast('График', `Заполнено рабочих дней: ${n}`, 'success'); }} />}
         {fineOpen && <FineModal staff={staff} onToast={onToast} onClose={() => setFineOpen(false)} onSaved={() => { setFineOpen(false); loadMoney(); onChanged(); onToast('Штраф', 'Штраф выдан', 'success'); }} />}
         {bonusOpen && <FineModal bonus staff={staff} onToast={onToast} onClose={() => setBonusOpen(false)} onSaved={() => { setBonusOpen(false); loadMoney(); onChanged(); onToast('Премия', 'Премия начислена', 'success'); }} />}
-        {editOpen && <StaffEditor staff={staff} onToast={onToast} onClose={() => setEditOpen(false)} onSaved={() => { setEditOpen(false); onChanged(); onToast('Сохранено', staff.username, 'success'); }} />}
+        {editOpen && <StaffEditor refs={refs} staff={staff} onToast={onToast} onClose={() => setEditOpen(false)} onSaved={() => { setEditOpen(false); onChanged(); onToast('Сохранено', staff.username, 'success'); }} />}
         {payOpen && (
           <Modal onClose={() => setPayOpen(false)} title="Выплата зарплаты" icon={Wallet} width={420}
             footer={<><button className="btn" onClick={() => setPayOpen(false)}>Отмена</button><button className="btn solid" disabled={!Number(payAmount) || payBusy} onClick={payout}>{payBusy ? <Spinner size={15} /> : <Save size={15} />} Сохранить</button></>}>
@@ -453,7 +466,7 @@ const Journal: React.FC<{ staff: Staff[] }> = ({ staff }) => {
 export const StaffPage: React.FC<{ onToast: Toast }> = ({ onToast }) => {
   const me = useMe();
   const owner = isOwner(me);
-  const [data, setData] = useState<{ staff: Staff[]; today: string; bot_ready: boolean } | null>(null);
+  const [data, setData] = useState<{ staff: Staff[]; today: string; bot_ready: boolean; admin_perms?: PermCatalog; projects?: ProjectRef[] } | null>(null);
   const [openId, setOpenId] = useState<number | null>(null);
   const [view, setView] = useState<'staff' | 'journal'>('staff');
   const [creating, setCreating] = useState(false);
@@ -478,12 +491,13 @@ export const StaffPage: React.FC<{ onToast: Toast }> = ({ onToast }) => {
   if (!data) return <div style={{ padding: 40, display: 'flex', justifyContent: 'center' }}><Spinner /></div>;
   const open = data.staff.find((s) => s.id === openId);
   const myActor = me?.kind === 'staff' ? `staff:${me.staff_id}` : 'owner';
-  if (open) return <StaffDetail staff={open} today={data.today} owner={owner} myActor={myActor} onBack={() => setOpenId(null)} onChanged={load} onToast={onToast} />;
+  const refs: AccessRefs = { catalog: data.admin_perms || null, projects: data.projects || [] };
+  if (open) return <StaffDetail refs={refs} staff={open} today={data.today} owner={owner} myActor={myActor} onBack={() => setOpenId(null)} onChanged={load} onToast={onToast} />;
 
-  const groups: ['curator' | 'operator', string][] = [['curator', 'Кураторы'], ['operator', 'Операторы']];
+  const groups: ['admin' | 'curator' | 'operator', string][] = [['admin', 'Администраторы'], ['curator', 'Кураторы'], ['operator', 'Операторы']];
   return (
     <div className="flex flex-col gap-5">
-      <PageHead title="Сотрудники" sub={owner ? 'Кураторы и операторы поддержки: график, зарплата, премии, штрафы' : 'Операторы поддержки: график и штрафы'}>
+      <PageHead title="Сотрудники" sub={owner ? 'Администраторы с настраиваемыми правами, кураторы и операторы поддержки' : 'Операторы поддержки: график и штрафы'}>
         {owner && (
           <div className="flex gap-2 items-center">
             <Segmented value={view} onChange={setView} options={[{ value: 'staff', label: 'Сотрудники' }, { value: 'journal', label: 'Журнал' }]} />
@@ -496,7 +510,7 @@ export const StaffPage: React.FC<{ onToast: Toast }> = ({ onToast }) => {
       {view === 'journal' && owner ? <Journal staff={data.staff} /> : data.staff.length === 0 ? (
         <div className="card flex flex-col items-center sub" style={{ padding: 40, gap: 10, textAlign: 'center' }}>
           <UserPlus size={30} className="faint" /><div>Сотрудников пока нет</div>
-          {owner && <div style={{ fontSize: 13, maxWidth: 440 }}>Добавьте куратора или оператора: логин, пароль и Telegram ID для кода входа.</div>}
+          {owner && <div style={{ fontSize: 13, maxWidth: 440 }}>Добавьте администратора, куратора или оператора: логин, пароль и Telegram ID для кода входа.</div>}
         </div>
       ) : (
         <div className="tbl-wrap"><div style={{ overflowX: 'auto' }}>
@@ -506,7 +520,8 @@ export const StaffPage: React.FC<{ onToast: Toast }> = ({ onToast }) => {
               {groups.flatMap(([role]) => data.staff.filter((s) => s.role === role)).map((s) => (
                 <tr key={s.id} className="click" style={{ opacity: s.is_active ? 1 : 0.55 }} onClick={() => setOpenId(s.id)}>
                   <td><div style={{ fontWeight: 600 }}>{s.name || s.username}</div><div className="faint mono" style={{ fontSize: 12 }}>{s.username}</div></td>
-                  <td>{ROLE_RU[s.role]}{!s.is_active && <span className="badge danger" style={{ marginLeft: 6 }}>отключён</span>}</td>
+                  <td>{ROLE_RU[s.role]}{!s.is_active && <span className="badge danger" style={{ marginLeft: 6 }}>отключён</span>}
+                    {s.role === 'admin' && s.permissions && <div className="faint" style={{ fontSize: 11.5 }}>{accessSummary(s.permissions, refs.projects)}</div>}</td>
                   <td><ShiftBadge shift={s.shift} /></td>
                   <td className="mono">{s.tickets_in_work}</td>
                   {owner && <td className="mono" style={{ fontWeight: 600 }}>{money(s.balance || 0)}</td>}
@@ -514,7 +529,7 @@ export const StaffPage: React.FC<{ onToast: Toast }> = ({ onToast }) => {
                   <td style={{ textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
                     <DotsMenu items={[
                       { label: owner ? 'Управлять (график, зарплата)' : 'Открыть (график, штрафы)', icon: Settings2, onClick: () => setOpenId(s.id) },
-                      owner && { label: 'Изменить данные и роль', icon: Pencil, onClick: () => setEditing(s) },
+                      owner && { label: s.role === 'admin' ? 'Изменить данные и права' : 'Изменить данные и роль', icon: Pencil, onClick: () => setEditing(s) },
                       owner && { label: 'Премия', icon: Gift, onClick: () => setBonusFor(s) },
                       (owner || s.role === 'operator') && { label: 'Штраф', icon: Gavel, onClick: () => setFineFor(s) },
                       owner && { label: 'Завершить все сеансы', icon: LogOut, onClick: () => void staffAction(s, 'logout') },
@@ -528,8 +543,8 @@ export const StaffPage: React.FC<{ onToast: Toast }> = ({ onToast }) => {
           </table>
         </div></div>
       )}
-      {editing && <StaffEditor staff={editing} onToast={onToast} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); onToast('Сохранено', editing.username, 'success'); }} />}
-      {creating && <StaffEditor staff={null} onToast={onToast} onClose={() => setCreating(false)} onSaved={(s, pw) => { setCreating(false); load(); if (pw) setCreated({ username: s.username, password: pw }); }} />}
+      {editing && <StaffEditor refs={refs} staff={editing} onToast={onToast} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); onToast('Сохранено', editing.username, 'success'); }} />}
+      {creating && <StaffEditor refs={refs} staff={null} onToast={onToast} onClose={() => setCreating(false)} onSaved={(s, pw) => { setCreating(false); load(); if (pw) setCreated({ username: s.username, password: pw }); }} />}
       {fineFor && <FineModal staff={fineFor} onToast={onToast} onClose={() => setFineFor(null)} onSaved={() => { setFineFor(null); load(); onToast('Штраф', 'Штраф выдан', 'success'); }} />}
       {bonusFor && <FineModal bonus staff={bonusFor} onToast={onToast} onClose={() => setBonusFor(null)} onSaved={() => { setBonusFor(null); load(); onToast('Премия', 'Премия начислена', 'success'); }} />}
       {created && (

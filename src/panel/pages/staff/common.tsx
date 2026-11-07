@@ -5,7 +5,7 @@ import { fmtMoney } from '../../lib/format';
 export type Interval = [string, string];
 export type Day = { day: string; intervals: Interval[]; pay?: number };
 
-export const ROLE_RU: Record<string, string> = { curator: 'Куратор', operator: 'Оператор', owner: 'Администратор' };
+export const ROLE_RU: Record<string, string> = { admin: 'Администратор', curator: 'Куратор', operator: 'Оператор', owner: 'Владелец' };
 export const WEEK = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 
