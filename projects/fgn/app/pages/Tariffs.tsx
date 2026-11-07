@@ -79,6 +79,8 @@ export default function Tariffs() {
   const [devMax, setDevMax] = useState(20);
   const [devPrice, setDevPrice] = useState(0);
   const [devTable, setDevTable] = useState<number[]>([]); // цена n-го устройства в месяц
+  // участник семьи: степпер виден, но число устройств меняет только владелец
+  const [devLocked, setDevLocked] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -108,6 +110,10 @@ export default function Tariffs() {
         if (q.extra_device_price != null) setDevPrice(Number(q.extra_device_price));
         if (Array.isArray(q.device_prices) && q.device_prices.length) setDevTable(q.device_prices.map(Number));
         setDevTotal((n) => Math.max(min, n));
+        if (q.devices_locked) {
+          setDevLocked(true);
+          if (q.devices_total) setDevTotal(Number(q.devices_total));
+        }
       } catch { /* степпер уже есть из /plans */ }
     })();
   }, []);
@@ -146,16 +152,20 @@ export default function Tariffs() {
             <div style={{ flex: 1, minWidth: 0, fontSize: 17, fontWeight: 500, lineHeight: "20px", letterSpacing: "-0.005em" }}>
               Устройства
             </div>
-            <StepBtn icon="minus" label="Меньше устройств" disabled={devNow <= devMin} onClick={() => setDev(devNow - 1)} />
+            <StepBtn icon="minus" label="Меньше устройств" disabled={devLocked || devNow <= devMin} onClick={() => setDev(devNow - 1)} />
             <div style={{ width: 41, textAlign: "center", fontSize: 18, fontWeight: 600, lineHeight: "22px", fontVariantNumeric: "tabular-nums" }}>
               {devNow}
             </div>
-            <StepBtn icon="plus" label="Больше устройств" disabled={devNow >= devMax} onClick={() => setDev(devNow + 1)} />
+            <StepBtn icon="plus" label="Больше устройств" disabled={devLocked || devNow >= devMax} onClick={() => setDev(devNow + 1)} />
           </div>
           <div style={{ marginTop: 13.5, fontSize: 14.5, lineHeight: "18px", color: MUTED }}>
             {included} в тарифе · следующее +{nextPrice}{" "}₽/мес
           </div>
-          {devMin > devices ? (
+          {devLocked ? (
+            <div style={{ marginTop: 6, fontSize: 13.5, lineHeight: "17px", color: MUTED }}>
+              Вы в семейной подписке — число устройств меняет владелец семьи.
+            </div>
+          ) : devMin > devices ? (
             <div style={{ marginTop: 6, fontSize: 13.5, lineHeight: "17px", color: MUTED }}>
               Сейчас в подписке {devMin} {plural(devMin, "устройство", "устройства", "устройств")} — при продлении они сохраняются.
             </div>

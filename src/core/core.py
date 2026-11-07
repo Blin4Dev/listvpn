@@ -8018,6 +8018,8 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     keep = 0
     min_devices = PLAN_MIN_DEVICES
     default_devices = PLAN_DEFAULT_DEVICES
+    # участник семьи число устройств не выбирает — это делает владелец (степпер у него выключен)
+    devices_locked = purpose in ("subscription", "extend", "devices") and family_owner_for(user) is not None
 
     if purpose == "traffic_reset":
         tr_price = float(db.get_setting("traffic_reset_price", "0") or 0)
@@ -8034,6 +8036,8 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         stars = int(fulfillment.period_stars(months))
     elif purpose == "devices":
         # доп. устройства со своим сроком: цена × кол-во × месяцы
+        if devices_locked:
+            extra = 1
         if extra <= 0:
             raise HTTPException(400, detail={"message": "Не указано число устройств"})
         # гость семьи докупает слоты к общей подписке — подписке владельца
@@ -8077,6 +8081,9 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         min_devices = max(pack, pack + fulfillment.retained_devices(
             int(user["id"]), purpose, body.subscription_id, pack))
         default_devices = max(min_devices, PLAN_DEFAULT_DEVICES)
+        if devices_locked:
+            extra = default_devices - pack
+            total_devices = default_devices
         if total_devices < min_devices:
             extra = min_devices - pack
             total_devices = min_devices
@@ -8112,7 +8119,8 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             "default_devices": default_devices,
             "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
             "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
-            "base_price": base_part, "devices_price": round(devices_part, 2)}
+            "base_price": base_part, "devices_price": round(devices_part, 2),
+            "devices_locked": devices_locked}
 
 
 def _referral_split(bal: float, price: float, pmin: float) -> float:
@@ -8166,6 +8174,7 @@ def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_fr
         "device_prices": q.get("device_prices"),
         "base_price": q.get("base_price"),
         "devices_price": q.get("devices_price"),
+        "devices_locked": bool(q.get("devices_locked")),
     }
 
 
