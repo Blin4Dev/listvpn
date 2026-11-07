@@ -8179,7 +8179,13 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         base_stars = fulfillment.period_stars(months)
         total_devices = pack + extra
         min_devices = pack
+        # по умолчанию — сколько устройств по тарифу сейчас в подписке (без отдельно докупленных:
+        # они со своим сроком и остаются сверху); уменьшить можно до пакета
         default_devices = max(pack, PLAN_DEFAULT_DEVICES)
+        cur_target, upgrading_trial = fulfillment.find_extend_target(int(user["id"]), purpose, body.subscription_id)
+        if cur_target and not upgrading_trial:
+            cur_base = int(cur_target.get("devices_limit") or 0) - fulfillment.active_addon_devices(cur_target.get("id"))
+            default_devices = min(MAX_PLAN_DEVICES, max(pack, cur_base))
         if devices_locked:
             fam_sub = db.fetchone(
                 "SELECT devices_limit FROM subscriptions WHERE user_id = ? AND status = 'Active' "

@@ -100,7 +100,6 @@ export default function Tariffs() {
         if (d.active && d.percent > 0) setDiscount(d.percent);
       } catch { /* без скидки */ }
       try {
-        // продление: минимум — сколько устройств уже в подписке
         const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
           subscription_id: null, use_referral_balance: false });
         if (!q) return;
@@ -109,7 +108,8 @@ export default function Tariffs() {
         if (q.max_devices) setDevMax(Number(q.max_devices));
         if (q.extra_device_price != null) setDevPrice(Number(q.extra_device_price));
         if (Array.isArray(q.device_prices) && q.device_prices.length) setDevTable(q.device_prices.map(Number));
-        setDevTotal((n) => Math.max(min, n));
+        // по умолчанию — сколько устройств сейчас в подписке (уменьшить можно до минимума)
+        setDevTotal(Math.max(min, Number(q.default_devices || min)));
         if (q.devices_locked) {
           setDevLocked(true);
           if (q.devices_total) setDevTotal(Number(q.devices_total));

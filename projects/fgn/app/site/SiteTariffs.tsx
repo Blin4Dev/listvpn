@@ -130,7 +130,7 @@ export default function SiteTariffs({ authed, onCheckout }: { authed: boolean | 
       if (q.max_devices) setDevMax(Number(q.max_devices));
       if (Array.isArray(q.device_prices)) setTable(q.device_prices.map(Number));
       const def = Math.max(min, Number(q.default_devices || PLAN_PACK_DEVICES));
-      setDev((v) => Math.max(min, v ?? def));
+      setDev(def); // сколько устройств сейчас в подписке
     })();
   }, [authed]);
 

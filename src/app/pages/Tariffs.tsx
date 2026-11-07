@@ -110,7 +110,8 @@ export default function Tariffs() {
           if (q.max_devices) setDevMax(Number(q.max_devices));
           if (q.extra_device_price != null) setDevPrice(Number(q.extra_device_price));
           if (Array.isArray(q.device_prices) && q.device_prices.length) setDevTable(q.device_prices.map(Number));
-          setDevTotal((n) => Math.max(min, n));
+          // по умолчанию — сколько устройств сейчас в подписке (уменьшить можно до минимума)
+        setDevTotal(Math.max(min, Number(q.default_devices || min)));
           if (q.devices_locked) {
             setDevLocked(true);
             if (q.devices_total) setDevTotal(Number(q.devices_total));
