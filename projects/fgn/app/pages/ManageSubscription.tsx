@@ -297,7 +297,7 @@ export default function ManageSubscription() {
 
         <div style={{ marginTop: 17, display: "flex", flexDirection: "column", gap: 10 }}>
           <ActionRow tone="red" icon="download" title="Добавить подписку" onClick={addSubscription} />
-          {!noRenew ? <ActionRow tone="green" icon="bag" title="Купить подписку" onClick={() => navigate(BUY_PATH)} /> : null}
+          {!noRenew ? <ActionRow tone="green" icon="bag" title="Продлить подписку" onClick={() => navigate(BUY_PATH)} /> : null}
           {family ? (
             <ActionRow
               tone="gray"

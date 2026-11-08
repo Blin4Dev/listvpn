@@ -211,7 +211,7 @@ export default function ManageSubscription() {
       <div style={{ ...rise(2), display: "flex", flexDirection: "column", gap: 12, marginTop: 26 }}>
         <NoirButton primary icon="download" onClick={() => setSheet("setup")}>Добавить подписку</NoirButton>
         {!noRenew ? (
-          <NoirButton green icon="shopping_bag" onClick={() => navigate("/subscription/extend")}>Купить подписку</NoirButton>
+          <NoirButton green icon="shopping_bag" onClick={() => navigate("/subscription/extend")}>Продлить подписку</NoirButton>
         ) : null}
         <NoirRow icon="group" title="Поделиться с другом" onClick={() => void shareWithFriend()} />
         <NoirRow icon="qr_code_2" title="QR код подписки" onClick={() => setSheet("qr")} />
