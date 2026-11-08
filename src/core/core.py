@@ -2008,11 +2008,13 @@ def active_discount_for_user(user_id: int) -> Optional[dict[str, Any]]:
     """лучшая неистёкшая скидка юзера (промо или акция)."""
     now_iso = db.utcnow_iso()
     row = db.fetchone(
-        "SELECT a.discount_percent AS percent, a.expires_at AS expires_at, p.code AS code, "
-        "p.name AS name, p.id AS promocode_id "
+        "SELECT a.id AS activation_id, a.discount_percent AS percent, a.expires_at AS expires_at, p.code AS code, "
+        "p.name AS name, p.id AS promocode_id, COALESCE(p.once_per_family, 0) AS once "
         "FROM promocode_activations a JOIN promocodes p ON p.id = a.promocode_id "
         "WHERE a.user_id = ? AND a.discount_percent > 0 "
         "AND (a.expires_at IS NULL OR a.expires_at > ?) "
+        # «1 раз на семью» — скидка на одну оплату: после неё не действует
+        "AND NOT (COALESCE(p.once_per_family, 0) = 1 AND a.used_at IS NOT NULL) "
         "ORDER BY a.discount_percent DESC, a.expires_at DESC LIMIT 1",
         (user_id, now_iso),
     )
@@ -2025,6 +2027,8 @@ def active_discount_for_user(user_id: int) -> Optional[dict[str, Any]]:
             "name": row.get("name"),
             "promocode_id": row.get("promocode_id"),
         }
+        if row.get("once"):
+            personal["promo_activation_id"] = int(row["activation_id"])
     global_disc = active_global_discount()
     # компенсация из панели: разовая скидка на следующую покупку (тратится при оплате, если сработала она)
     comp_row = services.active_compensation(user_id)
@@ -2066,6 +2070,9 @@ def effective_discount(user_id: int) -> dict[str, Any]:
         if base_disc.get("compensation_id"):
             out["compensation_id"] = base_disc["compensation_id"]
             out["one_time"] = True  # только на одну покупку
+        if base_disc.get("promo_activation_id"):
+            out["promo_activation_id"] = base_disc["promo_activation_id"]
+            out["one_time"] = True  # промокод «1 раз на семью» — на одну оплату
     return out
 
 
@@ -8028,8 +8035,8 @@ def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         (view["id"],),
     )
     limit = max((int(k.get("devices_limit") or 0) for k in keys), default=1)
-    # докупка устройств — к платной подписке и только владельцу (участник семьи меняет число устройств не может)
-    can_buy = owner is None and any(str(k.get("type") or "") != "trial" for k in keys)
+    # докупка устройств — к платной подписке; и владельцу, и участникам семьи (слоты — в подписку владельца)
+    can_buy = any(str(k.get("type") or "") != "trial" for k in keys)
 
     # реальные hwid из remnawave
     devices: list[dict[str, Any]] = []
@@ -8140,14 +8147,10 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     min_devices = PLAN_MIN_DEVICES
     default_devices = PLAN_DEFAULT_DEVICES
     # участник семьи: его оплата продлевает семейную подписку (владельца) — на столько устройств,
-    # сколько в ней сейчас, или больше; уменьшать может только владелец. докупать устройства — тоже он.
-    if purpose == "devices":
-        fam_owner = family_owner_for(user)
-    elif purpose in ("subscription", "extend"):
-        fam_owner = family_renew_owner(user)
-    else:
-        fam_owner = None
-    devices_locked = purpose == "devices" and fam_owner is not None
+    # сколько в ней сейчас, или больше; уменьшать может только владелец.
+    # докупка устройств участником идёт в подписку владельца (devices_target_user_id)
+    fam_owner = family_renew_owner(user) if purpose in ("subscription", "extend") else None
+    devices_locked = False
     family_sub_id: Optional[int] = None
 
     if purpose == "traffic_reset":
@@ -8165,8 +8168,6 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         stars = int(fulfillment.period_stars(months))
     elif purpose == "devices":
         # доп. устройства со своим сроком: цена × кол-во × месяцы
-        if devices_locked:
-            raise HTTPException(403, detail={"message": "Докупить устройства может только владелец семьи"})
         if extra <= 0:
             raise HTTPException(400, detail={"message": "Не указано число устройств"})
         # гость семьи докупает слоты к общей подписке — подписке владельца
@@ -8244,6 +8245,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     full_price = round(float(price), 2)
     percent = 0.0
     compensation_id = None
+    promo_activation_id = None
     if purpose != "traffic_reset":
         eff = effective_discount(int(user["id"]))
         percent = float(eff["percent"])
@@ -8251,10 +8253,11 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             price = discounted(price, percent)
             stars = int(discounted(stars, percent))
             compensation_id = eff.get("compensation_id")
+            promo_activation_id = eff.get("promo_activation_id")
 
     return {"price": round(float(price), 2), "stars": int(stars), "months": months,
             "extra": extra, "purpose": purpose, "full_price": full_price, "discount_percent": percent,
-            "compensation_id": compensation_id,
+            "compensation_id": compensation_id, "promo_activation_id": promo_activation_id,
             "plan_devices": plan_devices,
             "devices_total": plan_devices + extra + keep, "min_devices": min_devices,
             "default_devices": default_devices,
@@ -8447,6 +8450,10 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
     if q.get("compensation_id"):
         # скидка компенсации: спишется при оплате этого платежа
         db.execute("UPDATE payments SET compensation_id = ? WHERE payment_id = ?", (int(q["compensation_id"]), payment_id))
+    if q.get("promo_activation_id"):
+        # скидка промокода «1 раз на семью»: сгорит при оплате этого платежа
+        db.execute("UPDATE payments SET promo_activation_id = ? WHERE payment_id = ?",
+                   (int(q["promo_activation_id"]), payment_id))
     ret = str(body.return_to or "").strip()
     if ret.startswith("/") and not ret.startswith("//") and len(ret) <= 200:
         db.execute("UPDATE payments SET return_to = ? WHERE payment_id = ?", (ret, payment_id))

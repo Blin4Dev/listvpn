@@ -970,6 +970,12 @@ def fulfill_payment(
             services.use_compensation(int(payment["compensation_id"]), payment_id)
         except Exception as exc:  # noqa: BLE001
             print(f"[compensation] payment {payment_id}: {exc}", flush=True)
+    if payment.get("promo_activation_id"):
+        # скидка промокода «1 раз на семью» использована этой оплатой
+        try:
+            services.use_promo_activation(int(payment["promo_activation_id"]), payment_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[promo-once] payment {payment_id}: {exc}", flush=True)
 
     _credit_referral(user, float(payment.get("amount") or 0), payment.get("currency") or "RUB", payment.get("payment_id"))
     # атрибуция выручки по трекинг-ссылке

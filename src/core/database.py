@@ -1205,6 +1205,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "expires_at": "ALTER TABLE promocode_activations ADD COLUMN expires_at TEXT",
             # владелец семьи, в которой был активировавший (или он сам) — на случай, если потом выйдет из семьи
             "family_owner_id": "ALTER TABLE promocode_activations ADD COLUMN family_owner_id INTEGER",
+            # разовая скидка («1 раз на семью»): использована оплатой
+            "used_at": "ALTER TABLE promocode_activations ADD COLUMN used_at TEXT",
+            "used_payment_id": "ALTER TABLE promocode_activations ADD COLUMN used_payment_id TEXT",
         },
         "users": {
             "tracking_code": "ALTER TABLE users ADD COLUMN tracking_code TEXT",
@@ -1303,6 +1306,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "whitelist": "ALTER TABLE payments ADD COLUMN whitelist INTEGER NOT NULL DEFAULT 0",
             # скидка компенсации в этом платеже: при оплате помечается использованной
             "compensation_id": "ALTER TABLE payments ADD COLUMN compensation_id INTEGER",
+            # скидка промокода «1 раз на семью» в этом платеже: при оплате сгорает
+            "promo_activation_id": "ALTER TABLE payments ADD COLUMN promo_activation_id INTEGER",
             # реф. баланс, замороженный при создании
             "referral_applied": "ALTER TABLE payments ADD COLUMN referral_applied REAL NOT NULL DEFAULT 0",
             # возвраты (refund через провайдера)

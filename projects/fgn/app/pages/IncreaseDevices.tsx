@@ -30,7 +30,6 @@ const rub = (n: number) => `${String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d)
 type DevicesInfo = {
   limit?: number;
   can_buy?: boolean;
-  family_member?: boolean; // участник семьи: докупает только владелец
   extra_device_price?: number;
   device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
   addon_months?: number[];
@@ -109,8 +108,6 @@ export default function IncreaseDevices() {
   const [isTrial, setIsTrial] = useState(false);
 
   const [add, setAdd] = useState(1);
-  // участник семьи: степпер виден, но число устройств меняет только владелец
-  const [devLocked, setDevLocked] = useState(false);
   const [months, setMonths] = useState(1);
 
   const [quote, setQuote] = useState<{ price: number; full: number; discount: number } | null>(null);
@@ -123,7 +120,6 @@ export default function IncreaseDevices() {
         if (d.extra_device_price) setPrice(Number(d.extra_device_price));
         if (Array.isArray(d.device_prices)) setTable(d.device_prices.map(Number));
         if (Array.isArray(d.addon_months) && d.addon_months.length) setPeriods(d.addon_months);
-        if (d.family_member) setDevLocked(true);
       } catch { /* значения по умолчанию */ }
       try {
         const sub = await fetchSubscription();
@@ -154,7 +150,7 @@ export default function IncreaseDevices() {
 
   // цена с сервера (скидки), с небольшой задержкой при щёлканье
   useEffect(() => {
-    if (!loaded || isTrial || maxAdd <= 0 || devLocked) return;
+    if (!loaded || isTrial || maxAdd <= 0) return;
     let alive = true;
     setQuote(null);
     const t = window.setTimeout(() => {
@@ -224,15 +220,13 @@ export default function IncreaseDevices() {
               <div style={{ flex: 1, minWidth: 0, fontSize: 16, fontWeight: 500, lineHeight: "20px", color: TEXT, whiteSpace: "nowrap" }}>
                 Сколько добавить
               </div>
-              <StepBtn icon="minus" label="Меньше" disabled={devLocked || count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
+              <StepBtn icon="minus" label="Меньше" disabled={count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
               <div style={{ width: 48, textAlign: "center", fontSize: 18, fontWeight: 500, lineHeight: "22px", color: TEXT, fontVariantNumeric: "tabular-nums" }}>
                 {count}
               </div>
-              <StepBtn icon="plus" label="Больше" disabled={devLocked || count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
+              <StepBtn icon="plus" label="Больше" disabled={count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
             </div>
-            <div style={{ marginTop: 7, fontSize: 14, lineHeight: "20px", color: MUTED }}>
-              {devLocked ? "Вы в семейной подписке — докупить устройства может только владелец семьи." : `Станет ${current + count}`}
-            </div>
+            <div style={{ marginTop: 7, fontSize: 14, lineHeight: "20px", color: MUTED }}>Станет {current + count}</div>
           </div>
 
           {/* на сколько месяцев */}
@@ -318,9 +312,8 @@ export default function IncreaseDevices() {
           <button
             type="button"
             className="blin-press"
-            onClick={devLocked ? undefined : pay}
-            disabled={devLocked}
-            style={{ ...fgnButton, ...fade, opacity: devLocked ? 0.45 : (fade.opacity ?? 1), marginTop: 21, flexShrink: 0, height: 52, borderRadius: 16, background: "#F3F3F4", fontSize: 16, letterSpacing: 0 }}
+            onClick={pay}
+            style={{ ...fgnButton, ...fade, marginTop: 21, flexShrink: 0, height: 52, borderRadius: 16, background: "#F3F3F4", fontSize: 16, letterSpacing: 0 }}
           >
             Оплатить {rub(total)}
           </button>

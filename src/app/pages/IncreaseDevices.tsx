@@ -19,7 +19,6 @@ function monthsWord(n: number) {
 type DevicesInfo = {
   limit?: number;
   can_buy?: boolean;
-  family_member?: boolean; // участник семьи: докупает только владелец
   extra_device_price?: number;
   device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
   addon_months?: number[];
@@ -79,8 +78,6 @@ export default function IncreaseDevices() {
   const [isTrial, setIsTrial] = useState(false);
 
   const [add, setAdd] = useState(1);
-  // участник семьи: степпер виден, но число устройств меняет только владелец
-  const [devLocked, setDevLocked] = useState(false);
   const [months, setMonths] = useState(1);
 
   const [quote, setQuote] = useState<{ price: number; full: number; discount: number } | null>(null);
@@ -94,7 +91,6 @@ export default function IncreaseDevices() {
         if (d.extra_device_price) setPrice(Number(d.extra_device_price));
         if (Array.isArray(d.device_prices)) setTable(d.device_prices.map(Number));
         if (Array.isArray(d.addon_months) && d.addon_months.length) setPeriods(d.addon_months);
-        if (d.family_member) setDevLocked(true);
       } catch { /* defaults */ }
       try {
         const sub = await fetchSubscription();
@@ -120,7 +116,7 @@ export default function IncreaseDevices() {
 
   // цена с сервера (скидки), с небольшой задержкой при щёлканье
   useEffect(() => {
-    if (!loaded || isTrial || maxAdd <= 0 || devLocked) return;
+    if (!loaded || isTrial || maxAdd <= 0) return;
     let alive = true;
     setQuoteBusy(true);
     const t = window.setTimeout(() => {
@@ -193,15 +189,13 @@ export default function IncreaseDevices() {
           <NoirCard style={{ ...rise(1), marginTop: 22, padding: "16px 16px 16px 18px", display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 17, fontWeight: 500, color: N.text }}>Сколько добавить</div>
-              <div style={{ marginTop: 5, fontSize: 14.5, color: N.muted }}>
-                {devLocked ? "Докупить устройства может только владелец семьи" : `Станет ${current + count}`}
-              </div>
+              <div style={{ marginTop: 5, fontSize: 14.5, color: N.muted }}> Станет {current + count}</div>
             </div>
-            <StepBtn kind="minus" disabled={devLocked || count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
+            <StepBtn kind="minus" disabled={count <= 1} onClick={() => setAdd(Math.max(1, count - 1))} />
             <div style={{ width: 40, textAlign: "center", fontSize: 19, fontWeight: 500, color: N.text, fontVariantNumeric: "tabular-nums" }}>
               {count}
             </div>
-            <StepBtn kind="plus" disabled={devLocked || count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
+            <StepBtn kind="plus" disabled={count >= maxAdd} onClick={() => setAdd(Math.min(maxAdd, count + 1))} />
           </NoirCard>
 
           <div style={{ ...rise(2), margin: "22px 0 12px", fontSize: 15, color: N.muted }}>На сколько месяцев</div>
@@ -269,7 +263,7 @@ export default function IncreaseDevices() {
           ) : null}
 
           <div style={{ ...rise(4), marginTop: 22 }}>
-            <NoirButton primary disabled={!loaded || quoteBusy || devLocked} onClick={pay}>
+            <NoirButton primary disabled={!loaded || quoteBusy} onClick={pay}>
               {quoteBusy ? "Считаем…" : `Оплатить ${total} ₽`}
             </NoirButton>
           </div>

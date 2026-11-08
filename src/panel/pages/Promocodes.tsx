@@ -27,7 +27,7 @@ const FamilyOnce: React.FC<{ on: boolean; onChange: () => void }> = ({ on, onCha
     <div>
       <div style={{ fontWeight: 500 }}>Использовать 1 раз на семью</div>
       <div className="sub" style={{ fontSize: 12, lineHeight: 1.45 }}>
-        Активировал один — больше не сможет ни он, ни владелец, ни другие участники его семьи
+        Скидка действует на одну оплату. Активировал один — больше не сможет ни он, ни владелец, ни другие участники его семьи
       </div>
     </div>
     <Toggle on={on} onChange={onChange} />

@@ -197,6 +197,13 @@ def use_compensation(compensation_id: int, payment_id: str) -> bool:
     return bool(cur.rowcount)
 
 
+def use_promo_activation(activation_id: int, payment_id: str) -> bool:
+    """скидка промокода «1 раз на семью» использована: оплачен платёж с ней (один раз)."""
+    cur = db.execute("UPDATE promocode_activations SET used_at = ?, used_payment_id = ? WHERE id = ? AND used_at IS NULL",
+                     (db.utcnow_iso(), str(payment_id), int(activation_id)))
+    return bool(cur.rowcount)
+
+
 def compensations_for_user(user_id: int, limit: int = 20) -> list[dict[str, Any]]:
     return db.fetchall("SELECT id, days, days_applied, discount_percent, mass, actor_name, created_at, used_at, "
                        "used_payment_id FROM compensations WHERE user_id = ? ORDER BY id DESC LIMIT ?",
