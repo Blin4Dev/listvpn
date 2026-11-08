@@ -288,7 +288,7 @@ def _in_family(user_id: int) -> bool:
 
 
 def _notify_family(api: Callable[..., Any], owner_id: int, stage: str, remaining: float) -> int:
-    """участникам семьи — что общая подписка скоро закончится (продлевает владелец)."""
+    """участникам семьи — что общая подписка скоро закончится (продлить может и участник, и владелец)."""
     rows = db.fetchall(
         "SELECT u.telegram_id AS tg FROM family_members f JOIN users u ON u.id = f.member_id "
         "WHERE f.owner_id = ? AND f.status = 'active' AND u.telegram_id IS NOT NULL "
@@ -298,11 +298,11 @@ def _notify_family(api: Callable[..., Any], owner_id: int, stage: str, remaining
     owner = db.fetchone("SELECT username, first_name FROM users WHERE id = ?", (int(owner_id),)) or {}
     who = f"@{owner['username']}" if owner.get("username") else (owner.get("first_name") or "владелец")
     if stage == "expired":
-        text = f"Семейная подписка {projects.current().name} закончилась. Продлить её может {who}."
+        text = f"Семейная подписка {projects.current().name} закончилась. Продлить её можете вы или {who}."
     else:
         hours = max(1, int(remaining // 3600))
         left = f"{hours // 24} дн." if hours >= 48 else f"{hours} ч."
-        text = f"Семейная подписка {projects.current().name} закончится через {left} Продлить её может {who}."
+        text = f"Семейная подписка {projects.current().name} закончится через {left} Продлить её можете вы или {who}."
     payload: dict[str, Any] = {"text": text, "link_preview_options": {"is_disabled": True}}
     if _app_url():
         payload["reply_markup"] = {"inline_keyboard": [[{"text": _open_app(), "web_app": {"url": _app_url()}}]]}

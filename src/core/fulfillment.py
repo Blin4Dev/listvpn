@@ -724,6 +724,24 @@ def grant_subscription(
                      "devices_before": int(sub.get("devices_limit") or 1), "devices_after": new_devices},
         }
 
+    if purpose in ("subscription", "extend") and subscription_id:
+        own = db.fetchone("SELECT user_id FROM subscriptions WHERE id = ? AND status != 'Deleted'", (subscription_id,))
+        if own and int(own["user_id"]) != int(user["id"]):
+            # продление оплатил участник семьи: продлеваем подписку владельца (и в Remnawave — его)
+            guest = db.fetchone(
+                "SELECT 1 FROM family_members WHERE owner_id = ? AND member_id = ? AND status = 'active'",
+                (int(own["user_id"]), int(user["id"])),
+            )
+            owner = get_user(int(own["user_id"])) if guest else None
+            if owner:
+                user = owner
+                purpose = "extend"
+                telegram_id = int(user["telegram_id"]) if user.get("telegram_id") else None
+                username = user.get("username")
+                email = user.get("email")
+            else:
+                subscription_id = None  # уже не в семье — оформляем свою
+
     # тот же выбор цели, что при расчёте цены
     target, upgrading_trial = find_extend_target(int(user["id"]), purpose, subscription_id)
 

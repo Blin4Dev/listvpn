@@ -1022,6 +1022,29 @@ def devices_target_user_id(u: dict[str, Any]) -> int:
     return int(owner["id"]) if owner is not None else int(u["id"])
 
 
+def family_renew_owner(u: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """владелец семьи, чью подписку участник продлевает своей оплатой (иначе None).
+
+    Как family_owner_for, но годится и истёкшая семейная подписка: участник может её продлить.
+    """
+    owner = family_owner_for(u)
+    if owner is not None:
+        return owner
+    try:
+        if subscription_status_for_user(u) in ("banned", "blocked", "active", "trial"):
+            return None
+        owner_id = family.active_owner_id(int(u["id"]))
+        owner = get_user(owner_id) if owner_id else None
+        if not owner or owner.get("is_banned") or projects.of(owner) != projects.of(u):
+            return None
+        target, trial = fulfillment.find_extend_target(int(owner["id"]), "subscription", None)
+        if not target or trial or str(target.get("status") or "") not in ("Active", "Expired"):
+            return None
+        return owner
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def family_owner_for(u: dict[str, Any]) -> Optional[dict[str, Any]]:
     """владелец семьи, чья подписка действует для этого аккаунта (иначе None).
 
@@ -8116,10 +8139,16 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
     keep = 0
     min_devices = PLAN_MIN_DEVICES
     default_devices = PLAN_DEFAULT_DEVICES
-    # участник семьи число устройств не выбирает: платит ровно за столько, сколько сейчас в семейной
-    # подписке, а докупать устройства может только владелец (степпер у участника выключен)
-    fam_owner = family_owner_for(user) if purpose in ("subscription", "extend", "devices") else None
-    devices_locked = fam_owner is not None
+    # участник семьи: его оплата продлевает семейную подписку (владельца) — на столько устройств,
+    # сколько в ней сейчас, или больше; уменьшать может только владелец. докупать устройства — тоже он.
+    if purpose == "devices":
+        fam_owner = family_owner_for(user)
+    elif purpose in ("subscription", "extend"):
+        fam_owner = family_renew_owner(user)
+    else:
+        fam_owner = None
+    devices_locked = purpose == "devices" and fam_owner is not None
+    family_sub_id: Optional[int] = None
 
     if purpose == "traffic_reset":
         tr_price = float(db.get_setting("traffic_reset_price", "0") or 0)
@@ -8186,14 +8215,17 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
         if cur_target and not upgrading_trial:
             cur_base = int(cur_target.get("devices_limit") or 0) - fulfillment.active_addon_devices(cur_target.get("id"))
             default_devices = min(MAX_PLAN_DEVICES, max(pack, cur_base))
-        if devices_locked:
-            fam_sub = db.fetchone(
-                "SELECT devices_limit FROM subscriptions WHERE user_id = ? AND status = 'Active' "
-                "ORDER BY expires_at DESC, id DESC LIMIT 1", (int(fam_owner["id"]),))
-            fam_devices = int((fam_sub or {}).get("devices_limit") or PLAN_DEFAULT_DEVICES)
-            fam_devices = min(MAX_PLAN_DEVICES, max(pack, fam_devices))
-            min_devices = default_devices = total_devices = fam_devices
-            extra = fam_devices - pack
+        if fam_owner is not None:
+            # семейная подписка: минимум и по умолчанию — сколько в ней сейчас по тарифу
+            # (отдельно докупленные остаются сверху), меньше нельзя
+            fam_target, _ = fulfillment.find_extend_target(int(fam_owner["id"]), "subscription", None)
+            fam_cur = PLAN_DEFAULT_DEVICES
+            if fam_target and fam_target.get("no_renew"):
+                raise HTTPException(400, detail={"message": "Продление семейной подписки недоступно"})
+            if fam_target:
+                family_sub_id = int(fam_target["id"])
+                fam_cur = int(fam_target.get("devices_limit") or 0) - fulfillment.active_addon_devices(fam_target.get("id"))
+            min_devices = default_devices = min(MAX_PLAN_DEVICES, max(pack, fam_cur))
         if total_devices < min_devices:
             extra = min_devices - pack
             total_devices = min_devices
@@ -8229,7 +8261,7 @@ def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[
             "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
             "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
             "base_price": base_part, "devices_price": round(devices_part, 2),
-            "devices_locked": devices_locked}
+            "devices_locked": devices_locked, "family_sub_id": family_sub_id}
 
 
 def _referral_split(bal: float, price: float, pmin: float) -> float:
@@ -8284,6 +8316,7 @@ def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_fr
         "base_price": q.get("base_price"),
         "devices_price": q.get("devices_price"),
         "devices_locked": bool(q.get("devices_locked")),
+        "family_member": q.get("family_sub_id") is not None,  # продлевает семейную подписку
     }
 
 
@@ -8345,6 +8378,10 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
     stars = q["stars"]
     months = q["months"]
     extra = q["extra"]
+    if q.get("family_sub_id"):
+        # участник семьи оплачивает продление семейной подписки (выдача — владельцу, см. grant_subscription)
+        body.purpose = "extend"
+        body.subscription_id = int(q["family_sub_id"])
 
     # докупка без subscription_id: берём активную (у гостя семьи — подписку владельца)
     if q["purpose"] == "devices" and not body.subscription_id:

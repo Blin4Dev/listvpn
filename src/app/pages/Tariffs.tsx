@@ -81,8 +81,8 @@ export default function Tariffs() {
   const [devMax, setDevMax] = useState(20);
   const [devPrice, setDevPrice] = useState(0);
   const [devTable, setDevTable] = useState<number[]>([]); // цена n-го устройства в месяц
-  // участник семьи: степпер виден, но число устройств меняет только владелец
-  const [devLocked, setDevLocked] = useState(false);
+  // участник семьи: продлевает семейную подписку — на столько устройств, сколько в ней сейчас, или больше
+  const [famMember, setFamMember] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -112,10 +112,7 @@ export default function Tariffs() {
           if (Array.isArray(q.device_prices) && q.device_prices.length) setDevTable(q.device_prices.map(Number));
           // по умолчанию — сколько устройств сейчас в подписке (уменьшить можно до минимума)
         setDevTotal(Math.max(min, Number(q.default_devices || min)));
-          if (q.devices_locked) {
-            setDevLocked(true);
-            if (q.devices_total) setDevTotal(Number(q.devices_total));
-          }
+          if (q.family_member) setFamMember(true);
         }
       } catch { /* степпер уже есть из /plans */ }
       setLoaded(true);
@@ -159,15 +156,15 @@ export default function Tariffs() {
                 {included} в тарифе · следующее +{Math.round(devNow >= devMax ? priceOf(devNow) : nextPrice)} ₽/мес
               </div>
             </div>
-            <StepBtn icon="remove" label="Меньше устройств" disabled={devLocked || devNow <= devMin} onClick={() => setDev(devNow - 1)} />
+            <StepBtn icon="remove" label="Меньше устройств" disabled={devNow <= devMin} onClick={() => setDev(devNow - 1)} />
             <div style={{ minWidth: 34, textAlign: "center", fontSize: 21, fontWeight: 600, color: N.text, fontVariantNumeric: "tabular-nums" }}>
               {devNow}
             </div>
-            <StepBtn icon="add" label="Больше устройств" disabled={devLocked || devNow >= devMax} onClick={() => setDev(devNow + 1)} />
+            <StepBtn icon="add" label="Больше устройств" disabled={devNow >= devMax} onClick={() => setDev(devNow + 1)} />
           </div>
-          {devLocked ? (
+          {famMember ? (
             <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.4, color: N.dim }}>
-              Вы в семейной подписке — оплатить можно только столько устройств, сколько в ней сейчас. Менять число устройств может владелец семьи.
+              Оплата продлит семейную подписку: устройств — от {devMin} и больше. Уменьшить число устройств может только владелец семьи.
             </div>
           ) : devMin > devices ? (
             <div style={{ marginTop: 10, fontSize: 13.5, lineHeight: 1.4, color: N.dim }}>

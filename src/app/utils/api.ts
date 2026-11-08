@@ -363,6 +363,8 @@ export type PaymentQuote = {
   devices_price?: number;
   // участник семьи: число устройств меняет только владелец
   devices_locked?: boolean;
+  // участник семьи: оплата продлит семейную подписку (минимум — текущее число устройств)
+  family_member?: boolean;
   device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
 };
 
