@@ -228,7 +228,9 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
         "FROM subscriptions s JOIN users u ON u.id = s.user_id "
         "WHERE s.status IN ('Active', 'Expired') AND s.expires_at IS NOT NULL "
         "AND s.expires_at BETWEEN ? AND ? "
-        "AND COALESCE(u.is_banned, 0) = 0 AND u.telegram_id IS NOT NULL AND u.project_id = ?",
+        "AND COALESCE(u.is_banned, 0) = 0 AND u.telegram_id IS NOT NULL AND u.project_id = ? "
+        # участник семьи пользуется семейной подпиской: о ней ему пишет _notify_family, о своей — нет
+        "AND NOT EXISTS (SELECT 1 FROM family_members f WHERE f.member_id = s.user_id AND f.status = 'active') ",
         (lo, hi, projects.current_id()),
     )
 
@@ -277,6 +279,12 @@ def run_once(api: Callable[..., Any], log: Callable[[str], None] = print) -> int
     if sent:
         log(f"[reminders] отправлено напоминаний: {sent}")
     return sent
+
+
+def _in_family(user_id: int) -> bool:
+    """участник активной семьи: уведомления о его личной подписке не шлём — у него семейная."""
+    return db.fetchone("SELECT 1 FROM family_members WHERE member_id = ? AND status = 'active' LIMIT 1",
+                       (int(user_id),)) is not None
 
 
 def _notify_family(api: Callable[..., Any], owner_id: int, stage: str, remaining: float) -> int:
@@ -477,6 +485,8 @@ def run_trial_connection_checks(api: Callable[..., Any], log: Callable[[str], No
         sub = db.fetchone("SELECT type, status FROM subscriptions WHERE id = ?", (r["subscription_id"],))
         if not sub or sub.get("type") != "trial":
             continue
+        if _in_family(int(r["user_id"])):
+            continue  # вступил в семью — пробный уже не важен
         text, entities = _trial_no_connect_message()
         payload: dict[str, Any] = {
             "chat_id": tg, "text": text, "entities": entities,
@@ -541,6 +551,7 @@ def run_not_connected(api: Callable[..., Any], log: Callable[[str], None] = prin
         "FROM subscriptions s JOIN users u ON u.id = s.user_id "
         "WHERE s.type = 'vpn' AND s.status = 'Active' AND s.created_at <= ? AND s.created_at >= ? "
         "AND u.project_id = ? AND u.telegram_id IS NOT NULL AND COALESCE(u.is_banned, 0) = 0 "
+        "AND NOT EXISTS (SELECT 1 FROM family_members f WHERE f.member_id = s.user_id AND f.status = 'active') "
         "AND NOT EXISTS (SELECT 1 FROM user_notices n WHERE n.user_id = s.user_id AND n.kind = 'notconn' "
         "AND n.ref = CAST(s.id AS TEXT)) ORDER BY s.id LIMIT ?",
         (older, newer, projects.current_id(), _MAX_PER_PASS))
@@ -766,6 +777,8 @@ def run_expiry_cleanup(api: Callable[..., Any], log: Callable[[str], None] = pri
         days_since = int((now - exp).total_seconds() // _DAY)
         sub_id = int(row["id"])
         chat_id = int(row["telegram_id"]) if row.get("telegram_id") else None
+        if chat_id and _in_family(int(row["user_id"])):
+            chat_id = None  # в семье: старую личную подписку удаляем молча
 
         no_renew = bool(row.get("no_renew"))
         # no_renew: удаляем сразу
