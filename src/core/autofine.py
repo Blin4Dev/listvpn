@@ -198,6 +198,17 @@ def _staff_last_reply(sid: int) -> Optional[datetime]:
     return _parse((row or {}).get("t"))
 
 
+def _wave_key(oldest_start: datetime) -> int:
+    """ключ волны ожидания для support_autofines.msg_id (UNIQUE ticket_id+msg_id+staff_id+kind).
+
+    Раньше брался id самого старого ждущего сообщения. Но волна сбрасывается, когда сотрудник
+    отвечает другим клиентам, а самое старое сообщение остаётся тем же — и предупреждение второй
+    волны молча отбрасывалось уникальным ключом (INSERT OR IGNORE): штраф приходил без «скоро штраф».
+    Начало волны (секунды) у каждой волны своё.
+    """
+    return int(oldest_start.timestamp())
+
+
 def _check_inbox(cfg, sid, st, waits, now, need, warn_at, notify, res) -> None:
     """один штраф за все взятые тикеты сотрудника, не за каждый; «Ожидание» уже выкинуто из waits."""
     # сотрудник разгребает пачку: отсчёт — от его последнего ответа клиенту.
@@ -210,7 +221,7 @@ def _check_inbox(cfg, sid, st, waits, now, need, warn_at, notify, res) -> None:
         oldest_start = last_reply
     if _sentinel_same_wave(INBOX_TICKET, sid, "fine", oldest_start):
         return
-    wave_msg = min(int(w["id"]) for _, w, _ in waits)
+    wave_msg = _wave_key(oldest_start)
     n = len(waits)
     fake_t = {"id": INBOX_TICKET, "number": 0, "user_id": 0}
     fake_w = {"id": wave_msg, "created_at": oldest_start.isoformat()}
@@ -223,7 +234,7 @@ def _check_pool(cfg, waits, staff_rows, now, need, warn_at, notify, res) -> None
     if not operators:
         return
     oldest_start = min(start for _, _, start in waits)
-    wave_msg = min(int(w["id"]) for _, w, _ in waits)
+    wave_msg = _wave_key(oldest_start)
     n = len(waits)
     fake_t = {"id": POOL_TICKET, "number": 0, "user_id": 0}
     fake_w = {"id": wave_msg, "created_at": oldest_start.isoformat()}
