@@ -678,7 +678,7 @@ export async function fetchWithdrawals(): Promise<{ items: Withdrawal[]; min_wit
   try {
     return await appFetch("/withdrawals");
   } catch {
-    return { items: [], min_withdraw: 100 };
+    return { items: [], min_withdraw: 2000 };
   }
 }
 

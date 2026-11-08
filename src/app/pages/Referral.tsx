@@ -226,7 +226,7 @@ export default function Referral() {
       {sheet === "withdraw" && (
         <WithdrawSheet
           balance={balance}
-          min={Number(data?.min_withdraw || 100)}
+          min={Number(data?.min_withdraw || 2000)}
           onClose={() => setSheet(null)}
           onDone={(b) => { setData((d) => (d ? { ...d, partner_balance: b } : d)); patchReferral({ partner_balance: b }); void load(); }}
         />

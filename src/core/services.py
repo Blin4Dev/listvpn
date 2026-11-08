@@ -11,7 +11,7 @@ PROMO_DISCOUNT_DAYS = 90
 
 # системные промо (только бот; is_active=0, пользователи не вводят)
 SYSTEM_PROMO_CODES = {"DRIP10"}
-MIN_WITHDRAW_RUB = 100.0
+MIN_WITHDRAW_RUB = 2000.0
 _TON_ADDR_RE = re.compile(r"^(?:UQ|EQ|0Q|kQ)[A-Za-z0-9_-]{46}$")
 
 

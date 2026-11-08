@@ -289,7 +289,7 @@ export default function SiteReferral({ nav }: { nav: CabNav }) {
   }
 
   const balance = Number(data.partner_balance || 0);
-  const min = Number(data.min_withdraw || 100);
+  const min = Number(data.min_withdraw || 2000);
   const active = Number(data.active_count || 0);
   const invited = Number(data.referrals_count || 0);
   const lv = data.level;
