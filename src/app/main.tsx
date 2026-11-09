@@ -87,6 +87,11 @@ async function resolveSite(): Promise<boolean> {
     /* noop */
   }
   if (inTg) {
+    // ссылка открыта во встроенном браузере Telegram: домен мини-приложения → в бота (мини-приложение),
+    // а домен сайта — показываем сайт (раньше перекидывало в бота с любого домена, и fgn.best
+    // открывался карточкой бота «OPEN APP»)
+    const isSiteHost = siteDom ? host === siteDom : !(miniDom && host === miniDom);
+    if (isSiteHost) return true;
     bounceToMiniApp(bot, mlink);
     return false;
   }
