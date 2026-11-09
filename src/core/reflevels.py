@@ -398,6 +398,19 @@ def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
     if exp and exp < _now() and row["status"] == "issued":
         raise RewardError("Срок действия подарка истёк")
     uid = int(user["id"])
+    months = int(row.get("months") or REWARD_MONTHS)
+    if row["status"] == "redeemed":
+        # код помечен активированным, а подписка по нему не выдана (процесс оборвался между шагами,
+        # например перезапуск бэкенда) — тому же человеку выдаём заново
+        if int(row.get("redeemed_by") or 0) == uid and _stuck_redeem(row, uid, months):
+            reclaim = db.execute(
+                "UPDATE referral_rewards SET redeemed_at = ? WHERE id = ? AND status = 'redeemed' AND redeemed_by = ? "
+                "AND redeemed_at = ?", (_iso(_now()), row["id"], uid, row.get("redeemed_at")))
+            if reclaim.rowcount == 1:
+                return _grant_gift(row, user, months)
+        if int(row.get("redeemed_by") or 0) == uid:
+            raise RewardError("Вы уже активировали этот подарок")
+        raise RewardError("Этот подарок уже активировал другой пользователь")
     with db.transaction() as tx:
         # пачка «один код на человека»: проверка и захват в одной транзакции (без гонок)
         if row["kind"] == "admin" and row.get("one_per_user") and row.get("batch"):
@@ -412,7 +425,10 @@ def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
         )
         if claim.rowcount == 0:
             raise RewardError("Этот подарок уже активирован")
-    months = int(row.get("months") or REWARD_MONTHS)
+    return _grant_gift(row, user, months)
+
+
+def _grant_gift(row: dict[str, Any], user: dict[str, Any], months: int) -> dict[str, Any]:
     try:
         grant = _grant_month(user, months=months)
     except Exception as exc:  # noqa: BLE001
@@ -420,6 +436,30 @@ def redeem_gift(code: str, user: dict[str, Any]) -> dict[str, Any]:
                    (row["id"],))
         raise RewardError(f"Не удалось активировать подарок: {exc}", 502)
     return {"expires_at": grant.get("expires_at"), "months": months}
+
+
+STUCK_MIN_AGE = timedelta(minutes=2)   # моложе — возможно, выдача ещё идёт в другом запросе
+STUCK_MAX_AGE = timedelta(days=3)      # старше — не чиним (иначе старый подарок можно «активировать» снова)
+
+
+def _stuck_redeem(row: dict[str, Any], uid: int, months: int) -> bool:
+    """подарок помечен активированным этим пользователем, но платной подписки на его срок у него нет."""
+    at = _parse_dt(row.get("redeemed_at"))
+    if not at:
+        return False
+    age = _now() - at
+    if age < STUCK_MIN_AGE or age > STUCK_MAX_AGE:
+        return False
+    try:
+        from . import fulfillment  # type: ignore
+    except ImportError:
+        import fulfillment  # type: ignore
+    # выданный подарок продлил бы подписку минимум до «активации + срок подарка» (с запасом в 2 дня)
+    need = at + timedelta(days=max(1, fulfillment.period_days(months) - 2))
+    got = db.fetchone(
+        "SELECT 1 FROM subscriptions WHERE user_id = ? AND COALESCE(type, '') != 'trial' AND expires_at >= ? LIMIT 1",
+        (uid, _iso(need)))
+    return got is None
 
 
 def _parse_dt(v: Any) -> Optional[datetime]:

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
 import { redeemPromo, type DayGift } from "../utils/api";
@@ -22,9 +22,12 @@ export default function Promocode() {
 
   useEffect(() => { setErr(""); }, [code]);
 
+  // двойное нажатие: state busy обновляется не сразу — второй запрос успевал уйти
+  const inflight = useRef(false);
   const activate = async () => {
     const c = code.trim();
-    if (!c || busy) return;
+    if (!c || busy || inflight.current) return;
+    inflight.current = true;
     setBusy(true);
     setErr("");
     try {
@@ -45,6 +48,7 @@ export default function Promocode() {
       setErr(e instanceof Error ? e.message : "Не удалось активировать");
     } finally {
       setBusy(false);
+      inflight.current = false;
     }
   };
 

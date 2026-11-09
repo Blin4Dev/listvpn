@@ -1,7 +1,7 @@
 // FGN: «Промокод» / «Активировать подарок» (переопределение src/app/pages/Promocode.tsx; маршруты /promocode и /gift/activate).
 // Макет: шапка «назад» + «Промокод», подпись, поле-пилюля, кнопка «Активировать» (тёмная, пока поле пустое),
 // под кнопкой — строка результата («Начислено 30 дней»). Промокод на дни зачисляется сразу (без листа «Забрать»).
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
 import { claimDayGift, redeemPromo } from "../utils/api";
@@ -33,9 +33,12 @@ export default function Promocode() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // двойное нажатие: state busy обновляется не сразу — второй запрос успевал уйти
+  const inflight = useRef(false);
   const activate = async () => {
     const c = code.trim();
-    if (!c || busy) return;
+    if (!c || busy || inflight.current) return;
+    inflight.current = true;
     setBusy(true);
     setMsg(null);
     try {
@@ -61,6 +64,7 @@ export default function Promocode() {
       setMsg({ ok: false, text: e instanceof Error && e.message ? e.message : "Не удалось активировать" });
     } finally {
       setBusy(false);
+      inflight.current = false;
     }
   };
 
