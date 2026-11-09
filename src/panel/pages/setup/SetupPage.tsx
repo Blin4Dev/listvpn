@@ -161,6 +161,7 @@ export function SetupPage({ onDone, onToast }: { onDone: () => void; onToast: (t
   const [err, setErr] = useState('');
   const [sel, setSel] = useState('');
   const [modal, setModal] = useState<string | null>(null);
+  const [domainOnly, setDomainOnly] = useState(false);  // «Сменить домен»: тот же сервер, новый домен
 
   const load = useCallback(async () => {
     try {
@@ -247,7 +248,8 @@ export function SetupPage({ onDone, onToast }: { onDone: () => void; onToast: (t
           </div>
         </div>
         <div className="su-card">
-          {cur && <ProjectPane key={cur.id} p={cur} data={data} onInstall={() => setModal(cur.id)} onReload={load} onToast={onToast} />}
+          {cur && <ProjectPane key={cur.id} p={cur} data={data} onInstall={() => { setDomainOnly(false); setModal(cur.id); }}
+            onChangeDomain={() => { setDomainOnly(true); setModal(cur.id); }} onReload={load} onToast={onToast} />}
         </div>
       </div>
 
@@ -258,16 +260,16 @@ export function SetupPage({ onDone, onToast }: { onDone: () => void; onToast: (t
             : 'Все проекты выключены. Включите хотя бы один — откроется установка мини-приложения.'}</div>
       </div>
 
-      {modal && <InstallModal p={data.projects.find((x) => x.id === modal)!} data={data}
-        onClose={() => { setModal(null); load(); }} onFinish={() => { setSel(modal); setModal(null); load(); onToast('Готово', 'Мини-приложение установлено'); }} />}
+      {modal && <InstallModal p={data.projects.find((x) => x.id === modal)!} data={data} domainOnly={domainOnly}
+        onClose={() => { setModal(null); load(); }} onFinish={() => { setSel(modal); setModal(null); load(); onToast('Готово', domainOnly ? 'Домен изменён' : 'Мини-приложение установлено'); }} />}
     </div>
   );
 }
 
 // ───────────────────────── правая часть: проект ─────────────────────────
 
-function ProjectPane({ p, data, onInstall, onReload, onToast }: {
-  p: Proj; data: Data; onInstall: () => void; onReload: () => Promise<void>; onToast: (t: string, m: string, type?: 'success' | 'error') => void;
+function ProjectPane({ p, data, onInstall, onChangeDomain, onReload, onToast }: {
+  p: Proj; data: Data; onInstall: () => void; onChangeDomain: () => void; onReload: () => Promise<void>; onToast: (t: string, m: string, type?: 'success' | 'error') => void;
 }) {
   const [token, setToken] = useState('');
   const [admins, setAdmins] = useState<string[]>(data.admins);
@@ -369,7 +371,10 @@ function ProjectPane({ p, data, onInstall, onReload, onToast }: {
           <dt>Домен</dt><dd className="mono">{p.domain}{p.site_domain ? `, ${p.site_domain}` : ''}</dd>
           <dt>Письма</dt><dd>{p.mail_from ? <><span className="mono">{p.mail_from}</span> <MailDns pid={p.id} /></> : <span className="f">как в Настройки → Почта</span>}</dd>
         </dl>
-        <div style={{ marginTop: 10 }}><button className="su-link" onClick={onInstall}>{p.legacy ? 'Перенести на свой сервер' : 'Перенести на другой сервер'}</button></div>
+        <div style={{ marginTop: 10, display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+          {!p.legacy && p.server && p.server.online && <button className="su-link" onClick={onChangeDomain}>Сменить домен</button>}
+          <button className="su-link" onClick={onInstall}>{p.legacy ? 'Перенести на свой сервер' : 'Перенести на другой сервер'}</button>
+        </div>
       </div></div>
 
       <div className="su-sec"><span className={`su-mark ${s.bot ? 'ok' : ''}`} /><div>
@@ -501,15 +506,17 @@ function Ring({ phase, pct }: { phase: 'wait' | 'run' | 'done' | 'error'; pct: n
   </div>;
 }
 
-function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onClose: () => void; onFinish: () => void }) {
+function InstallModal({ p, data, onClose, onFinish, domainOnly = false }: { p: Proj; data: Data; onClose: () => void; onFinish: () => void; domainOnly?: boolean }) {
   const moving = p.installed;
   const otherServers = data.servers.filter((s) => s.online);
+  // смена домена: сервер тот же (панели или подключённый), меняется только домен
+  const keepLocal = domainOnly && !!p.server?.local;
   const pending = p.install && (p.install.state === 'waiting' || p.install.state === 'installing' || p.install.state === 'error') ? p.install : null;
   const [inst, setInst] = useState<Install | null>(pending);
   const [command, setCommand] = useState('');
-  const [mode, setMode] = useState<'new' | 'existing' | 'local'>(otherServers.length ? 'existing' : 'new');
+  const [mode, setMode] = useState<'new' | 'existing' | 'local'>(keepLocal ? 'local' : domainOnly ? 'existing' : otherServers.length ? 'existing' : 'new');
   const [ip, setIp] = useState('');
-  const [srv, setSrv] = useState<number | null>(otherServers[0]?.id ?? null);
+  const [srv, setSrv] = useState<number | null>(domainOnly && !keepLocal ? (p.server?.id ?? null) : (otherServers[0]?.id ?? null));
   const [domain, setDomain] = useState(moving ? p.domain : '');
   const [site, setSite] = useState(p.site_domain || '');
   const [busy, setBusy] = useState(false);
@@ -532,7 +539,9 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
 
   const ipBusy = mode === 'new' && data.servers.some((s) => s.ip === ip.trim());
   const siteBad = !!site.trim() && (!isDomain(siteDom) || siteDom === dom);
-  const valid = isDomain(dom) && !siteBad && (mode === 'new' ? isIp(ip.trim()) && !ipBusy : mode === 'local' ? data.local_caddy : !!srv);
+  const domainChanged = dom !== normDomain(p.domain) || siteDom !== normDomain(p.site_domain || '');
+  const valid = isDomain(dom) && !siteBad && (!domainOnly || domainChanged)
+    && (mode === 'new' ? isIp(ip.trim()) && !ipBusy : mode === 'local' ? data.local_caddy : !!srv);
   const targetIp = mode === 'local' ? data.panel_ip : mode === 'new' ? ip.trim() : (data.servers.find((s) => s.id === srv)?.ip || '');
 
   const go = async () => {
@@ -564,7 +573,7 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
   const phase: 'form' | 'wait' | 'run' | 'done' | 'error' = !inst ? 'form'
     : inst.state === 'done' ? 'done' : inst.state === 'error' ? 'error'
       : inst.state === 'waiting' || (inst.state === 'installing' && inst.step_index < 0) ? 'wait' : 'run';
-  const title = moving ? `Перенос ${p.name}` : `Установка ${p.name}`;
+  const title = domainOnly ? `Смена домена ${p.name}` : moving ? `Перенос ${p.name}` : `Установка ${p.name}`;
   const cmd = command || inst?.command || '';
   const stepLabel = inst && inst.step_index >= 0 ? (inst.label || inst.steps[inst.step_index]?.label || '') : '';
   const [st1, st2] = phase === 'wait' ? ['Подключение…', inst?.connected ? `Сервер на связи, передаём домен ${inst?.domain}` : `Ждём, когда на ${inst?.server_ip} запустят команду`]
@@ -579,13 +588,22 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
         <div className="su-mh">
           <div><div className="title">{title}</div>
             <div className="f sm">{phase === 'form'
-              ? (moving ? 'Мини-приложение переедет на другой сервер, старый сайт отключится после проверки.' : 'Мини-приложение проекта будет работать на своём домене — на отдельном сервере или рядом с панелью.')
+              ? (domainOnly ? 'Мини-приложение останется на этом сервере. Новый домен заработает после проверки, старый перестанет открываться.'
+                : moving ? 'Мини-приложение переедет на другой сервер, старый сайт отключится после проверки.' : 'Мини-приложение проекта будет работать на своём домене — на отдельном сервере или рядом с панелью.')
               : inst?.local ? 'Панель сама добавит сайт в свой Caddy, выпустит сертификат и настроит почту.'
                 : 'Панель сама настроит сервер: Caddy, сертификат, мини-приложение и почту.'}</div></div>
           <button className="su-x" onClick={close} aria-label="Закрыть" title={inst?.state === 'installing' ? 'Дождитесь окончания установки' : 'Закрыть'}>×</button>
         </div>
         <div className="su-mb">
           {phase === 'form' ? <>
+            {domainOnly ? <div className="su-field">
+              <label>Сервер</label>
+              <div className="su-srv on" style={{ cursor: 'default' }}>
+                <span className="su-radio" />
+                <div style={{ flex: 1, minWidth: 0 }}><div className="mono" style={{ fontSize: 13 }}>{keepLocal ? `сервер панели · ${data.panel_ip}` : p.server?.ip}</div>
+                  <div className="f sm">остаётся тем же</div></div>
+              </div>
+            </div> : <>
             <div className="seg" style={{ marginBottom: 16 }}>
               <button className={`seg-item ${mode === 'new' ? 'on' : ''}`} onClick={() => setMode('new')}>Новый сервер</button>
               <button className={`seg-item ${mode === 'existing' ? 'on' : ''}`} disabled={!otherServers.length} style={otherServers.length ? undefined : { opacity: 0.35, cursor: 'not-allowed' }}
@@ -620,11 +638,13 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
               ))}
               <div className="su-hint">Проект встанет рядом с остальными: отдельный сайт в Caddy, свой сертификат и DKIM-ключ. Команда на сервере не нужна.</div>
             </div>}
+            </>}
             <div className="su-field" style={{ marginBottom: p.has_site ? 14 : 0 }}>
               <label>Домен мини-приложения</label>
               <input className="input mono" style={{ width: '100%' }} placeholder={`app.${p.id}.ru`} value={domain} autoCapitalize="off" spellCheck={false}
                 onChange={(e) => setDomain(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && go()} />
               {dom && !isDomain(dom) && <div className="su-note">Похоже на опечатку в домене</div>}
+              {domainOnly && <div className="su-note" style={{ opacity: 0.85 }}>После смены: в @BotFather → /setdomain укажите новый домен (вход через Telegram на сайте), письма начнут уходить с адреса на новом домене — проверьте DNS почты. Кнопку мини-приложения в боте панель обновит сама.</div>}
               <div className="su-hint">С этого домена бот открывает мини-приложение, а пользователям приходят письма. A-запись должна указывать на {targetIp ? <span className="mono">{targetIp}</span> : 'IP сервера'} — иначе сертификат не выпустится.</div>
             </div>
             {p.has_site && <div className="su-field" style={{ marginBottom: 0 }}>
@@ -635,7 +655,7 @@ function InstallModal({ p, data, onClose, onFinish }: { p: Proj; data: Data; onC
             {formErr && <div className="su-err">{formErr}</div>}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
               <button className="btn ghost" onClick={onClose}>Отмена</button>
-              <button className="btn solid" disabled={!valid || busy} onClick={go}>{busy ? 'Минутку…' : mode === 'new' ? 'Получить команду' : 'Установить'}</button>
+              <button className="btn solid" disabled={!valid || busy} onClick={go}>{busy ? 'Минутку…' : domainOnly ? 'Сменить домен' : mode === 'new' ? 'Получить команду' : 'Установить'}</button>
             </div>
           </> : <>
             <dl className="su-kv" style={{ margin: '0 0 16px' }}>
