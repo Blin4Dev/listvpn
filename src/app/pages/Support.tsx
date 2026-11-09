@@ -4,6 +4,7 @@ import { N, NoirBack, NoirScreen, useTgBack } from "../components/noir";
 import RichText from "../components/RichText";
 import { btnReset } from "../theme";
 import { useSmartBack } from "../utils/navigation";
+import { hiddenFileInput, isDesktopTelegram, useFileDrop } from "../utils/fileDrop";
 import {
   closeSupportTicket,
   fetchSupport,
@@ -298,7 +299,7 @@ export default function Support() {
 
   const limits = state?.limits || { max_file_mb: 100, max_files: 10, max_text: 4000 };
 
-  const addFiles = (list: FileList | null) => {
+  const addFiles = (list: FileList | File[] | null) => {
     if (!list || !list.length) return;
     const room = limits.max_files - pending.length;
     const files = Array.from(list).slice(0, Math.max(0, room));
@@ -318,6 +319,9 @@ export default function Support() {
     }
     if (fileRef.current) fileRef.current.value = "";
   };
+  // перетаскивание в окно и Ctrl+V: на компьютере окно выбора файла в мини-приложении открывается не везде
+  const dragging = useFileDrop((fs) => addFiles(fs));
+  const desktopHint = isDesktopTelegram();
 
   const removePending = (key: string) => {
     setPending((p) => {
@@ -398,6 +402,12 @@ export default function Support() {
 
   return (
     <NoirScreen dim={0.4}>
+      {dragging && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center",
+          background: "rgba(0,0,0,0.6)", border: "2px dashed rgba(255,255,255,0.45)", color: "#fff", fontSize: 17, pointerEvents: "none" }}>
+          Отпустите, чтобы прикрепить
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, fontFamily: N.font }}>
       <div style={{ paddingTop: 20, marginBottom: 18, flex: "none" }}>
         <NoirBack onClick={goBack} />
@@ -481,8 +491,13 @@ export default function Support() {
         </div>
       )}
 
+{desktopHint && pending.length === 0 ? (
+        <div style={{ paddingTop: 6, fontSize: 12.5, lineHeight: "16px", opacity: 0.55, textAlign: "center", flex: "none" }}>
+          На компьютере файл можно перетащить в окно или вставить через Ctrl+V
+        </div>
+      ) : null}
       <div style={{ display: "flex", alignItems: "flex-end", gap: 8, paddingTop: 8, flex: "none" }}>
-        <input ref={fileRef} type="file" multiple style={{ display: "none" }} onChange={(e) => addFiles(e.target.files)} />
+        <input ref={fileRef} type="file" multiple tabIndex={-1} aria-hidden style={hiddenFileInput} onChange={(e) => addFiles(e.target.files)} />
         <button type="button" onClick={() => fileRef.current?.click()} aria-label="Прикрепить файл" className="blin-press"
           style={{ ...btnReset, flex: "none", width: 48, height: 48, borderRadius: 18, border: `1px solid ${T.border}`, background: T.surface, color: N.text, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
           <MSIcon name="attach_file" style={{ fontSize: 24, transform: "rotate(45deg)", fontVariationSettings: "'wght' 300" }} />

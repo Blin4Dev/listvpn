@@ -9,6 +9,7 @@ import { useTgBack } from "../components/noir";
 import RichText from "../components/RichText";
 import { btnReset, pageFrame, pageOuter } from "../theme";
 import { useSmartBack } from "../utils/navigation";
+import { hiddenFileInput, isDesktopTelegram, useFileDrop } from "../utils/fileDrop";
 import {
   closeSupportTicket,
   fetchConfig,
@@ -298,6 +299,9 @@ export default function Support() {
     }
     if (fileRef.current) fileRef.current.value = "";
   };
+  // перетаскивание в окно и Ctrl+V: на компьютере окно выбора файла в мини-приложении открывается не везде
+  const dragging = useFileDrop((fs) => addFiles(fs));
+  const desktopHint = isDesktopTelegram();
 
   const removePending = (key: string) => {
     setPending((p) => {
@@ -384,6 +388,12 @@ export default function Support() {
     <div style={pageOuter({ background: C.bg })}>
       <div style={pageFrame({ background: C.bg, fontFamily: C.font, color: C.text })}>
         <FgnBackdrop />
+        {dragging && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center",
+          background: "rgba(0,0,0,0.6)", border: "2px dashed rgba(255,255,255,0.45)", color: "#fff", fontSize: 17, pointerEvents: "none" }}>
+          Отпустите, чтобы прикрепить
+        </div>
+      )}
         <style>{`.fgn-chat a{color:inherit!important}.fgn-support-ta::placeholder{color:rgba(196,196,206,0.55);opacity:1}`}</style>
         <div style={{ position: "relative", zIndex: 1, height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
           {/* шапка */}
@@ -457,8 +467,13 @@ export default function Support() {
                 ))}
               </div>
             ) : null}
+{desktopHint && pending.length === 0 ? (
+        <div style={{ paddingTop: 6, fontSize: 12.5, lineHeight: "16px", opacity: 0.55, textAlign: "center", flex: "none" }}>
+          На компьютере файл можно перетащить в окно или вставить через Ctrl+V
+        </div>
+      ) : null}
             <div style={{ display: "flex", alignItems: "flex-end", gap: 8.5 }}>
-              <input ref={fileRef} type="file" multiple style={{ display: "none" }}
+              <input ref={fileRef} type="file" multiple tabIndex={-1} aria-hidden style={hiddenFileInput}
                 onChange={(e) => addFiles(e.target.files)} />
               <button
                 type="button"
