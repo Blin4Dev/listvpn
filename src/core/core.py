@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import asyncio
 import secrets
 import string
 import threading
@@ -7245,7 +7246,7 @@ def _app_user_from_init(
     authorization: Optional[str] = Header(None, alias="Authorization"),
     x_app_session: Optional[str] = Header(None, alias="X-App-Session"),
 ) -> dict[str, Any]:
-    allow_banned = request.url.path in _BANNED_ALLOWED_PATHS
+    allow_banned = request.url.path in _BANNED_ALLOWED_PATHS or request.url.path.startswith("/api/app/support/upload/")
     token = _extract_app_token(authorization, x_app_session)
     # 1) telegram mini app: подпись initdata
     if x_telegram_init_data:
@@ -9237,15 +9238,16 @@ async def _stream_upload(request: Request, chat_id: int, uploader: str, uploader
         data = await item.read() if hasattr(item, "read") else bytes(item)
         if len(data) > support.MAX_FILE_BYTES:
             raise HTTPException(413, detail={"message": f"Файл больше {support.MAX_FILE_BYTES // support.MB} МБ"})
-        up = _sup(support.Upload, chat_id, uploader, uploader_id, fname)
+        up = await run_in_threadpool(_sup, support.Upload, chat_id, uploader, uploader_id, fname)
         try:
-            up.write(data)
+            await run_in_threadpool(up.write, data)
         except support.SupportError as e:
             raise HTTPException(e.status, detail={"message": e.message})
         except BaseException:
             up.abort()
             raise
-        return _sup(up.finish)
+        # finish в потоке: выгрузка в S3 большого файла иначе вешает весь API
+        return await run_in_threadpool(_sup, up.finish)
     try:
         declared = int(request.headers.get("content-length") or 0)
     except ValueError:
@@ -9264,7 +9266,7 @@ async def _stream_upload(request: Request, chat_id: int, uploader: str, uploader
     except BaseException:
         up.abort()
         raise
-    return _sup(up.finish)
+    return await run_in_threadpool(_sup, up.finish)
 
 
 def _notify_support_forum(user: dict[str, Any], chat: dict[str, Any], msg: dict[str, Any]) -> None:
@@ -9557,6 +9559,123 @@ async def app_support_upload(request: Request, name: str = Query("file", max_len
         raise HTTPException(429, detail={"message": f"Слишком много файлов. Повторите через {max(1, retry // 60)} мин."})
     chat = support.chat_for_user(int(u["id"]))
     return await _stream_upload(request, int(chat["id"]), "user", str(u["id"]), name, form=form)
+
+
+# ── загрузка частями: большие файлы (видео) с телефона ──
+# одним длинным запросом видео на 10+ секунд часто не доходит (мобильная сеть/прокси рвут долгую загрузку),
+# поэтому мини-приложение шлёт файл кусками по CHUNK_BYTES и повторяет кусок при обрыве.
+_CHUNK_BYTES = 2 * 1024 * 1024
+_CHUNKED_TTL = 30 * 60
+_chunked: dict[str, dict[str, Any]] = {}
+_chunked_lock = threading.Lock()
+
+
+def _chunked_gc() -> None:
+    now_t = time.time()
+    with _chunked_lock:
+        stale = [k for k, v in _chunked.items() if now_t - v["touched"] > _CHUNKED_TTL]
+        items = [_chunked.pop(k) for k in stale]
+    for it in items:
+        try:
+            it["up"].abort()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _chunk_user(request: Request) -> tuple[dict[str, Any], Any]:
+    form = None
+    extra_init = None
+    if "multipart/form-data" in (request.headers.get("content-type") or "").lower():
+        form = await request.form()
+        extra_init = _form_init_data(form)
+    user = _app_user_from_init(
+        request,
+        x_telegram_init_data=extra_init or request.headers.get("x-telegram-init-data"),
+        authorization=request.headers.get("authorization"),
+        x_app_session=request.headers.get("x-app-session"),
+    )
+    return _support_user(user), form
+
+
+def _chunked_get(upload_id: str, user_id: int) -> dict[str, Any]:
+    with _chunked_lock:
+        it = _chunked.get(str(upload_id))
+    if not it or int(it["user_id"]) != int(user_id):
+        raise HTTPException(404, detail={"message": "Загрузка прервана — прикрепите файл ещё раз"})
+    return it
+
+
+@app.post("/api/app/support/upload/start")
+async def app_support_upload_start(request: Request, name: str = Query("file", max_length=200),
+                                   size: int = Query(0, ge=0)) -> dict[str, Any]:
+    u, _ = await _chunk_user(request)
+    if size > support.MAX_FILE_BYTES:
+        raise HTTPException(413, detail={"message": f"Файл больше {support.MAX_FILE_BYTES // support.MB} МБ"})
+    allowed, retry = ratelimit.rate_limit(f"supup:{u['id']}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много файлов. Повторите через {max(1, retry // 60)} мин."})
+    await run_in_threadpool(_chunked_gc)
+    chat = support.chat_for_user(int(u["id"]))
+    up = await run_in_threadpool(_sup, support.Upload, int(chat["id"]), "user", str(u["id"]), name)
+    upload_id = secrets.token_urlsafe(18)
+    with _chunked_lock:
+        _chunked[upload_id] = {"up": up, "user_id": int(u["id"]), "touched": time.time(),
+                               "lock": asyncio.Lock(), "size": int(size)}
+    return {"upload_id": upload_id, "chunk_size": _CHUNK_BYTES}
+
+
+@app.post("/api/app/support/upload/{upload_id}/chunk")
+async def app_support_upload_chunk(upload_id: str, request: Request, offset: int = Query(..., ge=0)) -> dict[str, Any]:
+    u, form = await _chunk_user(request)
+    it = _chunked_get(upload_id, int(u["id"]))
+    item = form.get("chunk") if form is not None else None
+    if item is None or not hasattr(item, "read"):
+        raise HTTPException(400, detail={"message": "Кусок файла не получен"})
+    data = await item.read()
+    if len(data) > _CHUNK_BYTES:
+        raise HTTPException(413, detail={"message": "Слишком большой кусок"})
+    async with it["lock"]:
+        up = it["up"]
+        it["touched"] = time.time()
+        if offset + len(data) <= up.size:
+            return {"received": up.size}  # этот кусок уже дошёл (повтор после обрыва ответа)
+        if offset != up.size:
+            raise HTTPException(409, detail={"message": "Части файла пришли не по порядку", "received": up.size})
+        try:
+            await run_in_threadpool(up.write, data)
+        except support.SupportError as e:
+            with _chunked_lock:
+                _chunked.pop(str(upload_id), None)
+            raise HTTPException(e.status, detail={"message": e.message})
+        return {"received": up.size}
+
+
+@app.post("/api/app/support/upload/{upload_id}/finish")
+async def app_support_upload_finish(upload_id: str, request: Request) -> dict[str, Any]:
+    u, _ = await _chunk_user(request)
+    it = _chunked_get(upload_id, int(u["id"]))
+    async with it["lock"]:
+        with _chunked_lock:
+            _chunked.pop(str(upload_id), None)
+        up = it["up"]
+        if it["size"] and up.size != it["size"]:
+            up.abort()
+            raise HTTPException(400, detail={"message": "Файл загрузился не полностью — попробуйте ещё раз"})
+        return await run_in_threadpool(_sup, up.finish)
+
+
+@app.post("/api/app/support/upload/{upload_id}/abort")
+async def app_support_upload_abort(upload_id: str, request: Request) -> dict[str, Any]:
+    u, _ = await _chunk_user(request)
+    with _chunked_lock:
+        it = _chunked.get(str(upload_id))
+        if it and int(it["user_id"]) == int(u["id"]):
+            _chunked.pop(str(upload_id), None)
+        else:
+            it = None
+    if it:
+        await run_in_threadpool(it["up"].abort)
+    return {"ok": True}
 
 
 @app.post("/api/app/support/messages")

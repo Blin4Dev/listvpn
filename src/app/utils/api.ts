@@ -802,8 +802,117 @@ export function markSupportRead(): Promise<unknown> {
   return appFetch("/support/read", { method: "POST" }).catch(() => null);
 }
 
+// большие файлы (видео) — частями: одним долгим запросом видео на 10+ секунд с телефона часто не доходит
+const CHUNKED_FROM = 4 * 1024 * 1024;
+
+function supportForm(): FormData {
+  const fd = new FormData();
+  try {
+    const initData = (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData?.trim();
+    if (initData) fd.append("init_data", initData);
+  } catch { /* ignore */ }
+  return fd;
+}
+
+type XhrResult = { status: number; body: any; text: string; server: string | null; cfRay: string | null };
+
+function supportXhr(url: string, fd: FormData, onProgress: ((loaded: number) => void) | null, track: (x: XMLHttpRequest | null) => void): Promise<XhrResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    track(xhr);
+    xhr.open("POST", `${window.location.origin}${url}`);
+    const h = initDataHeader();
+    Object.keys(h).forEach((k) => {
+      try { xhr.setRequestHeader(k, h[k]); } catch { /* webview */ }
+    });
+    xhr.timeout = 120000; // кусок 2 МБ: дольше 2 минут — соединение зависло, пробуем заново
+    if (onProgress) xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
+    xhr.onload = () => {
+      track(null);
+      let body: any = null;
+      try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+      resolve({ status: xhr.status, body, text: xhr.responseText || "", server: xhr.getResponseHeader("server"), cfRay: xhr.getResponseHeader("cf-ray") });
+    };
+    xhr.onerror = () => { track(null); reject(new Error("net")); };
+    xhr.ontimeout = () => { track(null); reject(new Error("net")); };
+    xhr.onabort = () => { track(null); reject(new Error("Отменено")); };
+    xhr.send(fd);
+  });
+}
+
+function supportErr(r: XhrResult, fallback: string): Error {
+  const detail = r.body?.detail;
+  const msg = (detail && typeof detail === "object" ? detail.message : typeof detail === "string" ? detail : "") || r.body?.error;
+  const who = !r.body ? (/cloudflare/i.test(r.text) || r.cfRay ? " (Cloudflare)" : r.server ? ` (${r.server})` : "") : "";
+  return new Error(msg || (r.status === 413 ? "Файл слишком большой" : r.status === 401 ? "Сессия истекла, откройте чат заново" : `${fallback}${who}`));
+}
+
+function uploadSupportFileChunked(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
+  let cur: XMLHttpRequest | null = null;
+  let aborted = false;
+  let uploadId = "";
+  const track = (x: XMLHttpRequest | null) => { cur = x; };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const promise = (async () => {
+    const name = encodeURIComponent(file.name || "file");
+    const st = await supportXhr(`/api/app/support/upload/start?name=${name}&size=${file.size}`, supportForm(), null, track)
+      .catch(() => { throw new Error("Нет соединения"); });
+    if (st.status < 200 || st.status >= 300 || !st.body?.upload_id) throw supportErr(st, "Не удалось начать загрузку");
+    uploadId = String(st.body.upload_id);
+    const size = Math.max(256 * 1024, Number(st.body.chunk_size) || 2 * 1024 * 1024);
+    let offset = 0;
+    while (offset < file.size) {
+      if (aborted) throw new Error("Отменено");
+      const part = file.slice(offset, Math.min(file.size, offset + size));
+      let done = false;
+      for (let attempt = 0; attempt < 6 && !done; attempt++) {
+        if (aborted) throw new Error("Отменено");
+        if (attempt) await sleep(Math.min(8000, 1000 * 2 ** (attempt - 1)));
+        const fd = supportForm();
+        fd.append("chunk", part, "chunk");
+        let r: XhrResult;
+        try {
+          r = await supportXhr(`/api/app/support/upload/${encodeURIComponent(uploadId)}/chunk?offset=${offset}`, fd,
+            (loaded) => onProgress(Math.min(0.99, (offset + loaded) / file.size)), track);
+        } catch (e) {
+          if ((e as Error).message === "Отменено") throw e;
+          continue; // обрыв — повторяем этот же кусок
+        }
+        if (r.status === 409 && typeof r.body?.detail?.received === "number") {
+          offset = r.body.detail.received; // сервер уже получил больше/меньше — продолжаем с его места
+          done = true;
+          break;
+        }
+        if (r.status >= 500 || r.status === 0 || r.status === 429) continue;
+        if (r.status < 200 || r.status >= 300) throw supportErr(r, "Не удалось загрузить");
+        offset = Number(r.body?.received) || offset + part.size;
+        done = true;
+      }
+      if (!done) throw new Error("Не удалось загрузить — плохое соединение, попробуйте ещё раз");
+      onProgress(Math.min(0.99, offset / file.size));
+    }
+    let fin: XhrResult | null = null;
+    for (let attempt = 0; attempt < 4 && !fin; attempt++) {
+      if (attempt) await sleep(1500 * attempt);
+      try { fin = await supportXhr(`/api/app/support/upload/${encodeURIComponent(uploadId)}/finish`, supportForm(), null, track); }
+      catch (e) { if ((e as Error).message === "Отменено") throw e; }
+    }
+    if (!fin) throw new Error("Нет соединения");
+    if (fin.status < 200 || fin.status >= 300 || !fin.body?.id) throw supportErr(fin, "Не удалось загрузить");
+    onProgress(1);
+    return fin.body as Omit<SupportFile, "url">;
+  })();
+  const abort = () => {
+    aborted = true;
+    try { (cur as XMLHttpRequest | null)?.abort(); } catch { /* ignore */ }
+    if (uploadId) void supportXhr(`/api/app/support/upload/${encodeURIComponent(uploadId)}/abort`, supportForm(), null, () => {}).catch(() => null);
+  };
+  return { promise, abort };
+}
+
 // загрузка вложения с прогрессом 0..1
 export function uploadSupportFile(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
+  if (file.size > CHUNKED_FROM) return uploadSupportFileChunked(file, onProgress);
   const xhr = new XMLHttpRequest();
   const promise = new Promise<Omit<SupportFile, "url">>((resolve, reject) => {
     // FormData без Content-Type: Telegram WebView режет octet-stream + X-Telegram-Init-Data

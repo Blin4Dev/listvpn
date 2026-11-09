@@ -275,7 +275,7 @@ export default function Support() {
   };
 
   const maxText = state?.limits?.max_text || 4000;
-  const limits = state?.limits || { max_file_mb: 50, max_files: 10, max_text: 4000 };
+  const limits = state?.limits || { max_file_mb: 100, max_files: 10, max_text: 4000 };
 
   const addFiles = (list: FileList | File[] | null) => {
     const all = list ? Array.from(list) : [];

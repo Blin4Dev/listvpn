@@ -40,7 +40,7 @@ def _env_num(key: str, default: float) -> float:
         return float(default)
 
 
-MAX_FILE_BYTES = 50 * MB  # лимит на файл (и для пользователя, и для поддержки)
+MAX_FILE_BYTES = 100 * MB  # лимит на файл; больше ~50 МБ доходит только загрузкой частями (одним запросом режет прокси)
 MAX_FILES_PER_MESSAGE = 10
 MAX_TEXT = 4000
 EDIT_WINDOW = 48 * 3600  # своё сообщение сотрудник может изменить или удалить в течение 48 часов
