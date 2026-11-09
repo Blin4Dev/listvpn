@@ -34,6 +34,17 @@ export default function TrialButton({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Msg | null>(null);
   const [setup, setSetup] = useState<string | null>(null); // текст над выбором устройства; null — закрыто
+  // вошёл: подписка есть → «Подключить устройство»; пробный уже был → «Выбрать тариф»; иначе — пробный
+  const [sub, setSub] = useState<SubInfo | null>(null);
+  useEffect(() => {
+    if (authed !== true) { setSub(null); return; }
+    let alive = true;
+    appFetch<SubInfo>("/subscription").then((r) => { if (alive) setSub(r); }).catch(() => null);
+    return () => { alive = false; };
+  }, [authed]);
+  const live = sub?.status === "active" || sub?.status === "trial";
+  const mode: "trial" | "connect" | "tariffs" = authed !== true || !sub ? "trial"
+    : live || !!sub.family ? "connect" : sub.trial_available === false ? "tariffs" : "trial";
 
   const start = useCallback(async () => {
     if (busy) return;
@@ -93,8 +104,9 @@ export default function TrialButton({
 
   return (
     <>
-      <button type="button" className="fs-try" disabled={busy || authed === null} onClick={() => void start()}>
-        {busy ? "Активируем…" : "Попробовать за 0 ₽"}
+      <button type="button" className="fs-try" disabled={busy || authed === null}
+        onClick={() => (mode === "tariffs" ? nav.go("/tariffs") : mode === "connect" ? setSetup("") : void start())}>
+        {busy ? "Активируем…" : mode === "connect" ? "Подключить устройство" : mode === "tariffs" ? "Выбрать тариф" : "Попробовать за 0 ₽"}
       </button>
       {msg ? (
         <div className="fs-try-msg">

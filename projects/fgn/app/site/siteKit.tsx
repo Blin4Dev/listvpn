@@ -1,5 +1,6 @@
 // FGN сайт: общие части кабинета/оплаты — форматирование, шапка страницы, плитки, модалка, иконки, стили.
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ApiError } from "../utils/api";
 import { copyText } from "../components/SubLinkBox";
 import { C } from "../components/fgn";
@@ -246,7 +247,8 @@ export function Modal({ title, onClose, children, busy }: { title: React.ReactNo
     window.addEventListener("keydown", on);
     return () => window.removeEventListener("keydown", on);
   }, [onClose, busy]);
-  return (
+  // в body: внутри блоков со своим слоем (первый экран) окно оказывалось под плашками сферы
+  return createPortal(
     <div className="fs-sheet-bg" onClick={() => !busy && onClose()}>
       <div className="fs-sheet" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="fs-sheet-head">
@@ -257,7 +259,8 @@ export function Modal({ title, onClose, children, busy }: { title: React.ReactNo
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

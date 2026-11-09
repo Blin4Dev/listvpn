@@ -361,7 +361,7 @@ function Sphere() {
       </div>
       <div className="fs-pill p2">
         <Icon name="star" size={14} color="#F2C14E" />
-        Серверы в 40+ странах
+        Серверы в 5+ странах
       </div>
     </div>
   );

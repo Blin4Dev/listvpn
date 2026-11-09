@@ -49,8 +49,8 @@ type FamilyState = {
 // локации в подписке (пока статично, как в макете)
 const LOCATIONS = [
   { flag: "🇩🇪", name: "Германия" },
-  { flag: "🇫🇮", name: "Финляндия" },
   { flag: "🇳🇱", name: "Нидерланды" },
+  { flag: "🇵🇱", name: "Польша" },
 ];
 const MAX_DEVICES = 20;
 

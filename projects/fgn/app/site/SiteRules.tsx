@@ -210,7 +210,6 @@ export default function SiteRules({ email }: { email: string }) {
         <div className="fs-rules-head">
           <div className="fs-rules-eyebrow">FGN</div>
           <h1>Правила использования</h1>
-          <p className="fs-rules-lead">Нейтральный типовой текст. Перед публикацией должен быть проверен юристом.</p>
           <div className="fs-rules-date">Обновлено: {UPDATED}</div>
         </div>
 
@@ -242,7 +241,6 @@ export default function SiteRules({ email }: { email: string }) {
                 )}
               </section>
             ))}
-            <p className="fs-rules-note">Данный текст является типовым шаблоном и должен быть проверен юристом перед публикацией.</p>
           </div>
         </div>
       </div>

@@ -407,6 +407,7 @@ type TgWebApp = {
   ) => void;
   openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
   openTelegramLink?: (url: string) => void;
+  initData?: string;
 };
 
 export function tgWebApp(): TgWebApp | null {
@@ -725,9 +726,16 @@ export async function fetchAppLink(app: "koala" | "incy" | "happ" | "other"): Pr
 
 // открыть подписку в клиенте через https open_url (tg не открывает incy:// / happ://)
 export function openDeepLink(res: SubAppLink | string): void {
+  const wa = tgWebApp();
+  // вне Telegram (сайт, браузер) — сразу ссылка приложения (koala:// happ:// incy://): браузер спросит
+  // «Открыть приложение?», а страница останется. Промежуточная https-страница нужна только Telegram —
+  // в браузере она уводила с сайта и «зависала», если приложение не открылось.
+  if (typeof res !== "string" && res.link && !/^https?:\/\//i.test(res.link) && !String(wa?.initData || "").trim()) {
+    window.location.href = res.link;
+    return;
+  }
   const link = typeof res === "string" ? res : (res.open_url || res.link);
   const isHttp = /^https?:\/\//i.test(link);
-  const wa = tgWebApp();
   if (isHttp && wa?.openLink) {
     wa.openLink(link);
     return;

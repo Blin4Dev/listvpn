@@ -2,6 +2,7 @@
 // платформа → приложение (FGN для Windows/macOS, если задан установщик; Incy; Happ; другое) → установка → добавить подписку.
 // Добавление подписки требует входа (/subscription/applink); без входа — кнопка «Войти» с возвратом сюда.
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { ApiError, fetchAppLink, openDeepLink } from "../utils/api";
 import { copyText } from "../components/SubLinkBox";
 import { APP_META, DEVICE_TITLE, KOALA_GUIDE, appSub, appsFor, detectDeviceKind, installOptions, installUrl, isRecommended, type AppKind, type DeviceKind } from "../utils/apps";
@@ -326,7 +327,7 @@ export function SetupDialog({
 
   const linkBox = <div className="fs-linkbox" style={err && !link ? { color: C.danger } : undefined}>{linkLoading ? "Загрузка…" : link || err || "—"}</div>;
 
-  return (
+  return createPortal(
     <div className="fs-sheet-bg" onClick={() => !busy && onClose()}>
       <div className="fs-sheet" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="fs-sheet-head">
@@ -460,7 +461,8 @@ export function SetupDialog({
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
