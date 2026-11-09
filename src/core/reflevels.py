@@ -517,9 +517,16 @@ def _admin_status(r: dict[str, Any]) -> str:
     return st
 
 
-def list_admin_gifts(status: str = "", q: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+GIFT_SOURCES = {"admin": ("admin",), "bought": ("bought",), "gift": ("gift",)}
+
+
+def list_admin_gifts(status: str = "", q: str = "", limit: int = 100, offset: int = 0,
+                     source: str = "") -> dict[str, Any]:
+    """подарки проекта для панели: созданные в панели, купленные за деньги и выданные за друзей."""
     _ensure_schema()
-    where, args = ["r.kind = 'admin' AND r.project_id = ?"], [db.pid()]
+    kinds = GIFT_SOURCES.get(source) or ("admin", "bought", "gift")
+    kin = ",".join("?" * len(kinds))
+    where, args = [f"r.kind IN ({kin}) AND r.project_id = ?"], [*kinds, db.pid()]
     now = _iso(_now())
     if status == "issued":
         where.append("r.status = 'issued' AND (r.expires_at IS NULL OR r.expires_at >= ?)")
@@ -532,28 +539,36 @@ def list_admin_gifts(status: str = "", q: str = "", limit: int = 100, offset: in
         args.append(status)
     q = str(q or "").strip()[:64]
     if q:
-        where.append("(r.code LIKE ? OR r.note LIKE ? OR r.batch = ? OR CAST(r.redeemed_by AS TEXT) = ? OR u.username LIKE ?)")
+        uq = q.lstrip("#")
+        where.append("(r.code LIKE ? OR r.note LIKE ? OR r.batch = ? OR CAST(r.redeemed_by AS TEXT) = ? "
+                     "OR u.username LIKE ? OR (r.kind != 'admin' AND CAST(r.user_id AS TEXT) = ?) OR b.username LIKE ? "
+                     "OR r.payment_id = ?)")
         like = f"%{q.upper() if q.upper().startswith(GIFT_PREFIX) else q}%"
-        args += [like, f"%{q}%", q, q.lstrip("#"), f"%{q.lstrip('@')}%"]
+        uname = f"%{q.lstrip('@')}%"
+        args += [like, f"%{q}%", q, uq, uname, uq, uname, q]
     w = " AND ".join(where)
-    total = db.fetchone(f"SELECT COUNT(*) AS c FROM referral_rewards r LEFT JOIN users u ON u.id = r.redeemed_by WHERE {w}",
-                        tuple(args))
+    joins = ("FROM referral_rewards r LEFT JOIN users u ON u.id = r.redeemed_by "
+             "LEFT JOIN users b ON b.id = r.user_id AND r.kind != 'admin'")
+    total = db.fetchone(f"SELECT COUNT(*) AS c {joins} WHERE {w}", tuple(args))
     rows = db.fetchall(
-        f"SELECT r.*, u.username AS r_username, u.telegram_id AS r_tg FROM referral_rewards r "
-        f"LEFT JOIN users u ON u.id = r.redeemed_by WHERE {w} ORDER BY r.id DESC LIMIT ? OFFSET ?",
+        f"SELECT r.*, u.username AS r_username, u.telegram_id AS r_tg, b.username AS b_username {joins} "
+        f"WHERE {w} ORDER BY r.id DESC LIMIT ? OFFSET ?",
         tuple(args) + (max(1, min(500, int(limit))), max(0, int(offset))))
     stats = {k: 0 for k in ("issued", "redeemed", "expired", "revoked")}
-    for r in db.fetchall("SELECT status, expires_at FROM referral_rewards WHERE kind = 'admin' AND project_id = ?",
-                         (db.pid(),)):
+    for r in db.fetchall(f"SELECT status, expires_at FROM referral_rewards WHERE kind IN ({kin}) AND project_id = ?",
+                         (*kinds, db.pid())):
         stats[_admin_status(r)] = stats.get(_admin_status(r), 0) + 1
     return {
         "total": int(total["c"]) if total else 0, "stats": stats,
-        "items": [{"id": r["id"], "code": r["code"], "status": _admin_status(r), "months": int(r.get("months") or 1),
+        "items": [{"id": r["id"], "code": r["code"], "kind": r["kind"], "status": _admin_status(r),
+                   "months": int(r.get("months") or 1),
                    "note": r.get("note") or "", "batch": r.get("batch") or "",
                    "one_per_user": bool(r.get("one_per_user")), "created_at": r["created_at"],
                    "expires_at": r.get("expires_at"), "redeemed_at": r.get("redeemed_at"),
                    "redeemed_by": r.get("redeemed_by"), "redeemed_username": r.get("r_username"),
-                   "redeemed_tg": r.get("r_tg")} for r in rows],
+                   "redeemed_tg": r.get("r_tg"),
+                   "owner_id": int(r["user_id"]) if r["kind"] != "admin" and r.get("user_id") else None,
+                   "owner_username": r.get("b_username"), "payment_id": r.get("payment_id")} for r in rows],
     }
 
 

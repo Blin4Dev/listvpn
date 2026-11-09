@@ -11,12 +11,15 @@ type Item = {
   id: number; code: string; link: string; status: Status; months: number; note: string; batch: string;
   one_per_user: boolean; created_at: string; expires_at: string | null; redeemed_at: string | null;
   redeemed_by: number | null; redeemed_username: string | null; redeemed_tg: number | null;
+  kind?: Kind; owner_id?: number | null; owner_username?: string | null; payment_id?: string | null;
 };
+type Kind = 'admin' | 'bought' | 'gift';
 type Data = { total: number; stats: Record<Status, number>; items: Item[]; periods: number[] };
 type Created = { batch: string; months: number; expires_at: string | null; items: { code: string; link: string }[] };
 
 const STATUS_RU: Record<Status, string> = { issued: 'Не активирован', redeemed: 'Активирован', expired: 'Истёк', revoked: 'Отменён' };
 const STATUS_CLS: Record<Status, string> = { issued: 'mute', redeemed: 'solid', expired: 'line', revoked: 'danger' };
+const KIND_RU: Record<Kind, string> = { admin: 'Из панели', bought: 'Куплен', gift: 'За друзей' };
 const monthsRu = (m: number) => (m === 1 ? '1 месяц' : m < 5 ? `${m} месяца` : `${m} месяцев`);
 const PAGE = 50;
 
@@ -124,6 +127,7 @@ const CreatedModal: React.FC<{ c: Created; onClose: () => void; onToast: Toast }
 export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => void }> = ({ onToast, onOpenUser }) => {
   const [data, setData] = useState<Data | null>(null);
   const [status, setStatus] = useState<'' | Status>('');
+  const [source, setSource] = useState<'' | Kind>('');
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
@@ -133,9 +137,9 @@ export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => v
 
   const load = useCallback(() => {
     setLoading(true);
-    const p = new URLSearchParams({ status, q: query, limit: String(PAGE), offset: String(page * PAGE) });
+    const p = new URLSearchParams({ status, source, q: query, limit: String(PAGE), offset: String(page * PAGE) });
     apiFetch(`/panel/gifts?${p}`).then(setData).catch((e) => onToast('Ошибка', parseApiErr(e, 'Не удалось загрузить подарки'), 'error')).finally(() => setLoading(false));
-  }, [status, query, page, onToast]);
+  }, [status, source, query, page, onToast]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { const t = setTimeout(() => { setPage(0); setQuery(q.trim()); }, 350); return () => clearTimeout(t); }, [q]);
 
@@ -148,11 +152,12 @@ export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => v
 
   if (!data) return <div style={{ padding: 40, display: 'flex', justifyContent: 'center' }}><Spinner /></div>;
   const pages = Math.max(1, Math.ceil(data.total / PAGE));
-  const issuedHere = data.items.filter((i) => i.status === 'issued');
+  // скачать / отменить пачкой можно только коды из панели: купленные отменяются возвратом платежа
+  const issuedHere = data.items.filter((i) => i.status === 'issued' && (i.kind || 'admin') === 'admin');
 
   return (
     <div className="flex flex-col gap-5">
-      <PageHead title="Подарки" sub="Подарочные подписки: одноразовые коды и ссылки, которые можно раздать кому угодно">
+      <PageHead title="Подарки" sub="Подарочные подписки: коды из панели, купленные пользователями и полученные за друзей">
         <button className="btn solid" onClick={() => setCreating(true)}><Plus size={15} /> Создать</button>
       </PageHead>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -161,6 +166,10 @@ export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => v
         <Stat title="Истекли" value={fmtInt(data.stats.expired)} icon={Timer} />
         <Stat title="Отменены" value={fmtInt(data.stats.revoked)} icon={Ban} />
       </div>
+      <Segmented value={source} onChange={(v) => { setPage(0); setSource(v); }} options={[
+        { value: '', label: 'Все источники' }, { value: 'bought', label: 'Купленные' }, { value: 'admin', label: 'Из панели' },
+        { value: 'gift', label: 'За друзей' },
+      ]} />
       <div className="flex flex-col md:flex-row gap-3 md:items-center justify-between">
         <Segmented value={status} onChange={(v) => { setPage(0); setStatus(v); }} options={[
           { value: '', label: 'Все' }, { value: 'issued', label: 'Свободные' }, { value: 'redeemed', label: 'Активированные' },
@@ -169,7 +178,7 @@ export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => v
         <div className="flex gap-2 items-center">
           <div style={{ position: 'relative', minWidth: 240 }}>
             <Search size={15} className="faint" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} />
-            <input className="input" style={{ paddingLeft: 32 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Код, заметка, ID или @username" />
+            <input className="input" style={{ paddingLeft: 32 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Код, ID, @username или платёж" />
           </div>
           {loading && <Spinner size={16} />}
         </div>
@@ -177,18 +186,23 @@ export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => v
       {data.items.length === 0 ? (
         <div className="card flex flex-col items-center sub" style={{ padding: 40, gap: 10, textAlign: 'center' }}>
           <Gift size={30} className="faint" />
-          <div>{query || status ? 'Ничего не найдено' : 'Подарков пока нет'}</div>
-          {!query && !status && <div style={{ fontSize: 13, maxWidth: 440 }}>Создайте код на 1–12 месяцев и отправьте ссылку человеку — подписка начислится при активации.</div>}
+          <div>{query || status || source ? 'Ничего не найдено' : 'Подарков пока нет'}</div>
+          {!query && !status && !source && <div style={{ fontSize: 13, maxWidth: 440 }}>Создайте код на 1–12 месяцев и отправьте ссылку человеку — подписка начислится при активации.</div>}
         </div>
       ) : (
         <div className="tbl-wrap"><div style={{ overflowX: 'auto' }}>
           <table className="tbl">
-            <thead><tr><th>Код</th><th>Подписка</th><th>Статус</th><th>Кто активировал</th><th>Создан</th><th>Заметка</th><th></th></tr></thead>
+            <thead><tr><th>Код</th><th>Подписка</th><th>Источник</th><th>Статус</th><th>Кто активировал</th><th>Создан</th><th>Заметка</th><th></th></tr></thead>
             <tbody>
               {data.items.map((it) => (
                 <tr key={it.id} style={{ opacity: it.status === 'revoked' || it.status === 'expired' ? 0.55 : 1 }}>
                   <td className="mono" style={{ whiteSpace: 'nowrap' }}>{it.code}</td>
                   <td style={{ whiteSpace: 'nowrap' }}>{monthsRu(it.months)}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{KIND_RU[it.kind || 'admin']}
+                    {it.owner_id ? (
+                      <button className="btn ghost sm" style={{ padding: 0, display: 'block', fontSize: 11, color: 'var(--text-faint, inherit)' }} onClick={() => onOpenUser(it.owner_id as number)}>
+                        {it.kind === 'bought' ? 'купил ' : 'от '}{it.owner_username ? `@${it.owner_username}` : `#${it.owner_id}`}
+                      </button>) : null}</td>
                   <td><span className={`badge ${STATUS_CLS[it.status]}`}>{STATUS_RU[it.status]}</span>
                     {it.status === 'issued' && it.expires_at && <div className="faint" style={{ fontSize: 11, marginTop: 2 }}>до {fmtDateTime(it.expires_at).slice(0, 10)}</div>}</td>
                   <td>{it.redeemed_by ? (
@@ -203,7 +217,7 @@ export const GiftsPage: React.FC<{ onToast: Toast; onOpenUser: (id: number) => v
                       { label: 'Скопировать код', icon: Copy, onClick: () => void copy(it.code, it.code) },
                       { label: 'Скопировать ссылку', icon: LinkIcon, onClick: () => void copy(it.link, 'Ссылка на подарок') },
                       it.batch && { label: 'Показать всю пачку', icon: Search, onClick: () => { setStatus(''); setPage(0); setQ(it.batch); } },
-                      it.status === 'issued' && { label: 'Отменить', icon: Ban, danger: true, onClick: () => void revoke([it.id], `код ${it.code}`) },
+                      it.status === 'issued' && (it.kind || 'admin') === 'admin' && { label: 'Отменить', icon: Ban, danger: true, onClick: () => void revoke([it.id], `код ${it.code}`) },
                     ]} />
                   </td>
                 </tr>

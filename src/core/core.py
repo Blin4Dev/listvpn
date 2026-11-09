@@ -6268,9 +6268,10 @@ def _gift_link(code: str) -> str:
 @app.get("/api/panel/gifts")
 def panel_gifts(status: str = Query("", max_length=16), q: str = Query("", max_length=64),
                 limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                source: str = Query("", max_length=16),
                 _: dict = Depends(require_owner)) -> dict[str, Any]:
-    """подарочные подписки из панели: коды, статусы, кто активировал."""
-    data = reflevels.list_admin_gifts(status, q, limit, offset)
+    """подарочные подписки: из панели, купленные пользователями и за друзей — коды, статусы, кто активировал."""
+    data = reflevels.list_admin_gifts(status, q, limit, offset, source)
     for it in data["items"]:
         it["link"] = _gift_link(it["code"])
     data["periods"] = list(fulfillment.SUB_PERIODS)
