@@ -263,10 +263,16 @@ def _grant_month(user: dict[str, Any], months: int = REWARD_MONTHS) -> dict[str,
         from . import fulfillment  # type: ignore
     except ImportError:
         import fulfillment  # type: ignore
+    # подарок продлевает срок, но не урезает устройства: если по тарифу их уже больше пакета — оставляем
+    devices = int(fulfillment.tariff_devices())
+    target, upgrading_trial = fulfillment.find_extend_target(int(user["id"]), "subscription", None)
+    if target and not upgrading_trial:
+        cur_base = int(target.get("devices_limit") or 0) - fulfillment.active_addon_devices(target.get("id"))
+        devices = max(devices, min(cur_base, 20))
     return fulfillment.grant_subscription(
         user=user,
         purpose="subscription",
-        plan_devices=fulfillment.tariff_devices(),
+        plan_devices=devices,
         months=int(months or 1),
         extra_devices=0,
         subscription_id=None,
