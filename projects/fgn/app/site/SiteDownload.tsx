@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from "react";
 import { ApiError, fetchAppLink, openDeepLink } from "../utils/api";
 import { copyText } from "../components/SubLinkBox";
-import { APP_META, DEVICE_TITLE, detectDeviceKind, installUrl, type AppKind, type DeviceKind } from "../utils/apps";
+import { APP_META, DEVICE_TITLE, KOALA_GUIDE, appSub, appsFor, detectDeviceKind, installOptions, installUrl, isRecommended, type AppKind, type DeviceKind } from "../utils/apps";
 import { C } from "../components/fgn";
 
 type Desktop = { windows_url?: string; macos_url?: string; version?: string };
@@ -62,11 +62,11 @@ export const DOWNLOAD_CSS = `
 .fs-app { width: 100%; min-height: 68px; padding: 0 16px; display: flex; align-items: center; gap: 12px; text-align: left; border-radius: 16px;
   border: 1px solid #2A2A30; background: #070708; color: #F4F4F5; font-family: ${C.font}; cursor: pointer; transition: border-color .15s; }
 .fs-app:hover { border-color: rgba(255,255,255,.2); }
-.fs-app > span { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.fs-app > span:not(.fs-appic):not(:last-child) { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .fs-app b { font-size: 16px; font-weight: 500; line-height: 20px; }
 .fs-app small { font-size: 13px; line-height: 18px; color: #9B9BA4; }
 .fs-app small.g { color: ${C.green}; }
-.fs-appic { width: 40px; height: 40px; border-radius: 10px; overflow: hidden; flex-shrink: 0; background: #1E1E22; color: #F4F4F5;
+.fs-appic { width: 40px; height: 40px; border-radius: 10px; overflow: hidden; flex: none; background: #1E1E22; color: #F4F4F5;
   display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; letter-spacing: .06em; }
 .fs-appic img { width: 100%; height: 100%; object-fit: cover; }
 .fs-sheet .fs-dlp-btn { margin-top: 18px; height: 52px; border-radius: 16px; font-size: 16px; }
@@ -146,7 +146,7 @@ export function DeviceIcon({ d }: { d: DeviceKind }) {
 
 export const IcBack = () => <Svg size={18} stroke={2}><path d="M15 5l-7 7 7 7" /></Svg>;
 export const IcClose = () => <Svg size={18} stroke={2}><path d="M6 6l12 12M18 6L6 18" /></Svg>;
-export const IcChevron = () => <span style={{ color: "#6E6E78", display: "flex" }}><Svg size={17} stroke={2.2}><path d="M9 5l7 7-7 7" /></Svg></span>;
+export const IcChevron = () => <span style={{ color: "#6E6E78", display: "flex", flex: "none" }}><Svg size={17} stroke={2.2}><path d="M9 5l7 7-7 7" /></Svg></span>;
 export const IcDownload = () => <Svg size={18} stroke={2}><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" /></Svg>;
 export const IcCopy = () => <Svg size={18} stroke={2}><rect x="8.5" y="8.5" width="11" height="11" rx="2.2" /><path d="M15.5 8.5V6.2a1.7 1.7 0 0 0-1.7-1.7H6.2a1.7 1.7 0 0 0-1.7 1.7v7.6c0 .94.76 1.7 1.7 1.7h2.3" /></Svg>;
 const IcLink = () => <Svg size={20} stroke={1.8}><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1" /></Svg>;
@@ -234,7 +234,8 @@ export function SetupDialog({
   // на этом же устройстве — открываем приложение ссылкой, на другом — удобнее скопировать ссылку
   const here = detectDeviceKind() === device;
 
-  const apps: App[] = [...(fgnUrl ? (["fgn"] as App[]) : []), "incy", "happ", "other"];
+  // как в мини-приложении: на компьютере Koala Clash первой и рекомендуемой (своё приложение FGN — ещё выше)
+  const apps: App[] = [...(fgnUrl ? (["fgn"] as App[]) : []), ...appsFor(device)];
 
   const needLink = authed === true && (step === "link" || (step === "install" && isTv));
   useEffect(() => {
@@ -345,7 +346,7 @@ export function SetupDialog({
                   <span>
                     <b>{a === "fgn" ? `FGN для ${DEVICE_TITLE[device]}` : APP_META[a].title}</b>
                     {a === "fgn" ? <small className="g">Наше приложение</small>
-                      : <small className={APP_META[a].recommended && !fgnUrl ? "g" : undefined}>{APP_META[a].sub}</small>}
+                      : <small className={isRecommended(a, device) && !fgnUrl ? "g" : undefined}>{appSub(a, device)}</small>}
                   </span>
                   <IcChevron />
                 </button>
@@ -385,8 +386,19 @@ export function SetupDialog({
 
         {step === "install" && !isTv && app && app !== "fgn" && (
           <>
-            <div className="fs-sheet-hint">Скачайте и установите {APP_META[app].title} на {DEVICE_TITLE[device]}.</div>
-            <button type="button" className="fs-dlp-btn white" onClick={download}><IcDownload /> Скачать {APP_META[app].title}</button>
+            {app === "koala" && KOALA_GUIDE[device] ? (
+              <div className="fs-steps">
+                {KOALA_GUIDE[device]!.map((t, i) => <div key={i}><i>{i + 1}</i><span>{t}</span></div>)}
+              </div>
+            ) : (
+              <div className="fs-sheet-hint">Скачайте и установите {APP_META[app].title} на {DEVICE_TITLE[device]}.</div>
+            )}
+            {installOptions(app, device).map((o, i) => (
+              <button key={o.url} type="button" className={`fs-dlp-btn${i === 0 ? " white" : ""}`}
+                onClick={() => window.open(o.url, "_blank", "noopener,noreferrer")}>
+                <IcDownload /> {o.label}
+              </button>
+            ))}
             <button type="button" className="fs-dlp-btn" onClick={() => { setErr(""); setStep("add"); }}>Уже установлено — далее</button>
             {device === "ios" ? (
               <button type="button" className="fs-region-btn" onClick={() => setStep("region")}>
@@ -402,7 +414,9 @@ export function SetupDialog({
           authed ? (
             <>
               <div className="fs-sheet-hint">
-                {here
+                {app === "koala" && here
+                  ? "Нажмите кнопку — Koala Clash предложит добавить профиль, нажмите «Да». Не открылось — скопируйте ссылку и вставьте её в Koala Clash: Профили → «+»."
+                  : here
                   ? `Нажмите кнопку — подписка сама добавится в ${APP_META[app].title}. После этого откройте приложение и подключитесь.`
                   : `Откройте эту страницу на устройстве ${DEVICE_TITLE[device]} и нажмите «Добавить подписку» — или скопируйте ссылку и добавьте её в ${APP_META[app].title} вручную.`}
               </div>
@@ -438,7 +452,9 @@ export function SetupDialog({
 
         {step === "done" && app && app !== "fgn" && (
           <>
-            <div className="fs-sheet-hint">Откройте {APP_META[app].title} и нажмите «Подключиться».</div>
+            <div className="fs-sheet-hint">{app === "koala"
+              ? "В Koala Clash подтвердите добавление профиля, выберите его и включите подключение."
+              : `Откройте ${APP_META[app].title} и нажмите «Подключиться».`}</div>
             <button type="button" className="fs-dlp-btn white" onClick={onClose}>Готово</button>
             <button type="button" className="fs-dlp-btn" onClick={() => void add()}>Не добавилась? Ещё раз</button>
           </>
