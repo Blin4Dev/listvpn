@@ -851,12 +851,19 @@ function uploadSupportFileChunked(file: File, onProgress: (p: number) => void): 
   let cur: XMLHttpRequest | null = null;
   let aborted = false;
   let uploadId = "";
+  let single: { abort: () => void } | null = null;
   const track = (x: XMLHttpRequest | null) => { cur = x; };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const promise = (async () => {
     const name = encodeURIComponent(file.name || "file");
     const st = await supportXhr(`/api/app/support/upload/start?name=${name}&size=${file.size}`, supportForm(), null, track)
       .catch(() => { throw new Error("Нет соединения"); });
+    if (st.status === 404 || st.status === 405) {
+      // сервер ещё без загрузки частями (обновили только мини-приложение) — отправляем целиком, как раньше
+      const one = uploadSupportFileSingle(file, onProgress);
+      single = one;
+      return one.promise;
+    }
     if (st.status < 200 || st.status >= 300 || !st.body?.upload_id) throw supportErr(st, "Не удалось начать загрузку");
     uploadId = String(st.body.upload_id);
     const size = Math.max(256 * 1024, Number(st.body.chunk_size) || 2 * 1024 * 1024);
@@ -904,6 +911,7 @@ function uploadSupportFileChunked(file: File, onProgress: (p: number) => void): 
   })();
   const abort = () => {
     aborted = true;
+    try { (single as { abort: () => void } | null)?.abort(); } catch { /* ignore */ }
     try { (cur as XMLHttpRequest | null)?.abort(); } catch { /* ignore */ }
     if (uploadId) void supportXhr(`/api/app/support/upload/${encodeURIComponent(uploadId)}/abort`, supportForm(), null, () => {}).catch(() => null);
   };
@@ -913,6 +921,11 @@ function uploadSupportFileChunked(file: File, onProgress: (p: number) => void): 
 // загрузка вложения с прогрессом 0..1
 export function uploadSupportFile(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
   if (file.size > CHUNKED_FROM) return uploadSupportFileChunked(file, onProgress);
+  return uploadSupportFileSingle(file, onProgress);
+}
+
+// одним запросом (маленькие файлы; запасной путь для сервера без загрузки частями)
+function uploadSupportFileSingle(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
   const xhr = new XMLHttpRequest();
   const promise = new Promise<Omit<SupportFile, "url">>((resolve, reject) => {
     // FormData без Content-Type: Telegram WebView режет octet-stream + X-Telegram-Init-Data
