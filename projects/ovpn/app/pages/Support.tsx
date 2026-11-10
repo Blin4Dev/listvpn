@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MSIcon, T as OLD_T } from "../components/ui";
 import { N, NoirBack, NoirScreen, useTgBack } from "../components/noir";
+import { O } from "../components/ovpn";
 import RichText from "../components/RichText";
 import { btnReset } from "../theme";
 import { useSmartBack } from "../utils/navigation";
@@ -143,13 +144,13 @@ function Bubble({ m, onImage, onMedia, onReply, onQuote, flash, onNoThanks, clos
     <div data-mid={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "88%", display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start" }}>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 6, flexDirection: mine ? "row-reverse" : "row", maxWidth: "100%" }}>
         <div style={{
-          background: mine ? T.orange : T.surface,
-          border: mine ? "none" : `1px solid ${T.border}`,
+          background: mine ? O.red : O.card,
+          border: mine ? "none" : `1px solid ${O.border}`,
           backdropFilter: mine ? undefined : "blur(10px)",
           WebkitBackdropFilter: mine ? undefined : "blur(10px)",
-          color: mine ? "#fff" : T.text,
-          borderRadius: 18, borderBottomRightRadius: mine ? 6 : 18, borderBottomLeftRadius: mine ? 18 : 6,
-          padding: m.files.length && !m.text && !m.reply_to ? 4 : "9px 13px",
+          color: mine ? O.onRed : O.text, fontSize: 16, lineHeight: "23px",
+          borderRadius: 16, borderBottomRightRadius: mine ? 4 : 16, borderBottomLeftRadius: mine ? 16 : 4,
+          padding: m.files.length && !m.text && !m.reply_to ? 4 : "12px 16px",
           display: "flex", flexDirection: "column", gap: 6, minWidth: 0, maxWidth: "100%",
           boxShadow: flash ? `0 0 0 3px ${T.info}` : "none", transition: "box-shadow 0.3s",
         }}>
@@ -411,23 +412,18 @@ export default function Support() {
         </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, fontFamily: N.font }}>
-      <div style={{ paddingTop: 20, marginBottom: 18, flex: "none" }}>
+      <div style={{ flex: "none", paddingBottom: 16 }}>
         <NoirBack onClick={goBack} />
-        <div style={{ marginTop: 22, fontSize: 30, fontWeight: 800, lineHeight: "30px", paddingTop: 12, color: N.text }}>Поддержка</div>
+        <div style={{ fontSize: 30, fontWeight: 800, lineHeight: "30px", paddingTop: 12, color: O.text }}>Поддержка</div>
+        <div style={{ paddingTop: 8, fontSize: 14, lineHeight: "20px", color: O.muted }}>Опишите проблему, ответим здесь.</div>
       </div>
 
       <div ref={listRef} onScroll={onScroll} className="blin-scroll"
-        style={{ flex: 1, minHeight: 0, height: "auto", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, margin: "0 -20px", padding: "0 20px 12px" }}>
+        style={{ flex: 1, minHeight: 0, height: "auto", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, margin: "0 -16px", padding: "0 16px 12px" }}>
         {!state && !error && <div style={{ margin: "auto", color: T.textMuted, fontSize: 14 }}>Загрузка…</div>}
         {state && msgs.length === 0 && (
-          <div style={{ margin: "auto", textAlign: "center", padding: "0 24px", animation: "blinvpnRise 0.5s var(--ease-out) both" }}>
-            <div style={{ width: 64, height: 64, borderRadius: 20, background: "rgba(224, 0, 0, 0.14)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 26px" }}>
-              <MSIcon name="headphones" style={{ fontSize: 32, color: N.redText, fontVariationSettings: "'wght' 300" }} />
-            </div>
-            <div style={{ fontSize: 19, fontWeight: 600, color: N.text, marginBottom: 12 }}>Напишите нам</div>
-            <div style={{ fontSize: 14, lineHeight: 1.45, color: N.muted }}>
-              Опишите проблему, ответим здесь.
-            </div>
+          <div style={{ alignSelf: "flex-start", maxWidth: "85%", padding: "12px 16px", borderRadius: 16, borderBottomLeftRadius: 4, background: O.card, border: `1px solid ${O.border}`, fontSize: 16, lineHeight: "23px", color: O.text, animation: "blinvpnRise 0.5s var(--ease-out) both" }}>
+            Напишите нам. Опишите проблему — ответим здесь.
           </div>
         )}
         {msgs.map((m, i) => {
@@ -501,7 +497,7 @@ export default function Support() {
       <div style={{ display: "flex", alignItems: "flex-end", gap: 8, paddingTop: 8, flex: "none" }}>
         <input ref={fileRef} type="file" multiple tabIndex={-1} aria-hidden style={hiddenFileInput} onChange={(e) => addFiles(e.target.files)} />
         <button type="button" onClick={() => fileRef.current?.click()} aria-label="Прикрепить файл" className="blin-press"
-          style={{ ...btnReset, flex: "none", width: 48, height: 48, borderRadius: 18, border: `1px solid ${T.border}`, background: T.surface, color: N.text, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
+          style={{ ...btnReset, flex: "none", width: 48, height: 48, borderRadius: 16, border: `1px solid ${O.border}`, background: O.bg, color: O.text, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
           <MSIcon name="attach_file" style={{ fontSize: 24, transform: "rotate(45deg)", fontVariationSettings: "'wght' 300" }} />
         </button>
         <textarea ref={taRef} value={text} onChange={onText} rows={1} placeholder="Сообщение..."
@@ -510,12 +506,12 @@ export default function Support() {
             if (e.key === "Enter" && !e.shiftKey && window.matchMedia("(pointer: fine)").matches) { e.preventDefault(); void send(); }
           }}
           style={{
-            ...btnReset, flex: 1, minWidth: 0, resize: "none", minHeight: 48, maxHeight: 140, padding: "13px 16px", borderRadius: 24,
-            border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 16, lineHeight: "20px", fontFamily: N.font,
+            ...btnReset, flex: 1, minWidth: 0, resize: "none", minHeight: 48, maxHeight: 140, padding: "13px 16px", borderRadius: 16,
+            border: `1px solid ${O.border}`, background: O.bg, color: O.text, fontSize: 16, lineHeight: "20px", fontFamily: N.font,
             backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)",
           }} />
         <button type="button" onClick={() => void send()} disabled={!canSend} aria-label="Отправить" className="blin-press"
-          style={{ ...btnReset, flex: "none", width: 48, height: 48, borderRadius: "50%", border: canSend ? "none" : `1px solid ${T.border}`, background: canSend ? N.red : "rgba(16,16,22,0.7)", color: canSend ? "#fff" : T.textDim, display: "flex", alignItems: "center", justifyContent: "center", cursor: canSend ? "pointer" : "default", transition: "background 0.2s ease", boxShadow: canSend ? "0 8px 24px -8px rgba(224,0,0,0.7)" : "none" }}>
+          style={{ ...btnReset, flex: "none", width: 48, height: 48, borderRadius: 16, border: "none", background: canSend ? O.red : O.off, color: canSend ? O.onRed : O.muted, display: "flex", alignItems: "center", justifyContent: "center", cursor: canSend ? "pointer" : "default", transition: "background 0.2s ease", boxShadow: "none" }}>
           <MSIcon name={sending || uploading ? "hourglass_top" : "arrow_upward"} style={{ fontSize: 23, fontVariationSettings: "'wght' 300" }} />
         </button>
       </div>
