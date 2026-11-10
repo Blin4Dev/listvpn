@@ -206,7 +206,6 @@ export default function SetupSheet({ onClose }: { onClose: () => void }) {
 
   // O-VPN: на всех шагах заголовок «Добавить подписку», как в макете
   const title = step === "device" || step === "pick" || step === "install" || step === "add" ? "Добавить подписку"
-    : step === "pick" ? "Приложение"
     : step === "link" ? "Ссылка на подписку"
     : step === "region" ? "Регион App Store"
     : step === "done" ? "" : step === "install" && device === "android_tv" ? "Happ" : APP_META[app || "incy"].title;
