@@ -2,6 +2,7 @@
   "id": "ovpn",
   "name": "O-VPN",
   "order": 4,
+  "rw_username_prefix": "ovpn_",
   "channel": {
     "id": "",
     "url": ""
@@ -12,6 +13,28 @@
     "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
     "open_app_text": "🚀 Открыть O-VPN"
   },
-  "theme_color": "#05050A",
-  "features": {}
+  "theme_color": "#100C0B",
+  "stage_width": 390,
+  "boot": {
+    "background": "#100C0B",
+    "poster": "intro-poster.jpg",
+    "page_background": "#100C0B"
+  },
+  "features": {
+    "promo_days": true,
+    "promo_at_payment": true,
+    "single_renew": true,
+    "notify_not_connected": true,
+    "winback_gift": true,
+    "intro_static": true
+  },
+  "features_doc": {
+    "promo_days": "промокод «+N дней к подписке» с кнопкой «Забрать»",
+    "promo_at_payment": "поле промокода на экране оплаты",
+    "single_renew": "в панели продление одной кнопкой",
+    "notify_not_connected": "напоминание, если оплатил, но не подключил подписку",
+    "winback_gift": "давно не оплачивал — дарим дни (кнопка «Забрать»)",
+    "intro_static": "заставка — картинка intro-poster.jpg (видео нет)",
+    "family": "семьи нет: экран /family у O-VPN не переопределён"
+  }
 }

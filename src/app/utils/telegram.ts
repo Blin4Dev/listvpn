@@ -1,4 +1,5 @@
 // viewport telegram webapp: fullscreen на телефоне, expand на десктопе
+import { STAGE_WIDTH } from "./brand";
 
 type TgInset = { top?: number; bottom?: number; left?: number; right?: number };
 
@@ -140,8 +141,8 @@ export function tgUser(): TgUser | null {
   }
 }
 
-// --blin-scale = min(1, width/402); см. global.css
-const DESIGN_WIDTH = 402;
+// --blin-scale = min(1, width/ширина макета); см. global.css
+const DESIGN_WIDTH = STAGE_WIDTH;
 
 export function applyStageScale(): void {
   try {

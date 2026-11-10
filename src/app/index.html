@@ -42,8 +42,8 @@
     </style>
     <script>
       (function () {
-        var w = window.innerWidth || 402;
-        document.documentElement.style.setProperty("--blin-scale", String(Math.min(1, w / 402)));
+        var w = window.innerWidth || %LISTVPN_STAGE_W%;
+        document.documentElement.style.setProperty("--blin-scale", String(Math.min(1, w / %LISTVPN_STAGE_W%)));
       })();
     </script>
   </head>

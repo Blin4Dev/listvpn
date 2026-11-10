@@ -30,6 +30,8 @@ const BRAND = {
   features: Object.fromEntries(Object.entries(CFG.features || {}).map(([k, v]) => [k, !!v])),
   // свои названия реферальных уровней (у BatmanVPN — FRESHMAN…); сервер присылает те же, это запасные
   refLevelNames: Object.fromEntries(Object.entries(CFG.ref_level_names || {}).map(([k, v]) => [k, String(v)])),
+  // ширина макета, под которую масштабируется приложение (у BatmanVPN — 402, у O-VPN — 390)
+  stageWidth: Math.max(320, Math.min(480, Number(CFG.stage_width) || 402)),
 };
 
 // экран загрузки до первой отрисовки React (index.html) — в стиле проекта, иначе на секунду мелькает чужой бренд.
@@ -127,6 +129,7 @@ function projectAssets(): Plugin {
       const poster = BOOT_POSTER ? `/assets/${BOOT_POSTER}` : "";
       return html
         .replace(/%LISTVPN_BRAND%/g, BRAND.name)
+        .replace(/%LISTVPN_STAGE_W%/g, String(BRAND.stageWidth))
         .replace(/%LISTVPN_PAGE_BG%/g, PAGE_BG)
         .replace(/%LISTVPN_BOOT_BG%/g, poster ? `${BOOT_BG} url(${poster}) center / cover no-repeat` : BOOT_BG)
         .replace(/%LISTVPN_BOOT_PRELOAD%/g, poster ? `    <link rel="preload" href="${poster}" as="image" />\n` : "");
