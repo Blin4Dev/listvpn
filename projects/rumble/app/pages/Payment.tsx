@@ -135,7 +135,7 @@ function Radio({ on }: { on: boolean }) {
         width: 24,
         height: 24,
         borderRadius: "50%",
-        border: `2px solid ${on ? O.red : "rgba(255,255,255,0.3)"}`,
+        border: `1px solid ${on ? O.red : "rgba(255,255,255,0.3)"}`,
         boxSizing: "border-box",
         display: "flex",
         alignItems: "center",
