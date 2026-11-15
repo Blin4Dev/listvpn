@@ -13,7 +13,7 @@
 Картинки и видео — `projects/hustler/assets/` (поверх общих `assets/`).
 Название, канал, тексты бота, фичи — `projects/hustler/project.json`.
 
-Сейчас Hustler — точная копия BatmanVPN (те же ассеты и фичи, без переопределений). Дизайн — позже.
+Дизайн — по макету Figma (FGN без семьи): компоненты в `components/hustler.tsx`, иконки — `components/hustlerIcons.ts`.
 
 Локально: `$env:PROJECT="hustler"; npx vite --config src/app/vite.config.ts` (PowerShell),
 сборка — `node scripts/build-miniapps.mjs hustler`.
