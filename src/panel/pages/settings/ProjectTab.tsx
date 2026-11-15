@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Bot, Check, CreditCard, Megaphone, Save, Link as LinkIcon } from 'lucide-react';
-import { Spinner } from '../../components/ui';
+import { Spinner, Toggle } from '../../components/ui';
 import { apiFetch, copyToClipboard, parseApiErr } from '../../lib/api';
 import { useProject } from '../../lib/project';
 import type { ToastType } from '../../lib/types';
@@ -13,7 +13,7 @@ type Cfg = {
   bot: { token_set: boolean; token_hint: string; id: string; username: string; source: string };
   channel: { id: string; url: string; source: string };
   yookassa: { shop_id: string; secret_set: boolean; source: string; webhook_url: string };
-  support_url: string; miniapp_link: string; vpn_sub_domain: string;
+  support_url: string; miniapp_link: string; vpn_sub_domain: string; vpn_sub_domain_on: boolean; vpn_sub_origin: string;
   miniapp_url: string;
   features: Record<string, boolean>;
   growth: { notconn_hours: number; winback_after_days: number; winback_gift_days: number };
@@ -35,6 +35,7 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
   const [support, setSupport] = useState('');
   const [mlink, setMlink] = useState('');
   const [vpnDom, setVpnDom] = useState('');
+  const [vpnOn, setVpnOn] = useState(false);
   const [busy, setBusy] = useState('');
   const [growth, setGrowth] = useState({ notconn_hours: '3', winback_after_days: '14', winback_gift_days: '3' });
   const [familyMax, setFamilyMax] = useState('5');
@@ -47,13 +48,13 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
       winback_gift_days: String(d.growth.winback_gift_days) });
     if (d.family_max_members) setFamilyMax(String(d.family_max_members));
     if (d.desktop) setDesk({ windows_url: d.desktop.windows_url || '', macos_url: d.desktop.macos_url || '', version: d.desktop.version || '' });
-    setSupport(d.support_url || ''); setMlink(d.miniapp_link || ''); setVpnDom(d.vpn_sub_domain || '');
+    setSupport(d.support_url || ''); setMlink(d.miniapp_link || ''); setVpnDom(d.vpn_sub_domain || ''); setVpnOn(!!d.vpn_sub_domain_on);
   };
   useEffect(() => {
     apiFetch('/panel/project/config').then(fill).catch((e) => onToast('Ошибка', parseApiErr(e, 'Не удалось загрузить настройки проекта'), 'error'));
   }, []);
 
-  const save = async (what: string, body: Record<string, string | number>, ok: string) => {
+  const save = async (what: string, body: Record<string, string | number | boolean>, ok: string) => {
     setBusy(what);
     try {
       fill(await apiFetch('/panel/project/config', { method: 'PUT', body: JSON.stringify(body) }));
@@ -127,16 +128,40 @@ export const ProjectSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: 
           {btn('yk', () => save('yk', { yookassa_shop_id: shop, ...(secret ? { yookassa_secret_key: secret } : {}) }, 'ЮKassa сохранена'))}
         </Section>
 
-        <Section title="Ссылки и домены" sub="Необязательно. Домен подписки — свой домен в ссылках подписки этого проекта (путь из Remnawave сохраняется).">
+        <Section title="Ссылки" sub="Необязательно.">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div><label className="field-label">Поддержка (если нет мини-приложения)</label>
               <input className="input mono" value={support} onChange={(e) => setSupport(e.target.value.trim())} placeholder="https://t.me/…" /></div>
             <div><label className="field-label">Ссылка Mini App (t.me/бот/app)</label>
               <input className="input mono" value={mlink} onChange={(e) => setMlink(e.target.value.trim())} placeholder="https://t.me/bot/app" /></div>
-            <div><label className="field-label">Домен подписки VPN</label>
-              <input className="input mono" value={vpnDom} onChange={(e) => setVpnDom(e.target.value.trim())} placeholder="sub.example.com" /></div>
           </div>
-          {btn('links', () => save('links', { support_url: support, miniapp_link: mlink, vpn_sub_domain: vpnDom }, 'Сохранено'))}
+          {btn('links', () => save('links', { support_url: support, miniapp_link: mlink }, 'Сохранено'))}
+        </Section>
+
+        <Section title="Домен подписки" sub="Ссылку подписки выдаёт Remnawave. С подменой пользователи этого проекта получают её на вашем домене — путь остаётся тем же. Домен должен вести на страницу подписки Remnawave.">
+          {(() => {
+            const dom = vpnDom.replace(/^[a-z]+:\/\//i, '').split('/')[0].toLowerCase();
+            const origin = cfg.vpn_sub_origin || 'sub.vpn.ru';
+            const shown = vpnOn && dom ? dom : origin;
+            return (<>
+              <div className="inset flex items-center justify-between gap-3" style={{ padding: 14 }}>
+                <div>
+                  <div style={{ fontWeight: 500 }}>Подмена домена</div>
+                  <div className="sub mt-0.5">{vpnOn ? 'Включена — ссылки выдаются на вашем домене' : 'Выключена — ссылки как в Remnawave'}</div>
+                </div>
+                <Toggle on={vpnOn} onChange={() => setVpnOn(!vpnOn)} />
+              </div>
+              <div style={{ maxWidth: 420 }}>
+                <label className="field-label">Домен</label>
+                <input className="input mono" value={vpnDom} onChange={(e) => setVpnDom(e.target.value.trim())} placeholder="sub.vpn.cc" />
+              </div>
+              <div className="faint mono" style={{ fontSize: 12.5 }}>
+                https://{origin}/abcd → https://{shown}/abcd
+              </div>
+              {btn('subdom', () => save('subdom', { vpn_sub_domain: vpnDom, vpn_sub_domain_on: vpnOn }, vpnOn ? 'Подмена включена — новые ссылки уже на вашем домене' : 'Сохранено'),
+                'Сохранить', vpnOn && !dom)}
+            </>);
+          })()}
         </Section>
 
         {(cfg.features?.notify_not_connected || cfg.features?.winback_gift) && (

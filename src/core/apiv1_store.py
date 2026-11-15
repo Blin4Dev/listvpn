@@ -232,7 +232,14 @@ def subscription_url(sub: dict[str, Any]) -> Optional[str]:
             url = f"{base.rstrip('/')}/api/sub/{sub['short_uuid']}"
     if url and subdomain is not None:
         try:
-            url = subdomain.vpn(url)
+            pid = None
+            try:
+                from . import projects as _pr  # type: ignore
+            except ImportError:  # pragma: no cover
+                import projects as _pr  # type: ignore
+            if sub.get("user_id"):
+                pid = _pr.of_user(sub.get("user_id"))
+            url = subdomain.vpn(url, project=pid)
         except Exception:  # noqa: BLE001
             pass
     return url or None
@@ -349,7 +356,10 @@ def sync_user_to_panel(user_id: int) -> dict[str, Any]:
     if not prov.get("ok"):
         return {"ok": False, "error": prov.get("error") or "remnawave_failed"}
     fulfillment._apply_provision_to_sub(sub, prov)
-    return {"ok": True, "subscription_url": prov.get("subscription_url")}
+    url = prov.get("subscription_url")
+    if url and subdomain is not None:
+        url = subdomain.vpn(url, project=user.get("project_id") or None)
+    return {"ok": True, "subscription_url": url}
 
 
 def _finish(job: dict[str, Any], status: str, error: Optional[str] = None) -> None:

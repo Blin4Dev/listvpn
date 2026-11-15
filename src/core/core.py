@@ -1136,7 +1136,7 @@ def serialize_key(sub: dict[str, Any], user: Optional[dict[str, Any]] = None) ->
         "id": sub["id"],
         "key_uuid": sub.get("key_uuid"),
         "short_uuid": sub.get("short_uuid"),
-        "key_config": subdomain.vpn(sub.get("key_config")),
+        "key_config": subdomain.vpn(sub.get("key_config"), project=projects.of(user) if user else projects.of_user(sub.get("user_id"))),
         "user_id": sub["user_id"],
         "username": username,
         "status": sub.get("status", "Active"),
@@ -3284,6 +3284,8 @@ class ProjectConfigBody(BaseModel):
     support_url: Optional[str] = Field(None, max_length=300)
     miniapp_link: Optional[str] = Field(None, max_length=300)
     vpn_sub_domain: Optional[str] = Field(None, max_length=200)
+    # подмена домена подписки: True — ссылки выдаются с vpn_sub_domain, False — как у Remnawave
+    vpn_sub_domain_on: Optional[bool] = None
     # фишки проекта (features в project.json)
     notconn_hours: Optional[int] = Field(None, ge=1, le=168)
     winback_after_days: Optional[int] = Field(None, ge=1, le=365)
@@ -3350,6 +3352,9 @@ def _project_config_view(pid: str) -> dict[str, Any]:
         "support_url": p.env("SUPPORT_URL"),
         "miniapp_link": p.env("TELEGRAM_MINIAPP_LINK"),
         "vpn_sub_domain": p.env("VPN_SUB_DOMAIN"),
+        "vpn_sub_domain_on": subdomain.config(pid)[0],
+        # домен ссылок Remnawave (без подмены) — для примера в панели
+        "vpn_sub_origin": subdomain.origin_host(),
         # домен мини-приложения — инфраструктура (Caddy + сертификат): install.sh
         "miniapp_url": p.miniapp_url,
         "features": {k: bool(v) for k, v in (p.cfg.get("features") or {}).items()},
@@ -3419,13 +3424,17 @@ def panel_project_config_put(body: ProjectConfigBody, _: dict = Depends(require_
             if v and not v.startswith("https://"):
                 raise HTTPException(400, detail={"message": "Ссылка должна начинаться с https://"})
             upd[name] = v
-    for field, name in (("vpn_sub_domain", "VPN_SUB_DOMAIN"),):
-        v = getattr(body, field)
-        if v is not None:
-            v = re.sub(r"^[a-z]+://", "", v.strip(), flags=re.I).split("/", 1)[0]
-            if v and not re.fullmatch(r"[A-Za-z0-9.-]+(:[0-9]{1,5})?", v):
-                raise HTTPException(400, detail={"message": "Домен подписки — только домен, без https:// и пути"})
-            upd[name] = v
+    if body.vpn_sub_domain is not None:
+        raw_dom = body.vpn_sub_domain.strip()
+        v = subdomain.normalize_domain(raw_dom)
+        if raw_dom and (not v or "." not in v):
+            raise HTTPException(400, detail={"message": "Домен подписки — только домен, например sub.vpn.cc"})
+        upd["VPN_SUB_DOMAIN"] = v
+    if body.vpn_sub_domain_on is not None:
+        dom = upd.get("VPN_SUB_DOMAIN", subdomain.normalize_domain(projects.env("VPN_SUB_DOMAIN", project=pid)))
+        if body.vpn_sub_domain_on and not dom:
+            raise HTTPException(400, detail={"message": "Укажите домен, на который менять ссылку подписки"})
+        upd["VPN_SUB_DOMAIN_ON"] = "1" if body.vpn_sub_domain_on else "0"
     if upd:
         projects.set_panel_config(pid, upd)
     for k in GROWTH_DEFAULTS:
@@ -4466,7 +4475,7 @@ def panel_user_remnawave(user_id: int, _: dict = Depends(require_panel)) -> dict
     out["expire_at"] = rw.get("expireAt") or rw.get("expire_at")
     out["hwid_device_limit"] = rw.get("hwidDeviceLimit") or rw.get("hwid_device_limit")
     try:
-        out["subscription_url"] = client.subscription_url_for(rw)
+        out["subscription_url"] = subdomain.vpn(client.subscription_url_for(rw), project=projects.of(user))
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -4945,7 +4954,8 @@ def reset_user_subscription(user: dict[str, Any]) -> dict[str, Any]:
             "UPDATE subscriptions SET short_uuid = ?, key_config = COALESCE(?, key_config) WHERE user_id = ?",
             (str(new_short), sub_url, int(user["id"])),
         )
-    return {"old_short_uuid": old_short, "short_uuid": new_short, "subscription_url": sub_url}
+    return {"old_short_uuid": old_short, "short_uuid": new_short,
+            "subscription_url": subdomain.vpn(sub_url, project=projects.of(user))}
 
 
 def _delete_user_keep_history(user_id: int) -> None:
@@ -7932,7 +7942,11 @@ def app_activate_trial(request: Request, user: dict = Depends(require_channel_de
 
 
 def _app_sub_url(user: dict[str, Any]) -> Optional[str]:
-    """url подписки для импорта в приложение."""
+    """url подписки для импорта в приложение — с подменой домена проекта пользователя."""
+    return subdomain.vpn(_app_sub_url_raw(user), project=projects.of(user))
+
+
+def _app_sub_url_raw(user: dict[str, Any]) -> Optional[str]:
     # 1) remnawave: настоящая ссылка
     client, rw = _rw_find_user(user)
     if client and rw:
@@ -7952,8 +7966,8 @@ def _app_sub_url(user: dict[str, Any]) -> Optional[str]:
         return None
     base = _env("REMWAVE_SUB_PUBLIC_URL")
     if base and row.get("short_uuid"):
-        return subdomain.vpn(f"{base.rstrip('/')}/api/sub/{row['short_uuid']}")
-    return subdomain.vpn(row.get("key_config"))
+        return f"{base.rstrip('/')}/api/sub/{row['short_uuid']}"
+    return row.get("key_config")
 
 
 @app.get("/api/app/subscription/applink")

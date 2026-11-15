@@ -90,7 +90,7 @@ PANEL_CONFIG: dict[str, bool] = {
     "YOOKASSA_SHOP_ID": False, "YOOKASSA_SECRET_KEY": True,
     "CHANNEL_ID": False, "CHANNEL_URL": False,
     "SUPPORT_URL": False, "TELEGRAM_MINIAPP_LINK": False,
-    "VPN_SUB_DOMAIN": False,
+    "VPN_SUB_DOMAIN": False, "VPN_SUB_DOMAIN_ON": False,
     # мини-приложение проекта на своём сервере (ставится из панели, см. miniapps.py)
     "MINIAPP_DOMAIN": False, "MINIAPP_URL": False, "SITE_DOMAIN": False, "MINIAPP_SERVER": False,
     # проект включён в панели: "1" / "0"; не задано — работает, если бот подключён (старые установки)

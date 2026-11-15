@@ -892,21 +892,29 @@ class RemnawaveAPI:
         )
 
     def subscription_url_for(self, user: dict[str, Any], public_base: Optional[str] = None) -> Optional[str]:
+        """ссылка подписки как её отдаёт Remnawave — БЕЗ подмены домена.
+        Подмена (VPN_SUB_DOMAIN проекта) — при выдаче пользователю: subdomain.vpn(url, project=…)."""
         short = user.get("shortUuid") or user.get("short_uuid")
         if not short:
             return None
-        try:
-            import subdomain  # type: ignore  # домен ссылки из .env (VPN_SUB_DOMAIN)
-        except Exception:  # noqa: BLE001
-            subdomain = None  # type: ignore
-        # иногда панель уже отдаёт готовый URL
-        for key in ("subscriptionUrl", "subscription_url", "happUrl", "happ_url"):
+        url = ""
+        # обычно панель отдаёт готовый URL
+        for key in ("subscriptionUrl", "subscription_url"):
             if user.get(key):
                 url = str(user[key])
-                return subdomain.vpn(url) if subdomain else url
-        base = (public_base or self.base_url).rstrip("/")
-        url = f"{base}/api/sub/{short}"
-        return subdomain.vpn(url) if subdomain else url
+                break
+        public = bool(url or public_base)
+        if not url:
+            base = (public_base or self.base_url).rstrip("/")
+            url = f"{base}/api/sub/{short}"
+        if not public:  # адрес API панели, не публичный домен подписки — не запоминаем
+            return url
+        try:
+            import subdomain  # type: ignore
+            subdomain.remember_origin(url)
+        except Exception:  # noqa: BLE001
+            pass
+        return url
 
     def ping(self) -> bool:
         try:
