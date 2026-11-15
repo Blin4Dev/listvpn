@@ -115,7 +115,7 @@ function InlineForm({ value, onChange, placeholder, inputMode, button, disabled,
         className="blin-press"
         style={{
           ...btnReset, flex: "none", height: 44, padding: "0 16px", borderRadius: 12, border: "none", background: O.red, color: "#FFFFFF",
-          fontFamily: O.font, fontSize: 14, fontWeight: 600, lineHeight: "20px", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.6 : 1,
+          fontFamily: O.font, fontSize: 14, fontWeight: 600, lineHeight: "20px", cursor: disabled ? "default" : "pointer",
         }}
       >
         {button}
