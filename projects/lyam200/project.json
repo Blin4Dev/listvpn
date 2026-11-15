@@ -1,17 +1,39 @@
 {
   "id": "lyam200",
-  "name": "Лям200VPN",
+  "name": "ЛЯМ200 VPN",
   "order": 5,
   "channel": {
     "id": "",
     "url": ""
   },
   "bot": {
-    "command_description": "Запустить Лям200VPN",
+    "command_description": "Запустить ЛЯМ200 VPN",
     "welcome_title": "Добро пожаловать!",
     "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
-    "open_app_text": "🚀 Открыть Лям200VPN"
+    "open_app_text": "🚀 Открыть ЛЯМ200 VPN"
   },
-  "theme_color": "#05050A",
-  "features": {}
+  "theme_color": "#141C2E",
+  "stage_width": 390,
+  "boot": {
+    "background": "#141C2E",
+    "poster": "intro-poster.jpg",
+    "page_background": "#141C2E"
+  },
+  "features": {
+    "promo_days": true,
+    "promo_at_payment": true,
+    "single_renew": true,
+    "notify_not_connected": true,
+    "winback_gift": true,
+    "intro_static": true
+  },
+  "features_doc": {
+    "promo_days": "промокод «+N дней к подписке» с кнопкой «Забрать»",
+    "promo_at_payment": "поле промокода на экране оплаты",
+    "single_renew": "в панели продление одной кнопкой",
+    "notify_not_connected": "напоминание, если оплатил, но не подключил подписку",
+    "winback_gift": "давно не оплачивал — дарим дни (кнопка «Забрать»)",
+    "intro_static": "заставка — картинка intro-poster.jpg (видео нет)",
+    "family": "семьи нет: экран /family у ЛЯМ200 не переопределён"
+  }
 }
