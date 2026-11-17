@@ -1742,6 +1742,8 @@ def get_plans_meta() -> dict[str, Any]:
         "period_prices": {str(m): fulfillment.period_price(m) for m in fulfillment.SUB_PERIODS},
         "period_stars": {str(m): fulfillment.period_stars(m) for m in fulfillment.SUB_PERIODS},
         "pay_methods": pay_methods(),
+        # у проекта есть сайт: способы для сайта отдельно (null — сайта нет, один набор)
+        "pay_methods_web": pay_methods("web") if site_pay_split() else None,
     }
 
 
@@ -2519,16 +2521,46 @@ PAY_METHODS: list[tuple[str, str]] = [
 ]
 
 
-def pay_methods() -> list[dict[str, Any]]:
-    saved = db.loads(db.get_setting("pay_methods", "{}"), {}) or {}
+# сайт проекта (features.site, у FGN): свои вкл/выкл способов, отдельно от бота (мини-приложения в Telegram).
+# Звёзды Telegram на сайте не принимаем — только в Telegram.
+WEB_PAY_METHODS = ("sbp", "card")
+
+
+def site_pay_split() -> bool:
+    """у проекта есть сайт — способы оплаты для сайта настраиваются отдельно от бота."""
+    return bool(P().feature("site"))
+
+
+def _pay_list(setting: str, keys: Optional[tuple[str, ...]] = None,
+              fallback: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    saved = db.loads(db.get_setting(setting, ""), None)
+    if not isinstance(saved, dict):
+        saved = fallback or {}
     return [
         {"id": key, "title": title, "enabled": bool((saved.get(key) or {}).get("enabled", True))}
-        for key, title in PAY_METHODS
+        for key, title in PAY_METHODS if keys is None or key in keys
     ]
 
 
-def pay_method(key: str) -> Optional[dict[str, Any]]:
-    return next((m for m in pay_methods() if m["id"] == key), None)
+def pay_methods(source: Optional[str] = None) -> list[dict[str, Any]]:
+    """способы оплаты проекта. source: "miniapp" — бот (Telegram), "web" — сайт.
+    Отдельный набор для сайта — только у проектов с сайтом; пока его не сохраняли — как у бота."""
+    if source == "web" and site_pay_split():
+        bot = {m["id"]: {"enabled": m["enabled"]} for m in _pay_list("pay_methods")}
+        return _pay_list("pay_methods_web", WEB_PAY_METHODS, bot)
+    return _pay_list("pay_methods")
+
+
+def pay_method(key: str, source: Optional[str] = None) -> Optional[dict[str, Any]]:
+    return next((m for m in pay_methods(source) if m["id"] == key), None)
+
+
+def _save_pay_methods(setting: str, current: list[dict[str, Any]], changes: dict[str, Any]) -> None:
+    cur = {m["id"]: {"enabled": m["enabled"]} for m in current}
+    for key, v in (changes or {}).items():
+        if key in cur and isinstance(v, dict) and "enabled" in v:
+            cur[key]["enabled"] = bool(v["enabled"])
+    db.set_setting(setting, db.dumps(cur))
 
 
 class UpdateEmailBody(BaseModel):
@@ -2587,8 +2619,10 @@ class PlansUpdateBody(BaseModel):
     extra_device_stars: Optional[float] = None
     device_stars: Optional[dict[str, Optional[float]]] = None
     whitelist_squad_uuid: Optional[str] = None  # устарело, игнорируется
-    # {"sbp": {"enabled": true}, ...}
+    # {"sbp": {"enabled": true}, ...} — бот (мини-приложение в Telegram)
     pay_methods: Optional[dict[str, dict[str, Any]]] = None
+    # то же для сайта проекта (только у проектов с сайтом, features.site)
+    pay_methods_web: Optional[dict[str, dict[str, Any]]] = None
 
 
 @app.get("/api/health")
@@ -7020,12 +7054,11 @@ def panel_put_plans(body: PlansUpdateBody, p: dict = Depends(require_owner)) -> 
                 continue
             tiers[str(n)] = _num(v, 0, 100000)
         db.set_setting(key, json.dumps(tiers, sort_keys=True))
+    # сайт — сначала: пока его набор не сохраняли, он берётся из бота (до изменения бота)
+    if body.pay_methods_web is not None and site_pay_split():
+        _save_pay_methods("pay_methods_web", pay_methods("web"), body.pay_methods_web)
     if body.pay_methods is not None:
-        cur = {m["id"]: {"enabled": m["enabled"]} for m in pay_methods()}
-        for key, v in body.pay_methods.items():
-            if key in cur and isinstance(v, dict) and "enabled" in v:
-                cur[key]["enabled"] = bool(v["enabled"])
-        db.set_setting("pay_methods", db.dumps(cur))
+        _save_pay_methods("pay_methods", pay_methods(), body.pay_methods)
     try:  # таблица tariffs (GET /api/v1/tariffs) — те же цены, что в панели
         apiv1_store.sync_tariffs()
     except Exception as exc:  # noqa: BLE001
@@ -7059,7 +7092,7 @@ def app_config(request: Request) -> dict[str, Any]:
         "trialEnabled": trial_enabled_for(app_source(request)),
         "trialDays": fulfillment.trial_days(),
         "providerMin": PROVIDER_MIN_RUB,
-        "payMethods": pay_methods(),
+        "payMethods": pay_methods(app_source(request)),
         "trafficResetPrice": float(db.get_setting("traffic_reset_price", "0") or 0),
         "captcha": captcha_mod.public_config(request.headers, ip),
         # сайт проекта: кнопки «Скачать для Windows / macOS»
@@ -8306,12 +8339,12 @@ def _referral_preview(user_id: int, price: float, method: str, use_ref: bool) ->
 
 
 @app.post("/api/app/payment/quote")
-def app_payment_quote(body: CreatePaymentBody, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+def app_payment_quote(body: CreatePaymentBody, request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     """предпросмотр цены без создания платежа."""
     q = _compute_order_price(get_user(int(user["id"])) or user, body)
     is_stars = body.method == "tg_stars"
     prev = _referral_preview(int(user["id"]), q["price"], body.method, bool(body.use_referral_balance))
-    pm = pay_method(body.method)
+    pm = pay_method(body.method, app_source(request))
     return {
         "total": float(q["stars"]) if is_stars else float(prev["charge"]),
         "method_enabled": bool(pm and pm.get("enabled")),
@@ -8412,7 +8445,7 @@ def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = D
 
     is_stars = body.method == "tg_stars"
     pmin = provider_min_rub(body.method)
-    pm = pay_method(body.method)
+    pm = pay_method(body.method, app_source(request))  # сайт и бот — свои способы
     if not pm or not pm["enabled"]:
         raise HTTPException(400, detail={"message": "Этот способ оплаты пока недоступен"})
 
@@ -8783,6 +8816,17 @@ def mask_email(email: str) -> str:
     return f"{masked}@{dom}"
 
 
+def _site_ref_link(uid: int) -> Optional[str]:
+    """реф. ссылка на сайт проекта: https://<сайт>/?ref=<id>; нет сайта или домена — None."""
+    if not P().feature("site"):
+        return None
+    base = (P().site_url or "").strip().rstrip("/")
+    if not base:
+        dom = (P().env("SITE_DOMAIN") or "").strip().strip("/")
+        base = f"https://{dom}" if dom else ""
+    return f"{base}/?ref={int(uid)}" if base else None
+
+
 @app.get("/api/app/referral")
 def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
     """экран «Реферальная программа»: только то, что показывает мини-приложение (из друзей — последние 6 для чипов)."""
@@ -8806,6 +8850,8 @@ def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         # реф. ссылка: t.me/<bot>?start=ref_<id>
         "code": str(uid),
         "link": f"https://t.me/{P().bot_username}?start=ref_{uid}",
+        # у проекта есть сайт: ссылка на сайт (сайт сохранит ?ref= и привяжет друга при регистрации)
+        "site_link": _site_ref_link(uid),
         "is_partner": bool(fresh.get("is_partner")),
         "partner_balance": fresh.get("partner_balance", 0),
         "partner_rate": fresh.get("partner_rate", 25),

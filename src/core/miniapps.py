@@ -1270,13 +1270,23 @@ def build_router(core: Any):
                 core.set_squad_mapping(list(body.squads_vpn if body.squads_vpn is not None else cur_vpn),
                                        list(body.squads_trial if body.squads_trial is not None else cur_trial))
             if body.pay_mode is not None:
+                # режим меняет способы, только если он и правда сменился: иначе любое сохранение этой
+                # страницы (админы, сквады…) включало обратно СБП/карты/Stars, выключенные вручную
+                # в «Цены и подписки → Способы оплаты»
                 cur = {m["id"]: {"enabled": m["enabled"]} for m in core.pay_methods()}
-                for k in ("card", "sbp"):
-                    if k in cur:
-                        cur[k]["enabled"] = body.pay_mode == "yk"
-                if "tg_stars" in cur:
-                    cur["tg_stars"]["enabled"] = True
-                db.set_setting("pay_methods", db.dumps(cur))
+                was_yk = cur.get("card", {}).get("enabled", True) or cur.get("sbp", {}).get("enabled", True)
+                if (body.pay_mode == "stars" and was_yk) or (body.pay_mode == "yk" and not was_yk):
+                    on = body.pay_mode == "yk"
+                    # сайт проекта: без ЮKassa там платить нечем, с ней — включаем те же СБП/карты
+                    if core.site_pay_split():
+                        core._save_pay_methods("pay_methods_web", core.pay_methods("web"),
+                                               {k: {"enabled": on} for k in ("card", "sbp")})
+                    for k in ("card", "sbp"):
+                        if k in cur:
+                            cur[k]["enabled"] = on
+                    if not on and "tg_stars" in cur:
+                        cur["tg_stars"]["enabled"] = True
+                    db.set_setting("pay_methods", db.dumps(cur))
             if body.channel_required is not None:
                 db.set_setting("channel_required", "1" if body.channel_required else "0")
             if body.active is not None:

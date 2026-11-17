@@ -5,6 +5,7 @@ import {
 import { Spinner, Toggle } from '../../components/ui';
 import { apiFetch, parseApiErr } from '../../lib/api';
 import type { ToastType } from '../../lib/types';
+import { useProject } from '../../lib/project';
 
 export const Section: React.FC<{ title: string; sub?: string; children: React.ReactNode }> = ({ title, sub, children }) => (
   <div className="flex flex-col gap-4" style={{ paddingTop: 20, borderTop: '1px solid var(--border)' }}>
@@ -14,6 +15,7 @@ export const Section: React.FC<{ title: string; sub?: string; children: React.Re
 );
 
 export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: ToastType) => void }> = ({ onToast }) => {
+  const project = useProject();
   const [f, setF] = useState({
     base: '99', extra: '40', paidGb: '100', trafficReset: '0',
     trialDays: '3', trialGb: '5', trialDevices: '1',
@@ -37,6 +39,8 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
   const [extraStars, setExtraStars] = useState('40');
   // способы оплаты: вкл/выкл и комиссия
   const [payMethods, setPayMethods] = useState<{ id: string; title: string; enabled: boolean }[]>([]);
+  // у проекта есть сайт (FGN): способы для сайта отдельно от бота; null — сайта нет
+  const [payMethodsWeb, setPayMethodsWeb] = useState<{ id: string; title: string; enabled: boolean }[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF((p) => ({ ...p, [k]: e.target.value }));
@@ -67,6 +71,9 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
         if (Array.isArray(m.pay_methods)) {
           setPayMethods(m.pay_methods.map((x: any) => ({ id: x.id, title: x.title, enabled: !!x.enabled })));
         }
+        setPayMethodsWeb(Array.isArray(m.pay_methods_web)
+          ? m.pay_methods_web.map((x: any) => ({ id: x.id, title: x.title, enabled: !!x.enabled }))
+          : null);
       }
     } catch { onToast('Ошибка', 'Не удалось загрузить настройки', 'error'); }
     finally { setLoading(false); }
@@ -94,6 +101,7 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
           device_stars: Object.fromEntries(
             Object.entries(devStars).filter(([, v]) => String(v).trim() !== '').map(([k, v]) => [k, Number(v)])),
           pay_methods: Object.fromEntries(payMethods.map((x) => [x.id, { enabled: x.enabled }])),
+          ...(payMethodsWeb ? { pay_methods_web: Object.fromEntries(payMethodsWeb.map((x) => [x.id, { enabled: x.enabled }])) } : {}),
         }),
       });
       onToast('Готово', 'Сохранено — мини-приложение подхватит сразу', 'success');
@@ -168,15 +176,43 @@ export const PricesSettingsTab: React.FC<{ onToast: (t: string, m: string, ty: T
             })()}
           </Section>
 
-          <Section title="Способы оплаты" sub="Без комиссии. Выключенный способ виден в мини-приложении как «пока недоступно».">
-            <div className="flex flex-col gap-3">
-              {payMethods.map((x, i) => (
-                <div key={x.id} className="inset flex items-center gap-3" style={{ padding: '10px 14px' }}>
-                  <div style={{ flex: 1, fontWeight: 500 }}>{x.title}</div>
-                  <Toggle on={x.enabled} onChange={() => setPayMethods((p) => p.map((y, j) => (j === i ? { ...y, enabled: !y.enabled } : y)))} />
+          <Section title="Способы оплаты" sub={payMethodsWeb
+            ? `Свои у каждого проекта — сейчас ${project?.name || 'этот проект'}. У проекта есть сайт: для бота (мини-приложение в Telegram) и для сайта способы включаются отдельно. Выключенный способ показывается как «пока недоступно», оплатить им нельзя.`
+            : `Свои у каждого проекта${project ? ` — сейчас ${project.name}` : ''} (переключатель «Проект» вверху). Выключенный способ виден в мини-приложении как «пока недоступно», оплатить им нельзя.`}>
+            {payMethodsWeb ? (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-3 faint" style={{ padding: '0 14px', fontSize: 12, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                  <div style={{ flex: 1 }}>Способ</div>
+                  <div style={{ width: 72, textAlign: 'center' }}>Бот</div>
+                  <div style={{ width: 72, textAlign: 'center' }}>Сайт</div>
                 </div>
-              ))}
-            </div>
+                {payMethods.map((x, i) => {
+                  const w = payMethodsWeb.findIndex((y) => y.id === x.id);
+                  return (
+                    <div key={x.id} className="inset flex items-center gap-3" style={{ padding: '10px 14px' }}>
+                      <div style={{ flex: 1, fontWeight: 500 }}>{x.title}</div>
+                      <div style={{ width: 72, display: 'flex', justifyContent: 'center' }}>
+                        <Toggle on={x.enabled} onChange={() => setPayMethods((p) => p.map((y, j) => (j === i ? { ...y, enabled: !y.enabled } : y)))} />
+                      </div>
+                      <div style={{ width: 72, display: 'flex', justifyContent: 'center' }}>
+                        {w >= 0
+                          ? <Toggle on={payMethodsWeb[w].enabled} onChange={() => setPayMethodsWeb((p) => p && p.map((y, j) => (j === w ? { ...y, enabled: !y.enabled } : y)))} />
+                          : <span className="faint" style={{ fontSize: 12 }} title="Звёзды Telegram работают только в Telegram">—</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {payMethods.map((x, i) => (
+                  <div key={x.id} className="inset flex items-center gap-3" style={{ padding: '10px 14px' }}>
+                    <div style={{ flex: 1, fontWeight: 500 }}>{x.title}</div>
+                    <Toggle on={x.enabled} onChange={() => setPayMethods((p) => p.map((y, j) => (j === i ? { ...y, enabled: !y.enabled } : y)))} />
+                  </div>
+                ))}
+              </div>
+            )}
           </Section>
 
           <Section title="Платная подписка">

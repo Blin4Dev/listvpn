@@ -61,7 +61,7 @@ PROJECT_SETTING_KEYS = frozenset({
     "base_price", "extra_device_price", "extra_device_stars", "tariff_devices", "device_prices", "device_stars",
     "trial_enabled", "trial_miniapp_enabled", "trial_web_enabled", "trial_days", "trial_traffic_gb",
     "trial_devices", "trial_hwid_enabled", "trial_hwid_max",
-    "paid_traffic_gb", "traffic_reset_price", "channel_required", "pay_methods",
+    "paid_traffic_gb", "traffic_reset_price", "channel_required", "pay_methods", "pay_methods_web",
     "apiv1_tasks_seeded",
     # семейная подписка: сколько человек в семье вместе с владельцем
     "family_max_members",

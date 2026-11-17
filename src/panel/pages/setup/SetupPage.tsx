@@ -335,7 +335,8 @@ function ProjectPane({ p, data, onInstall, onChangeDomain, onReload, onToast }: 
   const save = async () => {
     setSaving(true); setSaveErr('');
     const body: any = { admins, squads_vpn: vpn, squads_trial: trial, channel_id: String(channel || '').trim(), channel_required: !!chanReq };
-    if (pay === 'yk' || pay === 'stars') body.pay_mode = pay;
+    // режим оплаты — только если его переключили: иначе сохранение затирало ручные вкл/выкл способов
+    if ((pay === 'yk' || pay === 'stars') && pay !== p.pay_mode) body.pay_mode = pay;
     if (token.trim()) body.bot_token = token.trim();
     if (pay === 'yk') { body.yookassa_shop_id = String(shop || '').trim(); if (String(secret || '').trim()) body.yookassa_secret_key = String(secret).trim(); }
     try {
@@ -411,7 +412,7 @@ function ProjectPane({ p, data, onInstall, onChangeDomain, onReload, onToast }: 
 
       <div className="su-sec"><span className={`su-mark ${s.pay ? 'ok' : ''}`} /><div>
         <div className="su-sname">Оплата</div>
-        <div className="su-desc">Звёзды Telegram работают всегда. ЮKassa добавляет оплату картой и СБП.</div>
+        <div className="su-desc">ЮKassa добавляет оплату картой и СБП. Каждый способ (СБП, карты, Stars) отдельно включается и выключается в «Настройки → Цены и подписки → Способы оплаты».</div>
         <div className="seg" style={{ marginBottom: 12 }}>
           <button className={`seg-item ${pay === 'yk' ? 'on' : ''}`} onClick={() => { setPay('yk'); touch(); }}>ЮKassa + Stars</button>
           <button className={`seg-item ${pay === 'stars' ? 'on' : ''}`} onClick={() => { setPay('stars'); touch(); }}>Только Stars</button>

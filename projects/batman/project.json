@@ -14,7 +14,8 @@
   },
   "theme_color": "#05050A",
   "features": {
-    "intro_static": true
+    "intro_static": true,
+    "site": true
   },
   "ref_level_names": {
     "starter": "FRESHMAN",

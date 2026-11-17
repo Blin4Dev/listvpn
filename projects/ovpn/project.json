@@ -26,7 +26,8 @@
     "single_renew": true,
     "notify_not_connected": true,
     "winback_gift": true,
-    "intro_static": true
+    "intro_static": true,
+    "site": true
   },
   "features_doc": {
     "promo_days": "промокод «+N дней к подписке» с кнопкой «Забрать»",

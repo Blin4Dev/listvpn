@@ -8,6 +8,7 @@ export type RefGift = { code: string; status: string; created_at: string; redeem
 export type ReferralData = {
   code?: string;
   link?: string;
+  site_link?: string | null; // у проекта с сайтом: https://<сайт>/?ref=<id>
   partner_balance?: number;
   referrals_count?: number;
   active_count?: number;

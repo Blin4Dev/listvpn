@@ -562,9 +562,10 @@ def build_router(core: Any) -> APIRouter:
 
     # ── 5. покупки (оплата — на странице ЮKassa) ──
 
-    def _yk_method() -> str:
-        """способ оплаты для ЮKassa: форма ЮKassa сама покажет доступные; нужен любой включённый в панели."""
-        for m in core.pay_methods():
+    def _yk_method(request: Request) -> str:
+        """способ оплаты для ЮKassa: форма ЮKassa сама покажет доступные; нужен любой включённый в панели
+        (для того же источника — сайт/бот, — по которому core проверит способ)."""
+        for m in core.pay_methods(core.app_source(request)):
             if m["id"] != "tg_stars" and m.get("enabled"):
                 return str(m["id"])
         raise _err(503, "Оплата сейчас недоступна", "payments_unavailable")
@@ -575,7 +576,7 @@ def build_router(core: Any) -> APIRouter:
         if not fresh.get("terms_accepted_at"):
             raise _err(403, "Сначала примите условия оферты и политику конфиденциальности (POST /users/me/terms)",
                        "terms_not_accepted")
-        body.method = _yk_method()
+        body.method = _yk_method(request)
         tpl = appx.return_url_template()
         if tpl:
             request.state.pay_return_url = tpl  # core подставит {payment_id}
