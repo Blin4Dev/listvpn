@@ -110,6 +110,8 @@ function useSiteConfig() {
         const res = await fetch("/api/app/config", { headers: { "X-Project": PROJECT_ID } });
         const body = (await res.json().catch(() => null)) as {
           botUsername?: string;
+          miniappLink?: string;
+          supportUrl?: string;
           telegramOauthBotId?: string;
           captcha?: CaptchaPublic;
           desktop?: Desktop;
@@ -120,7 +122,10 @@ function useSiteConfig() {
         if (body.captcha && typeof body.captcha === "object") setCaptcha(body.captcha);
         if (body.desktop && typeof body.desktop === "object") setDesktop(body.desktop);
         if (typeof body.trialDays === "number") setTrialDays(body.trialDays);
-        if (typeof body.botUsername === "string") setBot(body.botUsername.trim().replace(/^@/, ""));
+        // бот: имя из настроек проекта; нет — из ссылки на мини-приложение (t.me/<бот>/app) или поддержки (t.me/<бот>)
+        const fromLink = (u?: string) => (String(u || "").match(/t\.me\/([A-Za-z0-9_]{4,64}?bot)(?:[/?#]|$)/i) || [])[1] || "";
+        const name = String(body.botUsername || "").trim().replace(/^@/, "") || fromLink(body.miniappLink) || fromLink(body.supportUrl);
+        if (name) setBot(name);
       } catch {
         /* без конфига — кнопки ведут в бота / никуда */
       }

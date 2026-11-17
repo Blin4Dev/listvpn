@@ -46,6 +46,9 @@
 			file_server
 		}
 		handle {
+			# страница (index.html) — всегда сверять с сервером: иначе после обновления браузер держит старую
+			# и грузит старые скрипты (у них в имени хэш, они кэшируются на неделю — это нормально)
+			header Cache-Control "no-cache"
 			root * /srv/projects/{proj}
 			try_files {path} {path}/ /index.html
 			file_server

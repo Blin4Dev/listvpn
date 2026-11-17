@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "1.2"  # = AGENT_VERSION в miniapps.py
+VERSION = "1.3"  # = AGENT_VERSION в miniapps.py
 CONF = "/etc/blin-agent.json"
 STATE_DIR = "/var/lib/blin-agent"
 STATUS = os.path.join(STATE_DIR, "status.json")
@@ -349,6 +349,7 @@ def site_text(p: dict) -> str:
 		@static path *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.svg *.ico *.webp *.gif *.mp4 *.webm
 		header @static Cache-Control "public, max-age=604800"
 		handle {{
+			header Cache-Control "no-cache"
 			root * {WWW}/{pid}
 			try_files {{path}} {{path}}/ /index.html
 			file_server
@@ -360,6 +361,35 @@ def site_text(p: dict) -> str:
 
 def site_path(pid: str) -> str:
     return os.path.join(SITES, f"{pid}.caddy")
+
+
+NO_CACHE_LINE = '\t\t\theader Cache-Control "no-cache"\n'
+
+
+def patch_sites() -> None:
+    """сайты, поставленные агентом до 1.3: странице (index.html) — Cache-Control: no-cache,
+    чтобы после обновления сборки браузер не показывал старую версию сайта / мини-приложения."""
+    try:
+        names = [n for n in os.listdir(SITES) if n.endswith(".caddy")]
+    except OSError:
+        return
+    for name in names:
+        pid = name[:-len(".caddy")]
+        try:
+            with open(site_path(pid), encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if "listvpn:" not in text or 'Cache-Control "no-cache"' in text:
+            continue
+        marker = "\t\thandle {\n\t\t\troot * "
+        if marker not in text:
+            continue
+        try:
+            apply_caddy(pid, text.replace(marker, "\t\thandle {\n" + NO_CACHE_LINE + "\t\t\troot * ", 1))
+            log(f"сайт {pid}: страница без кэша")
+        except Exception as e:  # noqa: BLE001
+            log(f"сайт {pid}: {e}")
 
 
 def apply_caddy(pid: str, text: str | None) -> None:
@@ -711,6 +741,7 @@ class Agent:
         threading.Thread(target=self.worker, daemon=True).start()
         backoff = 3
         log(f"агент {VERSION} → {self.conf['panel']}")
+        patch_sites()
         while True:
             try:
                 r = self.api("/api/agent/poll", {"version": VERSION, "caddy": caddy_version(), "hostname": socket.gethostname(),
