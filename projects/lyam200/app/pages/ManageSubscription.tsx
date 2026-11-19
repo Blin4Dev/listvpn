@@ -3,9 +3,9 @@ import { useLocation, useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import { useSmartBack } from "../utils/navigation";
 import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, SUPPORT_PREFILL_KEY, type TrafficInfo } from "../utils/api";
-import { loadReferral, peekReferral } from "../utils/referral";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
+import ReissueKey from "../components/ReissueKey";
 import { copyText } from "../components/SubLinkBox";
 import { useTgBack } from "../components/noir";
 import { O, OBack, OButton, OCard, OIcon, OLabel, OMenuRow, OScreen, OSheet, OSheetText, OTitle } from "../components/lyam";
@@ -58,7 +58,7 @@ export default function ManageSubscription() {
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
-  const [sheet, setSheet] = useState<null | "setup" | "qr" | "key" | "share">(null);
+  const [sheet, setSheet] = useState<null | "setup" | "qr" | "key" | "share" | "reissue">(null);
   const [noSub, setNoSub] = useState(false);
 
   useEffect(() => {
@@ -149,7 +149,7 @@ export default function ManageSubscription() {
           </OCard>
         ) : null}
         <OButton tone="red" icon="shopping-bag" style={{ marginTop: 16 }} onClick={() => navigate("/subscription/extend")}>
-          Купить подписку
+          Продлить подписку
         </OButton>
       </OScreen>
     );
@@ -215,12 +215,13 @@ export default function ManageSubscription() {
       <div style={{ ...rise(3), display: "flex", flexDirection: "column", gap: 8, paddingTop: 16 }}>
         <OButton tone="red" icon="download" onClick={() => setSheet("setup")}>Добавить подписку</OButton>
         {!noRenew ? (
-          <DarkButton icon="shopping-bag" onClick={() => navigate("/subscription/extend")}>Купить подписку</DarkButton>
+          <DarkButton icon="shopping-bag" onClick={() => navigate("/subscription/extend")}>Продлить подписку</DarkButton>
         ) : null}
         <DarkButton icon="share-2" onClick={() => setSheet("share")}>Поделиться с другом</DarkButton>
         <DarkButton icon="qr-code" onClick={() => setSheet("qr")}>QR код подписки</DarkButton>
         {canBuyDevices ? <DarkButton icon="smartphone" onClick={() => navigate("/subscription/increase")}>Купить устройства</DarkButton> : null}
         <DarkButton icon="monitor-smartphone" onClick={() => navigate("/subscription/devices")}>Управление устройствами</DarkButton>
+        <DarkButton icon="rotate-ccw" onClick={() => setSheet("reissue")}>Сбросить ключ</DarkButton>
         <DarkButton icon="key-round" onClick={() => setSheet("key")}>Как вставить ключ</DarkButton>
       </div>
 
@@ -228,6 +229,7 @@ export default function ManageSubscription() {
       {sheet === "qr" && <QrSheet onClose={closeSheet} onHowTo={() => setSheet("key")} />}
       {sheet === "key" && <KeySheet onClose={closeSheet} />}
       {sheet === "share" && <ShareSheet onClose={closeSheet} />}
+      {sheet === "reissue" && <ReissueKey onClose={closeSheet} />}
     </OScreen>
   );
 }
@@ -331,9 +333,9 @@ export function CopyButton({ text, label }: { text: string; label: string; icon?
 export function KeySteps({ style }: { style?: React.CSSProperties }) {
   const steps = [
     "Скопируйте ключ кнопкой ниже.",
-    "Откройте Happ, v2rayTun или Hiddify.",
-    "Нажмите «+» и выберите «Вставить из буфера».",
-    "Включите подключение.",
+    "Откройте VPN-приложение (Happ, INCY, v2RayTun, Hiddify и т.п.).",
+    "Нажмите «+» или «Добавить» и выберите «Вставить из буфера обмена».",
+    "Включите подключение — готово.",
   ];
   return (
     <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 12, ...style }}>
@@ -344,15 +346,22 @@ export function KeySteps({ style }: { style?: React.CSSProperties }) {
   );
 }
 
-// 17 — поделиться с другом: ссылка подписки
+// 35 — поделиться с другом: ключ подписки (как в BatmanVPN — друг добавит его в приложение)
 function ShareSheet({ onClose }: { onClose: () => void }) {
   useTgBack(onClose);
   const { link, err } = useSubLink();
+  const send = () => {
+    if (!link) return;
+    const url = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Держи ключ VPN — добавь его в приложение")}`;
+    const wa = (window as any).Telegram?.WebApp;
+    if (wa?.openTelegramLink) wa.openTelegramLink(url); else window.open(url, "_blank");
+  };
   return (
     <OSheet title="Поделиться с другом" onClose={onClose}>
-      <div style={{ paddingTop: 12, fontSize: 14, lineHeight: "20px", color: O.muted }}>Ссылка подписки. Друг вставит её в клиент или отсканирует QR.</div>
+      <div style={{ paddingTop: 12, fontSize: 14, lineHeight: "20px", color: O.muted }}>Ключ подписки. Друг вставит его в приложение или отсканирует QR.</div>
       <div style={{ paddingTop: 12 }}><OLinkField text={err || link || "Получаем ссылку…"} error={!!err} /></div>
-      <div style={{ paddingTop: 16 }}><CopyButton text={link} label="Скопировать ссылку" /></div>
+      <div style={{ paddingTop: 16 }}><CopyButton text={link} label="Скопировать ключ" /></div>
+      <div style={{ paddingTop: 12 }}><OButton tone="dark" disabled={!link} onClick={send}>Отправить в Telegram</OButton></div>
     </OSheet>
   );
 }

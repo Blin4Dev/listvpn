@@ -3,9 +3,9 @@ import { useLocation, useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import { useSmartBack } from "../utils/navigation";
 import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, SUPPORT_PREFILL_KEY, type TrafficInfo } from "../utils/api";
-import { loadReferral, peekReferral } from "../utils/referral";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
+import ReissueKey from "../components/ReissueKey";
 import { copyText } from "../components/SubLinkBox";
 import { useTgBack } from "../components/noir";
 import { O, OBack, OButton, OCard, OLabel, OMenuRow, OScreen, OSheet, OSheetText } from "../components/ovpn";
@@ -58,7 +58,7 @@ export default function ManageSubscription() {
   const [devices, setDevices] = useState<DevicesResponse | null>(null);
   const [keyLimit, setKeyLimit] = useState<number | null>(null);
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null);
-  const [sheet, setSheet] = useState<null | "setup" | "qr" | "key" | "share">(null);
+  const [sheet, setSheet] = useState<null | "setup" | "qr" | "key" | "share" | "reissue">(null);
 
   useEffect(() => {
     appFetch<DevicesResponse>("/devices").then(setDevices).catch(() => { /* нет данных */ });
@@ -139,7 +139,7 @@ export default function ManageSubscription() {
           </OCard>
         ) : null}
         <OButton tone="green" icon="shopping-bag" style={{ marginTop: 12 }} onClick={() => navigate("/subscription/extend")}>
-          Купить подписку
+          Продлить подписку
         </OButton>
       </OScreen>
     );
@@ -208,12 +208,13 @@ export default function ManageSubscription() {
       <div style={{ ...rise(3), display: "flex", flexDirection: "column", gap: 12, paddingTop: 12 }}>
         <OButton tone="red" icon="download" onClick={() => setSheet("setup")}>Добавить подписку</OButton>
         {!noRenew ? (
-          <OButton tone="green" icon="shopping-bag" onClick={() => navigate("/subscription/extend")}>Купить подписку</OButton>
+          <OButton tone="green" icon="shopping-bag" onClick={() => navigate("/subscription/extend")}>Продлить подписку</OButton>
         ) : null}
         <OMenuRow icon="share-2" title="Поделиться с другом" onClick={() => setSheet("share")} />
         <OMenuRow icon="qr-code" title="QR код подписки" onClick={() => setSheet("qr")} />
         {canBuyDevices ? <OMenuRow icon="smartphone" title="Купить устройства" onClick={() => navigate("/subscription/increase")} /> : null}
         <OMenuRow icon="monitor" title="Управление устройствами" onClick={() => navigate("/subscription/devices")} />
+        <OMenuRow icon="refresh-cw" title="Сбросить ключ" onClick={() => setSheet("reissue")} />
         <OMenuRow icon="key-round" title="Как вставить ключ" onClick={() => setSheet("key")} />
       </div>
 
@@ -221,6 +222,7 @@ export default function ManageSubscription() {
       {sheet === "qr" && <QrSheet onClose={closeSheet} />}
       {sheet === "key" && <KeySheet onClose={closeSheet} />}
       {sheet === "share" && <ShareSheet onClose={closeSheet} />}
+      {sheet === "reissue" && <ReissueKey onClose={closeSheet} />}
     </OScreen>
   );
 }
@@ -291,19 +293,22 @@ export function CopyButton({ text, label, icon = "copy" }: { text: string; label
   );
 }
 
-// 35 — поделиться с другом: реферальная ссылка
+// 35 — поделиться с другом: ключ подписки (как в BatmanVPN — друг добавит его в приложение)
 function ShareSheet({ onClose }: { onClose: () => void }) {
   useTgBack(onClose);
-  const [link, setLink] = useState(() => peekReferral()?.link || "");
-  const [err, setErr] = useState("");
-  useEffect(() => {
-    loadReferral().then((r) => setLink(r.link || "")).catch(() => setErr("Не удалось получить ссылку"));
-  }, []);
+  const { link, err } = useSubLink();
+  const send = () => {
+    if (!link) return;
+    const url = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Держи ключ VPN — добавь его в приложение")}`;
+    const wa = (window as any).Telegram?.WebApp;
+    if (wa?.openTelegramLink) wa.openTelegramLink(url); else window.open(url, "_blank");
+  };
   return (
     <OSheet title="Поделиться с другом" onClose={onClose}>
-      <OSheetText>Друг откроет кабинет O-VPN. Вам — процент с его оплат на баланс.</OSheetText>
-      <div style={{ paddingTop: 16 }}><OLinkField text={err || link || "Получаем ссылку…"} error={!!err} /></div>
-      <div style={{ paddingTop: 16 }}><CopyButton text={link} label="Скопировать ссылку" /></div>
+      <OSheetText>Ключ подписки. Друг вставит его в приложение или отсканирует QR.</OSheetText>
+      <div style={{ paddingTop: 12 }}><OLinkField text={err || link || "Получаем ссылку…"} error={!!err} /></div>
+      <div style={{ paddingTop: 16 }}><CopyButton text={link} label="Скопировать ключ" /></div>
+      <div style={{ paddingTop: 12 }}><OButton tone="dark" disabled={!link} onClick={send}>Отправить в Telegram</OButton></div>
     </OSheet>
   );
 }

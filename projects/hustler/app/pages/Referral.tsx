@@ -369,7 +369,7 @@ function FreeSheet({ data, onClose, onClaimed, onOpenSub }: { data: ReferralData
 
   let text: string;
   if (done !== null) text = `Готово! Подписка продлена${done ? ` до ${formatDateRu(done)}` : ""}.`;
-  else if (!st?.eligible) text = `С ${st?.need_active && st.need_active !== 5 ? st.need_active : "пяти"} активных друзей своя подписка бесплатно, вместе с белыми списками. Сейчас активных: ${active}.`;
+  else if (!st?.eligible) text = `С ${st?.need_active && st.need_active !== 5 ? st.need_active : "пяти"} активных друзей своя подписка бесплатно. Сейчас активных: ${active}.`;
   else if (!st.available) text = `В этом месяце бесплатную подписку уже получали. Следующая — ${st.next_at ? formatDateRu(st.next_at) : "через месяц"}.`;
   else text = "У вас достаточно активных друзей. Получите месяц подписки бесплатно — она добавится к текущей.";
 

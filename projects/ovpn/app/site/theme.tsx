@@ -1,5 +1,6 @@
 // O-VPN: тема сайта — ринг. Тёплый тёмный фон, красный акцент и кремовый текст (как в мини-приложении),
-// логотип шрифтом Anton, заголовки капсом; за первым экраном — арена, справа — борец в рамке с красным свечением.
+// логотип шрифтом Anton, заголовки капсом; за первым экраном — арена (пустой ринг), справа — логотип O-VPN в рамке.
+// Ринг с бойцом — только на запуске мини-приложения, на сайте его нет.
 import React from "react";
 import { ArtPill, BASE_C, BASE_T, BASE_VARS } from "./themeBase";
 
@@ -81,7 +82,12 @@ export function HeroArt() {
     <div className="fs-orb ov">
       <div className="ov-glow" />
       <div className="ov-frame">
-        <div className="ov-pic" />
+        <div className="ov-badge">
+          <span className="ov-word">
+            <b>O</b>-VPN
+          </span>
+          <span className="ov-sub">VPN-сервис</span>
+        </div>
       </div>
       <ArtPill pos="p1" icon="bolt" color="#F23A40">Подключение в один клик</ArtPill>
       <ArtPill pos="p2" icon="shield" color="#2FBE4A">Трафик под защитой</ArtPill>
@@ -119,7 +125,12 @@ export const THEME_CSS = `
   background: radial-gradient(circle, rgba(227,27,35,.34) 0%, rgba(227,27,35,.08) 45%, transparent 70%); filter: blur(6px); }
 .ov-frame { position: relative; width: 330px; height: 330px; padding: 6px; border-radius: 30px;
   background: linear-gradient(145deg, #E31B23 0%, #7A1015 50%, #F3E6D4 100%); box-shadow: 0 30px 80px rgba(0,0,0,.65); transform: rotate(-3deg); }
-.ov-pic { width: 100%; height: 100%; border-radius: 24px; background: #1C1513 url(/assets/welcome-bg.jpg) center 30% / cover no-repeat; }
+.ov-badge { width: 100%; height: 100%; border-radius: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  background: radial-gradient(circle at 50% 38%, rgba(227,27,35,.22) 0%, rgba(28,21,19,.96) 62%), #1C1513; }
+.ov-word { font-family: 'Anton', 'Manrope', sans-serif; font-size: 78px; line-height: 1; letter-spacing: .03em; color: #F3E6D4;
+  filter: drop-shadow(0 6px 24px rgba(0,0,0,.6)); }
+.ov-word b { font-weight: 400; color: #E31B23; }
+.ov-sub { font-size: 13px; font-weight: 700; letter-spacing: .32em; text-transform: uppercase; color: rgba(243,230,212,.6); }
 .fs-orb.ov .fs-pill.p1 { left: 0; top: 12%; }
 .fs-orb.ov .fs-pill.p2 { right: 0; bottom: 14%; }
 .fs-pill { background: rgba(28,21,19,.94); border-color: #433632; color: #F6EFE6; }
@@ -130,6 +141,7 @@ export const THEME_CSS = `
   .fs-h1 { font-size: 34px; }
   .fs-orb.ov { height: 400px; }
   .ov-frame { width: 260px; height: 260px; }
+  .ov-word { font-size: 60px; }
   .ov-glow { width: 320px; height: 320px; }
   .ov-arena { height: 1000px; }
 }

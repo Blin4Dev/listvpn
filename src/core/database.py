@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,8 +14,10 @@ from typing import Any, Iterator, Optional
 
 try:
     from . import projects  # type: ignore
+    from . import dbshard  # type: ignore
 except ImportError:
     import projects  # type: ignore
+    import dbshard  # type: ignore
 
 DB_PATH = os.getenv("DB_PATH", "data/data.db")
 
@@ -24,7 +27,114 @@ _initialized = False
 
 
 def get_db_path() -> str:
+    """путь старой одной базы; его папка — папка данных (бэкапы, файлы поддержки, ключи DKIM…)."""
     return DB_PATH
+
+
+# ── режим хранения: одна база (data.db) или по проектам (core.db + projects/<id>.db, см. dbshard.py) ──
+_mode: Optional[str] = None
+_mode_lock = threading.Lock()
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+@contextmanager
+def _file_lock(name: str) -> Iterator[None]:
+    """межпроцессная блокировка (API и бот стартуют одновременно)."""
+    _ensure_dir()
+    path = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), name)
+    fh = open(path, "a+")
+    try:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except ImportError:  # pragma: no cover — не linux
+            pass
+        yield
+    finally:
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except ImportError:  # pragma: no cover
+            pass
+        fh.close()
+
+
+def storage_mode() -> str:
+    """'split' — у каждого проекта своя база; 'single' — одна data.db (DB_SPLIT=0 или перенос не удался)."""
+    global _mode
+    if _mode:
+        return _mode
+    with _mode_lock:
+        if _mode:
+            return _mode
+        _mode = _detect_mode()
+        return _mode
+
+
+def _detect_mode() -> str:
+    off = (os.getenv("DB_SPLIT") or "").strip().lower() in ("0", "off", "false", "no")
+    marker = dbshard.read_marker(DB_PATH)
+    if off:
+        if marker:
+            raise RuntimeError("DB_SPLIT=0, но база уже разделена по проектам. Вернуть одну базу (сервисы остановлены): "
+                               "python src/core/dbshard.py merge-back")
+        return "single"
+    if marker:
+        dbshard.warn_legacy_touched(DB_PATH, marker, _log)
+        return "split"
+    if os.path.exists(dbshard.failed_path(DB_PATH)):
+        _log(f"[db] база по проектам не включена: прошлый перенос не удался ({dbshard.failed_path(DB_PATH)}). "
+             "Работаем с одной базой; чтобы повторить — удалите этот файл и перезапустите.")
+        return "single"
+    with _file_lock(".db-split.lock"):
+        marker = dbshard.read_marker(DB_PATH)
+        if marker:
+            return "split"
+        if not os.path.exists(DB_PATH) or os.path.getsize(DB_PATH) == 0:
+            dbshard.init_fresh(DB_PATH, _log)
+            return "split"
+        try:
+            dbshard.split_from_legacy(DB_PATH, projects.ids(), projects.DEFAULT, _log)
+            return "split"
+        except Exception as exc:  # noqa: BLE001 — любая ошибка: остаёмся на одной базе, как было
+            import traceback
+            reason = f"{type(exc).__name__}: {exc}"
+            _log(f"[db] ПЕРЕНОС ПО ПРОЕКТАМ НЕ УДАЛСЯ — работаем с одной базой, как раньше. Причина: {reason}")
+            try:
+                with open(dbshard.failed_path(DB_PATH), "w", encoding="utf-8") as fh:
+                    fh.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n" + reason + "\n\n" + traceback.format_exc())
+            except OSError:
+                pass
+            # недоделанные файлы — не трогаем старую базу, новые убираем
+            return "single"
+
+
+def is_split() -> bool:
+    return storage_mode() == "split"
+
+
+def project_db_path(pid: str) -> str:
+    """файл базы проекта (в режиме по проектам); в режиме одной базы — сама data.db."""
+    return dbshard.project_path(DB_PATH, pid) if is_split() else DB_PATH
+
+
+def backup_to(dest: str) -> None:
+    """полная копия в один файл прежнего формата (бэкапы панели)."""
+    if is_split():
+        dbshard.export_merged(DB_PATH, dest)
+        return
+    src = sqlite3.connect(DB_PATH)
+    try:
+        d = sqlite3.connect(dest)
+        try:
+            src.backup(d)
+        finally:
+            d.close()
+    finally:
+        src.close()
 
 
 def utcnow_iso() -> str:
@@ -35,9 +145,34 @@ def _ensure_dir() -> None:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 
+def _connect_split() -> Any:
+    pids = dbshard.shard_ids(DB_PATH, projects.ids())
+    raw, files, ref = dbshard.open_raw(DB_PATH, pids, projects.DEFAULT)
+    raw.create_function("current_project", 0, projects.current_id)
+    return dbshard.ShardedConnection(raw, files, ref, projects.current_id)
+
+
 def connect() -> sqlite3.Connection:
     global _initialized
     conn: Optional[sqlite3.Connection] = getattr(_local, "conn", None)
+    if conn is None and storage_mode() == "split":
+        _ensure_dir()
+        conn = _connect_split()
+        _local.conn = conn
+        if not _initialized:
+            with _init_lock:
+                if not _initialized:
+                    # схема и миграции — через ту же маршрутизацию (настройки-флаги общие, как в одной базе)
+                    with _file_lock(".db-schema.lock"):
+                        conn.rebuild_views(force=True)
+                        _create_schema(conn)  # type: ignore[arg-type]
+                        _migrate(conn)  # type: ignore[arg-type]
+                        _seed_defaults(conn)  # type: ignore[arg-type]
+                        dbshard.fix_triggers(conn)
+                        dbshard.ensure_all_sequences(conn)
+                        conn.rebuild_views(force=True)
+                    _initialized = True
+        return conn  # type: ignore[return-value]
     if conn is None:
         _ensure_dir()
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)

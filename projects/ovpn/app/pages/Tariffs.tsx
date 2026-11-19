@@ -172,7 +172,7 @@ export default function Tariffs() {
         ) : null}
       </OCard>
 
-      <div style={{ paddingTop: 16, fontSize: 14, lineHeight: "20px", color: O.muted }}>Выберите период · ВПН + белые списки</div>
+      <div style={{ paddingTop: 16, fontSize: 14, lineHeight: "20px", color: O.muted }}>Выберите период</div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12, paddingTop: 16 }}>
         {shown.map((p, i) => {

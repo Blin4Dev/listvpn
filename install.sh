@@ -1607,6 +1607,10 @@ fix_container_data_permissions() {
     [ -d data/dkim ] && [ ! -L data/dkim ] && chmod 700 data/dkim 2>/dev/null || true
     find data/dkim -type f -name '*.private' -exec chmod 600 {} \; 2>/dev/null || true
     [ -f data/data.db ] && [ ! -L data/data.db ] && chmod 640 data/data.db 2>/dev/null || true
+    # база по проектам: общая core.db + data/projects/<проект>.db (и старая data.db.pre-split после переноса)
+    [ -f data/core.db ] && [ ! -L data/core.db ] && chmod 640 data/core.db 2>/dev/null || true
+    [ -f data/data.db.pre-split ] && [ ! -L data/data.db.pre-split ] && chmod 640 data/data.db.pre-split 2>/dev/null || true
+    [ -d data/projects ] && [ ! -L data/projects ] && find data/projects -maxdepth 1 -type f -name '*.db' -exec chmod 640 {} \; 2>/dev/null || true
     find data/backups -type f -name '*.db' -exec chmod 640 {} \; 2>/dev/null || true
     chmod o-rwx data 2>/dev/null || true
 }

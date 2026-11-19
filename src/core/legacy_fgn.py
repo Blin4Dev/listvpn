@@ -337,9 +337,18 @@ def cmd_import(args: argparse.Namespace) -> int:
     vals = _fgn_values()
     t0 = time.time()
 
-    conn = sqlite3.connect(db.DB_PATH, timeout=60)
+    # база по проектам: пишем прямо в файл FGN, общие таблицы (настройки…) — из core.db
+    conn = sqlite3.connect(db.project_db_path(PROJECT), timeout=60)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 60000")
+    settings_db = "main"  # настройки и архив старой базы — общие (в режиме по проектам это core.db)
+    # коды уникальны во всей сети (как в одной базе): занятые другими проектами тоже учитываем
+    net_ref_codes = {r["referral_code"] for r in db.fetchall("SELECT referral_code FROM users WHERE referral_code IS NOT NULL")}
+    net_gift_codes = {r["code"] for r in db.fetchall("SELECT code FROM referral_rewards WHERE code IS NOT NULL")}
+    net_promo_codes = {str(r["code"]).upper() for r in db.fetchall("SELECT code FROM promocodes")}
+    if db.is_split():
+        conn.execute("ATTACH DATABASE ? AS core", (db.dbshard.core_path(db.DB_PATH),))
+        settings_db = "core"
     conn.execute("PRAGMA foreign_keys = OFF")
     # триггеры проекта (database.py) вызывают current_project() — здесь это всегда FGN
     conn.create_function("current_project", 0, lambda: PROJECT)
@@ -350,19 +359,19 @@ def cmd_import(args: argparse.Namespace) -> int:
         # 0. полный архив старой базы: все таблицы, все строки, все столбцы
         for t in tables:
             name = ARCHIVE_PREFIX + t
-            if conn.execute("SELECT 1 FROM main.sqlite_master WHERE name = ?", (name,)).fetchone():
+            if conn.execute(f"SELECT 1 FROM {settings_db}.sqlite_master WHERE name = ?", (name,)).fetchone():
                 raise SystemExit(f"Таблица архива {name} уже есть — похоже, перенос уже делали")
-            conn.execute(f'CREATE TABLE main."{name}" AS SELECT * FROM old."{t}"')
+            conn.execute(f'CREATE TABLE {settings_db}."{name}" AS SELECT * FROM old."{t}"')
         stats["archive_tables"] = len(tables)
         stats["keys_restored_from_previous"] = restored
         stats["keys_from"] = os.path.basename(args.keys_from) if args.keys_from else None
-        conn.execute(f"CREATE TABLE main.{ARCHIVE_PREFIX}map_users (old_id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL, "
+        conn.execute(f"CREATE TABLE {settings_db}.{ARCHIVE_PREFIX}map_users (old_id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL, "
                      "user_id INTEGER NOT NULL)")
-        conn.execute(f"CREATE TABLE main.{ARCHIVE_PREFIX}map_payments (old_payment_id TEXT PRIMARY KEY, "
+        conn.execute(f"CREATE TABLE {settings_db}.{ARCHIVE_PREFIX}map_payments (old_payment_id TEXT PRIMARY KEY, "
                      "payment_id TEXT NOT NULL, old_rows INTEGER NOT NULL)")
 
         # 1. пользователи
-        existing_codes = {r[0] for r in conn.execute("SELECT referral_code FROM main.users WHERE referral_code IS NOT NULL")}
+        existing_codes = {r[0] for r in conn.execute("SELECT referral_code FROM main.users WHERE referral_code IS NOT NULL")} | net_ref_codes
         tg2id: dict[int, int] = {}
         for u in old["users"]:
             tg = int(u["telegram_id"])
@@ -382,7 +391,7 @@ def cmd_import(args: argparse.Namespace) -> int:
                  iso(created)))
             uid = int(cur.lastrowid)
             tg2id[tg] = uid
-            conn.execute(f"INSERT INTO main.{ARCHIVE_PREFIX}map_users (old_id, telegram_id, user_id) VALUES (?, ?, ?)",
+            conn.execute(f"INSERT INTO {settings_db}.{ARCHIVE_PREFIX}map_users (old_id, telegram_id, user_id) VALUES (?, ?, ?)",
                          (int(u["id"]), tg, uid))
         stats["users"] = len(tg2id)
         # кто кого пригласил (в старой базе — telegram_id пригласившего)
@@ -460,7 +469,7 @@ def cmd_import(args: argparse.Namespace) -> int:
                 "provider_payment_id, subscription_id, expires_at, created_at, project_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
                 (new_pid, uid, tariff, c["purpose"], amount, currency, provider, str(x["payment_id"]), sub_id, created, PROJECT))
-            conn.execute(f"INSERT INTO main.{ARCHIVE_PREFIX}map_payments (old_payment_id, payment_id, old_rows) VALUES (?, ?, ?)",
+            conn.execute(f"INSERT INTO {settings_db}.{ARCHIVE_PREFIX}map_payments (old_payment_id, payment_id, old_rows) VALUES (?, ?, ?)",
                          (str(x["payment_id"]), new_pid, rows_per_pid[str(x["payment_id"])]))
             n_pay += 1
         stats["payments"] = n_pay
@@ -504,7 +513,7 @@ def cmd_import(args: argparse.Namespace) -> int:
 
         # 5. подарки → referral_rewards (купленные — kind bought, раздачи админа — kind admin)
         n_g = Counter()
-        existing_gift = {r[0] for r in conn.execute("SELECT code FROM main.referral_rewards WHERE code IS NOT NULL")}
+        existing_gift = {r[0] for r in conn.execute("SELECT code FROM main.referral_rewards WHERE code IS NOT NULL")} | net_gift_codes
         for g in old["gifts"]:
             code = gift_code_new(g["gift_code"])
             if code in existing_gift:
@@ -533,7 +542,7 @@ def cmd_import(args: argparse.Namespace) -> int:
 
         # 6. промокоды (скидка %)
         n_pc = Counter()
-        existing_pc = {str(r[0]).upper() for r in conn.execute("SELECT code FROM main.promocodes")}
+        existing_pc = {str(r[0]).upper() for r in conn.execute("SELECT code FROM main.promocodes")} | net_promo_codes
         for pc in old["promocodes"]:
             code = str(pc["code"]).strip()
             if code.upper() in existing_pc:
@@ -578,7 +587,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         stats["at"] = iso(at)
         stats["old_db"] = os.path.basename(args.old)
         stats["seconds"] = round(time.time() - t0, 1)
-        conn.execute("INSERT OR REPLACE INTO main.settings (key, value) VALUES (?, ?)", (SETTING, json.dumps(stats, ensure_ascii=False)))
+        conn.execute(f"INSERT OR REPLACE INTO {settings_db}.settings (key, value) VALUES (?, ?)", (SETTING, json.dumps(stats, ensure_ascii=False)))
         if args.dry_run:
             conn.execute("ROLLBACK")
             log("Пробный прогон: всё посчитано и ОТКАЧЕНО, база не изменилась.")

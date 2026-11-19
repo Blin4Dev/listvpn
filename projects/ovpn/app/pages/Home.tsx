@@ -340,6 +340,8 @@ export default function HomePage() {
           zIndex: 1,
           height: "100%",
           padding: 16,
+          // отступ под кнопки Telegram в полноэкранном режиме (стиль элемента перебивает .blin-tg-safe)
+          paddingTop: `calc(16px + var(--blin-tg-pad-top, 0px) / var(--blin-scale))`,
           paddingBottom: "calc(24px + var(--blin-tg-pad-bottom, 0px) / var(--blin-scale))",
           boxSizing: "border-box",
           opacity: paintUi ? 1 : 0,

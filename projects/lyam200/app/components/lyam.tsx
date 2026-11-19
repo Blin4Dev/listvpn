@@ -117,6 +117,8 @@ export function OScreen({ children, center, padTop = 6, style }: {
           zIndex: 1,
           height: "100%",
           padding: `${padTop}px 20px`,
+          // отступ под кнопки Telegram в полноэкранном режиме (стиль элемента перебивает .blin-tg-safe)
+          paddingTop: `calc(${padTop}px + var(--blin-tg-pad-top, 0px) / var(--blin-scale))`,
           paddingBottom: "calc(24px + var(--blin-tg-pad-bottom, 0px) / var(--blin-scale))",
           boxSizing: "border-box",
           display: "flex",

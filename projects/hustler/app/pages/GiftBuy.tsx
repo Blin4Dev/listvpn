@@ -114,7 +114,7 @@ export default function GiftBuy() {
             >
               <span style={{ flex: 1 }}>
                 <span style={{ display: "block", fontSize: 18, fontWeight: 800, lineHeight: "28px" }}>{periodTitle(p.months)}</span>
-                <span style={{ display: "block", marginTop: 4, fontSize: 14, lineHeight: "20px", color: N.muted }}>{p.days} {daysWord(p.days)} + белые списки</span>
+                <span style={{ display: "block", marginTop: 4, fontSize: 14, lineHeight: "20px", color: N.muted }}>{p.days} {daysWord(p.days)}</span>
               </span>
               <span style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                 {final < full ? <span style={{ fontSize: 14, color: N.dim, textDecoration: "line-through" }}>{full} ₽</span> : null}

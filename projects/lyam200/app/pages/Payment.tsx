@@ -332,7 +332,7 @@ export default function Payment() {
     return <Navigate to={`/tariffs${returnTo ? `?return=${encodeURIComponent(returnTo)}` : ""}`} replace />;
   }
 
-  // тексты как в макете ЛЯМ200: «Подписка · 3 месяца · 2 устройства · белые списки»
+  // тексты как в макете ЛЯМ200: «Подписка · 3 месяца · 2 устройства»
   const rowLabel = isGift
     ? `Подарок · ${periodLabel(months)}`
     : isTrafficReset
@@ -341,12 +341,12 @@ export default function Payment() {
       ? `Устройства +${extraDevices}`
       : `${periodLabel(months)} · ${devNow} ${deviceWord(devNow)}`;
   const what = isGift
-    ? `${rowLabel} · белые списки`
+    ? rowLabel
     : isTrafficReset
     ? `Досрочный сброс трафика${trafficNow?.available && trafficNow.used_bytes != null ? ` · потрачено ${formatBytesRu(trafficNow.used_bytes)}${trafficNow.limit_bytes ? ` из ${formatBytesRu(trafficNow.limit_bytes)}` : ""}` : ""}`
     : isDevicesFlow
       ? `Устройства · +${extraDevices} · ${periodLabel(months)}`
-      : `${rowLabel} · белые списки`;
+      : rowLabel;
 
   const v = (n: number) => (quoteReady ? fmt(n) : "…");
 

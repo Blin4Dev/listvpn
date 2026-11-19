@@ -90,6 +90,14 @@ export default function Promocode() {
           {result.kind === "gift"
             ? `Подарок активирован.${result.until ? ` Подписка действует до ${formatDateRu(result.until)}.` : ""}`
             : `Скидка ${result.percent}% активирована — применится к следующей оплате.`}
+          {result.kind === "gift" ? " Осталось добавить подписку в приложение." : ""}
+          <div style={{ marginTop: 12 }}>
+            {result.kind === "gift" ? (
+              <OButton tone="red" icon="download" onClick={() => navigate("/subscription?setup=1")}>Добавить в приложение</OButton>
+            ) : (
+              <OButton tone="dark" onClick={() => navigate("/tariffs")}>Выбрать тариф</OButton>
+            )}
+          </div>
         </div>
       ) : null}
       {dayGift ? <DayGiftSheet gift={dayGift} onClose={() => setDayGift(null)} /> : null}

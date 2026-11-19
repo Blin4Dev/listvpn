@@ -1831,11 +1831,11 @@ def create_backup() -> dict[str, Any]:
     ts = utcnow().strftime("%Y%m%d-%H%M%S")
     name = f"backup-{ts}.db"
     path = os.path.join(_backup_dir(), name)
-    src = sqlite3.connect(db.get_db_path())
+    # одна база или по проектам — копия всегда одним файлом прежнего формата
+    db.backup_to(path)
     try:
         dst = sqlite3.connect(path)
         try:
-            src.backup(dst)
             # из копии убираем сессии, коды входа/2fa, счётчики
             for table in _BACKUP_SCRUB_TABLES:
                 try:
@@ -1847,7 +1847,7 @@ def create_backup() -> dict[str, Any]:
         finally:
             dst.close()
     finally:
-        src.close()
+        pass
     try:
         os.chmod(path, 0o640)
     except OSError:
