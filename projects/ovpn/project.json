@@ -11,7 +11,7 @@
     "command_description": "Запустить O-VPN",
     "welcome_emoji": "![☄](tg://emoji?id=5362048677990899974)",
     "welcome_title": "Добро пожаловать!",
-    "welcome_text": "Пришло время для по-настоящему качественного сервиса.",
+    "welcome_text": "Пришло время по-настоящему качественного сервиса.",
     "open_app_text": "🚀 Открыть O-VPN",
     "onboarding": {
       "m30": "{emoji} **Время не ждёт: подписка всё ещё не оформлена!** Забирайте O-VPN — безопасный интернет и лучший сервис уже ждут вас!",
@@ -49,5 +49,12 @@
     "winback_gift": "давно не оплачивал — дарим дни (кнопка «Забрать»)",
     "intro_static": "заставка — картинка intro-poster.jpg (видео нет)",
     "family": "семьи нет: экран /family у O-VPN не переопределён"
+  },
+  "ref_level_names": {
+    "starter": "ROUND 1",
+    "spreader": "PUNCHER",
+    "special": "COACH",
+    "greater": "FIGHTER",
+    "gen_s": "LION"
   }
 }

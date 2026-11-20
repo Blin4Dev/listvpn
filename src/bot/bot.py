@@ -148,7 +148,7 @@ def _welcome_text_entities() -> tuple[str, list[dict[str, Any]]]:
               else [("🦊", {"type": "custom_emoji", "custom_emoji_id": EMOJI_FOX})]),
             (" ", None),
             (P().bot_text("welcome_title", "Добро пожаловать!"), {"type": "bold"}),
-            (P().bot_text("welcome_gap", "\n\n") + P().bot_text("welcome_text", "Пришло время для по-настоящему качественного сервиса."), None),
+            (P().bot_text("welcome_gap", "\n\n") + P().bot_text("welcome_text", "Пришло время по-настоящему качественного сервиса."), None),
         ]
     text = ""
     entities: list[dict[str, Any]] = []

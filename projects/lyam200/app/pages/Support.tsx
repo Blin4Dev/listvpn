@@ -195,7 +195,6 @@ function Bubble({ m, onImage, onMedia, onReply, onQuote, flash, onNoThanks, clos
 }
 
 // быстрые вопросы (38)
-const QUICK = ["Не пришёл ключ", "Как оплатить", "Сбросить трафик"];
 
 export default function Support() {
   const goBack = useSmartBack("/");
@@ -495,19 +494,11 @@ export default function Support() {
           На компьютере файл можно перетащить в окно или вставить через Ctrl+V
         </div>
       ) : null}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingTop: 12, flex: "none" }}>
-        {QUICK.map((q) => (
-          <button key={q} type="button" className="blin-press" onClick={() => { setText(q); taRef.current?.focus(); }}
-            style={{ ...btnReset, height: 36, padding: "0 12px", borderRadius: 999, border: "none", background: O.card, color: O.text, fontFamily: N.font, fontSize: 14, lineHeight: "20px", cursor: "pointer" }}>
-            {q}
-          </button>
-        ))}
-      </div>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 8, paddingTop: 12, flex: "none" }}>
         <input ref={fileRef} type="file" multiple tabIndex={-1} aria-hidden style={hiddenFileInput} onChange={(e) => addFiles(e.target.files)} />
         <button type="button" onClick={() => fileRef.current?.click()} aria-label="Прикрепить файл" className="blin-press"
           style={{ ...btnReset, flex: "none", width: 48, height: 48, borderRadius: "50%", border: "none", background: O.card, color: O.muted, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
-          <MSIcon name="attach_file" style={{ fontSize: 24, transform: "rotate(45deg)", fontVariationSettings: "'wght' 300" }} />
+          <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: "block" }}><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
         </button>
         <textarea ref={taRef} value={text} onChange={onText} rows={1} placeholder="Сообщение..."
           onKeyDown={(e) => {

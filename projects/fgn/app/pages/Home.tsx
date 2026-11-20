@@ -833,7 +833,7 @@ export default function HomePage() {
             <FgnMenuRow icon="gift" title="Активировать подарок" onClick={() => navigate("/gift/activate")} />
             <FgnMenuRow icon="bag" title="Купить подарок" onClick={() => navigate("/gift/buy")} />
             <FgnMenuRow icon="gift" title="Мои подарки" onClick={() => navigate("/gifts")} />
-            <FgnMenuRow icon="ticket" title="Ввести промокод" subtitle="Промокод на дни к подписке" onClick={() => navigate("/promocode")} />
+            <FgnMenuRow icon="ticket" title="Активировать промокод" onClick={() => navigate("/promocode")} />
           </div>
         </FgnSheet>
       ) : null}

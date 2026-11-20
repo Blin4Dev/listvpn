@@ -618,6 +618,7 @@ export default function HomePage() {
         <NoirSheet title="Подарки" onClose={() => setGiftsMenu(false)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <NoirRow icon="redeem" title="Активировать подарок" onClick={() => navigate("/gift/activate")} />
+            <NoirRow icon="sell" title="Активировать промокод" onClick={() => navigate("/promocode")} />
             <NoirRow icon="shopping_bag" title="Купить подарок" onClick={() => navigate("/gift/buy")} />
             <NoirRow icon="card_giftcard" title="Мои подарки" onClick={() => navigate("/gifts")} />
           </div>

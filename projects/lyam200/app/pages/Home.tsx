@@ -407,6 +407,7 @@ function GiftsMenu({ onClose, go }: { onClose: () => void; go: (path: string) =>
     <OSheet title="Подарки" onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12, paddingTop: 13, borderTop: `1px solid ${O.border}` }}>
         <OSheetRow icon="gift" title="Активировать подарок" onClick={() => go("/gift/activate")} />
+        <OSheetRow icon="🏷️" title="Активировать промокод" onClick={() => go("/promocode")} />
         <OSheetRow icon="shopping-bag" title="Купить подарок" onClick={() => go("/gift/buy")} />
         <OSheetRow icon="ticket" title="Мои подарки" onClick={() => go("/gifts")} />
       </div>

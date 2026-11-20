@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useSmartBack } from "../utils/navigation";
 import { redeemPromo, type DayGift } from "../utils/api";
 import { DayGiftSheet } from "../components/DayGiftSheet";
@@ -15,6 +15,8 @@ type Result = { kind: "gift"; until?: string } | { kind: "discount"; percent: nu
 export default function Promocode() {
   const goBack = useSmartBack("/");
   const navigate = useNavigate();
+  // /promocode — «Активировать промокод», /gift/activate — «Активировать подарок» (экран один, код любой)
+  const isPromo = useLocation().pathname.startsWith("/promocode");
   const [params] = useSearchParams();
   const [code, setCode] = useState(() => (params.get("code") || "").toUpperCase());
   const [busy, setBusy] = useState(false);
@@ -64,14 +66,14 @@ export default function Promocode() {
     <NoirScreen>
       <NoirBack onClick={goBack} />
       <div style={{ fontSize: 24, fontWeight: 600, lineHeight: "32px", paddingTop: 6, color: N.text, marginBottom: 16 }}>
-        Активировать подарок
+        {isPromo ? "Активировать промокод" : "Активировать подарок"}
       </div>
 
       <input
         value={code}
         onChange={(e) => { setCode(e.target.value.toUpperCase().replace(/\s+/g, "")); setErr(""); }}
         onKeyDown={(e) => { if (e.key === "Enter") void activate(); }}
-        placeholder="Код подарка"
+        placeholder={isPromo ? "Промокод" : "Код подарка"}
         autoCapitalize="characters"
         autoCorrect="off"
         spellCheck={false}
