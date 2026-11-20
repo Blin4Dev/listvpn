@@ -2,6 +2,7 @@
   "id": "lyam200",
   "name": "ЛЯМ200 VPN",
   "order": 5,
+  "rw_username_prefix": "lyam_",
   "channel": {
     "id": "",
     "url": ""
