@@ -131,9 +131,7 @@ export default function DevicesLists() {
       )}
 
       <div style={{ ...rise(devices.length + 1), marginTop: 32 }}>
-        {canDelete ? (
-          <NoirButton onClick={() => setReissue(true)}>Сбросить ключ</NoirButton>
-        ) : (
+        {canDelete ? null : (
           <div style={{ fontSize: 14.5, lineHeight: 1.5, color: N.muted }}>
             Устройства общие для семьи — отвязывает их владелец подписки. Докупить слот можно и вам.
           </div>

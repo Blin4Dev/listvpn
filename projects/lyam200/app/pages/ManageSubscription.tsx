@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, SUPPORT_PREFILL_KEY, type TrafficInfo } from "../utils/api";
+import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, type TrafficInfo } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
 import ReissueKey from "../components/ReissueKey";
@@ -204,12 +204,6 @@ export default function ManageSubscription() {
       <div style={rise(2)}>
         <OLabel>Трафик</OLabel>
         <TrafficRow name="Основной" value={trafficText(traffic)} style={{ marginTop: 8 }} />
-        <ResetRow
-          onClick={() => {
-            try { sessionStorage.setItem(SUPPORT_PREFILL_KEY, "Здравствуйте. Прошу сбросить трафик по моей подписке."); } catch { /* ignore */ }
-            navigate("/support");
-          }}
-        />
       </div>
 
       <div style={{ ...rise(3), display: "flex", flexDirection: "column", gap: 8, paddingTop: 16 }}>
@@ -222,7 +216,6 @@ export default function ManageSubscription() {
         {canBuyDevices ? <DarkButton icon="smartphone" onClick={() => navigate("/subscription/increase")}>Купить устройства</DarkButton> : null}
         <DarkButton icon="monitor-smartphone" onClick={() => navigate("/subscription/devices")}>Управление устройствами</DarkButton>
         <DarkButton icon="rotate-ccw" onClick={() => setSheet("reissue")}>Сбросить ключ</DarkButton>
-        <DarkButton icon="key-round" onClick={() => setSheet("key")}>Как вставить ключ</DarkButton>
       </div>
 
       {sheet === "setup" && <SetupSheet onClose={closeSheet} />}
@@ -260,27 +253,6 @@ function TrafficRow({ name, value, style }: { name: string; value: string; style
       <span style={{ fontSize: 14, lineHeight: "20px" }}>{name}</span>
       <span style={{ fontSize: 14, lineHeight: "20px", color: O.muted, whiteSpace: "nowrap" }}>{value}</span>
     </OCard>
-  );
-}
-
-function ResetRow({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="blin-press"
-      style={{
-        appearance: "none", WebkitAppearance: "none", WebkitTapHighlightColor: "transparent", outline: "none", margin: 0, boxSizing: "border-box",
-        width: "100%", minHeight: 76, padding: 16, border: "none", borderRadius: 16, background: O.card, color: O.text, fontFamily: O.font,
-        display: "flex", alignItems: "center", gap: 12, textAlign: "left", cursor: "pointer",
-      }}
-    >
-      <OIcon name="rotate-ccw" size={16} color={O.muted} />
-      <span style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontSize: 14, fontWeight: 500, lineHeight: "20px" }}>Сбросить трафик</span>
-        <span style={{ fontSize: 14, lineHeight: "20px", color: O.muted }}>Сброс по заявке в поддержку.</span>
-      </span>
-    </button>
   );
 }
 

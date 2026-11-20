@@ -4,7 +4,7 @@ import App from "./App";
 import Site from "./site/Site";
 import "./global.css";
 import { initTelegramViewport, initStageScale, isTelegramClient, isTelegramShell } from "./utils/telegram";
-import { captureWebRef } from "./utils/api";
+import { captureWebRef, resolveSiteRef } from "./utils/api";
 import { hasFeature, PROJECT_ID } from "./utils/brand";
 
 // в Telegram Mini App — приложение; в обычном браузере у проекта с features.site — сайт.
@@ -123,6 +123,7 @@ function Root() {
     if (site === null) return;
     applyChrome(site);
     captureWebRef();
+    if (site) void resolveSiteRef();
     requestAnimationFrame(() => document.getElementById("blin-boot")?.remove());
   }, [site]);
 

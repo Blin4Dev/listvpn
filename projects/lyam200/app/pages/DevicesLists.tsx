@@ -101,11 +101,6 @@ export default function DevicesLists() {
           <div style={{ fontSize: 14, lineHeight: "22.75px", color: O.muted, textAlign: "center" }}>
             Пока нет подключённых устройств. Они появятся здесь после первого подключения к VPN.
           </div>
-          {canDelete ? (
-            <div style={{ paddingTop: 32, alignSelf: "stretch" }}>
-              <OButton tone="dark" onClick={() => setReissue(true)}>Перевыпустить ключ</OButton>
-            </div>
-          ) : null}
         </div>
       ) : (
         <div style={{ paddingTop: 16 }}>
@@ -140,7 +135,7 @@ export default function DevicesLists() {
           </div>
           <div style={{ ...rise(devices.length + 1), display: "flex", flexDirection: "column", gap: 8, paddingTop: 16 }}>
             <OButton tone="red" onClick={() => navigate("/subscription?setup=1")}>Подключить это устройство</OButton>
-            {canDelete ? <OButton tone="dark" onClick={() => setReissue(true)}>Перевыпустить ключ</OButton> : (
+            {canDelete ? null : (
               <div style={{ fontSize: 14, lineHeight: "20px", color: O.muted }}>Устройства общие для семьи — отвязывает их владелец подписки.</div>
             )}
           </div>

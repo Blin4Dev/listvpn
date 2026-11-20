@@ -220,7 +220,6 @@ export default function ManageSubscription() {
         ) : null}
         <NoirRow icon="desktop_windows" title="Управление устройствами" onClick={() => navigate("/subscription/devices")} />
         <NoirRow icon="key" title="Сбросить ключ" onClick={() => setSheet("reissue")} />
-        <NoirRow icon="chat_bubble" title="Как вставить ключ" onClick={() => setSheet("key")} />
       </div>
 
       {sheet === "setup" && <SetupSheet onClose={closeSheet} />}

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, SUPPORT_PREFILL_KEY, type TrafficInfo } from "../utils/api";
+import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, type TrafficInfo } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
 import ReissueKey from "../components/ReissueKey";
@@ -194,15 +194,6 @@ export default function ManageSubscription() {
       <div style={rise(2)}>
         <OLabel style={{ paddingTop: 20, paddingLeft: 4, fontSize: 14, fontWeight: 400, lineHeight: "20px", letterSpacing: 0 }}>Трафик</OLabel>
         <TrafficRow name="Основной" value={trafficText(traffic)} style={{ marginTop: 8 }} />
-        <OMenuRow
-          title="Сбросить трафик"
-          subtitle="Сброс по заявке в поддержку."
-          chevron
-          onClick={() => {
-            try { sessionStorage.setItem(SUPPORT_PREFILL_KEY, "Здравствуйте. Прошу сбросить трафик по моей подписке."); } catch { /* ignore */ }
-            navigate("/support");
-          }}
-        />
       </div>
 
       <div style={{ ...rise(3), display: "flex", flexDirection: "column", gap: 12, paddingTop: 16 }}>
@@ -215,7 +206,6 @@ export default function ManageSubscription() {
         {canBuyDevices ? <DarkButton icon="square" onClick={() => navigate("/subscription/increase")}>Купить устройства</DarkButton> : null}
         <DarkButton icon="monitor" onClick={() => navigate("/subscription/devices")}>Управление устройствами</DarkButton>
         <DarkButton icon="refresh-cw" onClick={() => setSheet("reissue")}>Сбросить ключ</DarkButton>
-        <DarkButton icon="key-round" onClick={() => setSheet("key")}>Как вставить ключ</DarkButton>
       </div>
 
       {sheet === "setup" && <SetupSheet onClose={closeSheet} />}
@@ -349,7 +339,6 @@ function QrSheet({ onClose, onHowTo }: { onClose: () => void; onHowTo: () => voi
         {link || " "}
       </div>
       <div style={{ paddingTop: 16 }}><CopyButton text={link} label="Скопировать ключ" /></div>
-      <div style={{ paddingTop: 12 }}><OButton tone="dark" onClick={onHowTo}>Как вставить ключ</OButton></div>
     </OSheet>
   );
 }

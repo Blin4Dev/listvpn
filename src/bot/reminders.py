@@ -106,6 +106,25 @@ def markup_segments(src: str) -> list[tuple[str, Optional[dict[str, Any]]]]:
     return out
 
 
+def own_text(key: str) -> str:
+    """свой текст проекта для напоминания: project.json → bot.reminders.<key> (пусто — стандартный)."""
+    return str(((projects.current().cfg.get("bot") or {}).get("reminders") or {}).get(key) or "")
+
+
+def build_own(src: str, emoji: tuple[str, str], **values: Any) -> tuple[str, list[dict[str, Any]]]:
+    """свой текст: {emoji} — тот же premium-эмодзи, что в стандартном сообщении; {left} и т.п. — подстановки;
+    **жирный**, ![x](tg://emoji?id=…) — как в markup_segments."""
+    for k, v in values.items():
+        src = src.replace("{" + k + "}", str(v))
+    out: list[tuple[str, Optional[dict[str, Any]]]] = []
+    parts = src.split("{emoji}")
+    for i, part in enumerate(parts):
+        if i:
+            out.append((emoji[0], {"type": "custom_emoji", "custom_emoji_id": emoji[1]}))
+        out.extend(markup_segments(part))
+    return _build(out)
+
+
 def _plural_hours(n: int) -> str:
     """русская форма: 1 час / 2 часа / 5 часов."""
     n = abs(int(n))
@@ -145,6 +164,11 @@ def _message_for(stage: str, remaining_sec: float, no_renew: bool = False) -> tu
     if no_renew:
         return _message_no_renew(stage, remaining_sec)
     bold = {"type": "bold"}
+    if stage in ("3d", "2d", "1d") and own_text("expiry"):
+        left = {"3d": "3 дня", "2d": "2 дня"}.get(stage) or _plural_hours(max(1, math.ceil(remaining_sec / _H)))
+        return build_own(own_text("expiry"), ("⚠️", EMOJI_WARN_HARD if stage == "1d" else EMOJI_WARN_SOFT), left=left)
+    if stage == "expired" and own_text("expired"):
+        return build_own(own_text("expired"), ("⛔️", EMOJI_STOP))
     if stage == "3d":
         return _build([
             ("⚠️", {"type": "custom_emoji", "custom_emoji_id": EMOJI_WARN_SOFT}),
@@ -337,7 +361,7 @@ def _ob_message(stage: str) -> tuple[str, list[dict[str, Any]]]:
     # свой текст проекта: project.json → bot.onboarding.<этап> (у FGN — свои m30/h24/h48/h71)
     own = ((projects.current().cfg.get("bot") or {}).get("onboarding") or {}).get(stage)
     if own:
-        return _build(markup_segments(str(own)))
+        return build_own(str(own), (OB_CHAR[stage], OB_EMOJI[stage]))
     b = {"type": "bold"}
     em = {"type": "custom_emoji", "custom_emoji_id": OB_EMOJI[stage]}
     ch = OB_CHAR[stage]
@@ -644,6 +668,8 @@ def _plural_days(n: int) -> str:
 
 def _deletion_warning(days_left: int) -> tuple[str, list[dict[str, Any]]]:
     bold = {"type": "bold"}
+    if own_text("deletion_warning"):
+        return build_own(own_text("deletion_warning"), ("🚨", EMOJI_SIREN), left=_plural_days(days_left))
     return _build([
         ("🚨", {"type": "custom_emoji", "custom_emoji_id": EMOJI_SIREN}),
         (" ", None),
@@ -654,6 +680,8 @@ def _deletion_warning(days_left: int) -> tuple[str, list[dict[str, Any]]]:
 
 
 def _deleted_message() -> tuple[str, list[dict[str, Any]]]:
+    if own_text("deleted"):
+        return build_own(own_text("deleted"), ("⛔️", EMOJI_STOP))
     return _build([
         ("⛔️", {"type": "custom_emoji", "custom_emoji_id": EMOJI_STOP}),
         (" ", None),

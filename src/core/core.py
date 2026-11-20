@@ -62,8 +62,10 @@ except ImportError:
 
 try:
     from . import reflevels
+    from . import ambassadors  # type: ignore
 except ImportError:
     import reflevels  # type: ignore
+    import ambassadors  # type: ignore
 
 try:
     from . import ratelimit
@@ -551,7 +553,7 @@ def validate_webapp_init_data(init_data: str) -> dict[str, Any]:
                 user = json.loads(user_raw)
             except json.JSONDecodeError:
                 user = {"id": 0}
-            return {"user": user}
+            return {"user": user, "raw": parsed}
         raise HTTPException(503, detail={"message": "TELEGRAM_BOT_TOKEN не задан"})
 
     parsed = dict(parse_qsl(init_data, keep_blank_values=True))
@@ -4637,6 +4639,7 @@ def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[st
         "partner_rate": user.get("partner_rate", 25),
         "partner_balance": user.get("partner_balance", 0),
         "is_partner": bool(user.get("is_partner")),
+        "ambassador": _ambassador_panel(user),
         "ban_reason": user.get("ban_reason") if user.get("is_banned") else None,
         "blacklist_reason": blacklist.reason_for(user.get("telegram_id")) if user.get("telegram_id") else None,
         "blacklist_ignored": bool(user.get("blacklist_ignored")),
@@ -4708,6 +4711,61 @@ def _ban_account(user: dict[str, Any], reason: Optional[str], p: dict[str, Any])
             client.disable_user(_rw_num_id(rw))
         except Exception:  # noqa: BLE001
             pass
+
+
+def _ambassador_panel(user: dict[str, Any]) -> dict[str, Any]:
+    with projects.use(projects.of(user)):
+        out = ambassadors.info(user)
+        out["default_tg_link"] = f"https://t.me/{P().bot_username}?start=ref_{int(user['id'])}" if P().bot_username else None
+        out["default_site_link"] = _site_ref_link(int(user["id"]))
+        out["has_site"] = bool(P().feature("site"))
+        out["bot_username"] = P().bot_username
+    return out
+
+
+class AmbassadorBody(BaseModel):
+    tg: Optional[str] = Field(None, max_length=400)
+    site: Optional[str] = Field(None, max_length=400)
+    rate: Optional[float] = Field(None, ge=0, le=100)  # None — не менять; 0 — ставка по уровню
+
+
+@app.put("/api/panel/users/{user_id}/ambassador")
+def panel_user_ambassador(user_id: int, body: AmbassadorBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """амбассадор: свои ссылки на бота и сайт + свой процент (вывод — обычный вывод реф. баланса)."""
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    if p["role"] == "operator":
+        raise HTTPException(403, detail={"message": "Оператору это действие недоступно"})
+    if is_admin(p) and not admin_has(p, "users.action.SET_PARTNER_RATE"):
+        raise HTTPException(403, detail={"message": "Нет права на это действие"})
+    with projects.use(projects.of(user)):
+        try:
+            ambassadors.update(user, body.tg, body.site)
+        except ambassadors.AmbassadorError as exc:
+            raise HTTPException(400, detail={"message": str(exc)})
+        if body.rate is not None:
+            reflevels._ensure_schema()
+            rate = float(body.rate)
+            db.execute("UPDATE users SET partner_rate = ?, partner_rate_custom = ? WHERE id = ?",
+                       (rate if rate > 0 else 25, 1 if rate > 0 else 0, user_id))
+    fresh = get_user(user_id) or user
+    return {"ambassador": _ambassador_panel(fresh), "partner_rate": fresh.get("partner_rate", 25)}
+
+
+@app.get("/api/panel/ambassadors")
+def panel_ambassadors(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    """амбассадоры проекта: ссылки, процент, приглашённые, заработано."""
+    out = []
+    for u in ambassadors.list_for(db.pid()):
+        with projects.use(projects.of(u)):
+            info = _ambassador_panel(u)
+        invited = db.fetchone("SELECT COUNT(*) AS c FROM users WHERE referred_by = ?", (u["id"],))["c"]
+        earned = reflevels.earnings(int(u["id"])).get("total", 0)
+        out.append({"id": u["id"], "username": u.get("username"), "telegram_id": u.get("telegram_id"),
+                    "email": u.get("email"), "partner_balance": u.get("partner_balance", 0),
+                    "invited": invited, "earned_total": earned, **info})
+    return {"items": out}
 
 
 @app.post("/api/panel/users/{user_id}/action")
@@ -7145,7 +7203,16 @@ def _resolve_app_user_from_email(email: str) -> dict[str, Any]:
 @app.post("/api/app/auth")
 def app_auth(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")) -> dict[str, Any]:
     data = validate_webapp_init_data(x_telegram_init_data or "")
+    tg_id = int((data.get("user") or {}).get("id") or 0)
+    existed = bool(tg_id and find_user_by_tg(tg_id))
     user = _resolve_app_user_from_tg(data.get("user") or {}, allow_banned=True)
+    start_param = str((data.get("raw") or {}).get("start_param") or "").strip()
+    if not existed and start_param:
+        try:
+            _apply_start_param_referral(user, start_param)
+            user = get_user(int(user["id"])) or user
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ambassador] start_param: {exc}", flush=True)
     # сессия-страховка, когда initdata протух
     token = create_app_session(int(user["id"]), "miniapp")
     return {"user": app_user_payload(user, "miniapp"), "token": token}
@@ -7162,11 +7229,53 @@ def _apply_web_referral(user_id: int, code: Optional[str]) -> None:
     ref = get_user(int(code)) if code.isdigit() else None
     if not ref:
         ref = db.fetchone("SELECT * FROM users WHERE referral_code = ?", (code.upper(),))
+    if not ref:
+        # амбассадор со ссылкой вида сайт/?ref=<своё слово>
+        try:
+            ref = ambassadors.by_site("/", urlencode_pairs([("ref", code)]), projects.of(user))
+        except Exception:  # noqa: BLE001
+            ref = None
     if not ref or int(ref["id"]) == int(user_id) or projects.of(ref) != projects.of(user):
         return
     if ref.get("referred_by") and int(ref["referred_by"]) == int(user_id):
         return
     db.execute("UPDATE users SET referred_by = ? WHERE id = ? AND referred_by IS NULL", (ref["id"], user_id))
+
+
+def urlencode_pairs(pairs: list[tuple[str, str]]) -> str:
+    from urllib.parse import urlencode
+    return urlencode(pairs)
+
+
+def _apply_start_param_referral(user: dict[str, Any], start_param: str) -> None:
+    """мини-приложение открыто по ссылке ?startapp=<…> новым пользователем: амбассадор или ref_<id>."""
+    sp = str(start_param or "").strip()
+    if not sp or user.get("referred_by"):
+        return
+    ref = None
+    try:
+        ref = ambassadors.by_tg(sp, projects.of(user))
+    except Exception:  # noqa: BLE001
+        ref = None
+    if not ref and sp.startswith("ref_") and sp[4:].isdigit():
+        ref = get_user(int(sp[4:]))
+    if not ref or int(ref["id"]) == int(user["id"]) or projects.of(ref) != projects.of(user):
+        return
+    if ref.get("referred_by") and int(ref["referred_by"]) == int(user["id"]):
+        return
+    db.execute("UPDATE users SET referred_by = ? WHERE id = ? AND referred_by IS NULL", (ref["id"], user["id"]))
+
+
+@app.get("/api/app/site-ref")
+def app_site_ref(path: str = Query("/", max_length=400), q: str = Query("", max_length=600)) -> dict[str, Any]:
+    """сайт открыт по ссылке амбассадора (любой путь/параметры) → номер амбассадора для реф. привязки."""
+    if not P().feature("site"):
+        return {"ref": None}
+    try:
+        amb = ambassadors.by_site(path, q.lstrip("?"), db.pid())
+    except Exception:  # noqa: BLE001
+        amb = None
+    return {"ref": str(amb["id"]) if amb else None}
 
 
 def _require_captcha(token: Optional[str], request: Optional[Request]) -> None:
@@ -8847,11 +8956,12 @@ def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
         "friends": reflevels.friends_preview(uid) if invited else [],
         "earned_month": earn["month"],
         "rewards": reflevels.rewards_state(fresh, active),
-        # реф. ссылка: t.me/<bot>?start=ref_<id>
+        # реф. ссылка: t.me/<bot>?start=ref_<id>; у амбассадора — своя из панели
         "code": str(uid),
-        "link": f"https://t.me/{P().bot_username}?start=ref_{uid}",
+        "link": ambassadors.tg_link(fresh) or f"https://t.me/{P().bot_username}?start=ref_{uid}",
         # у проекта есть сайт: ссылка на сайт (сайт сохранит ?ref= и привяжет друга при регистрации)
-        "site_link": _site_ref_link(uid),
+        "site_link": (ambassadors.site_link(fresh) if P().feature("site") else None) or _site_ref_link(uid),
+        "ambassador": bool(fresh.get("amb_tg") or fresh.get("amb_site")),
         "is_partner": bool(fresh.get("is_partner")),
         "partner_balance": fresh.get("partner_balance", 0),
         "partner_rate": fresh.get("partner_rate", 25),

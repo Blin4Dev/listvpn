@@ -29,6 +29,7 @@ import forum  # type: ignore
 import blacklist  # type: ignore
 import names  # type: ignore
 import resale  # type: ignore
+import ambassadors  # type: ignore
 
 API_BASE = "https://api.telegram.org"
 
@@ -140,11 +141,14 @@ def _welcome_text_entities() -> tuple[str, list[dict[str, Any]]]:
     if custom:
         segments = reminders.markup_segments(custom)
     else:
+        # первый эмодзи: project.json → bot.welcome_emoji (обычный или ![x](tg://emoji?id=…)), иначе лиса
+        own_emoji = P().bot_text("welcome_emoji", "")
         segments = [
-            ("🦊", {"type": "custom_emoji", "custom_emoji_id": EMOJI_FOX}),
+            *(reminders.markup_segments(own_emoji) if own_emoji
+              else [("🦊", {"type": "custom_emoji", "custom_emoji_id": EMOJI_FOX})]),
             (" ", None),
             (P().bot_text("welcome_title", "Добро пожаловать!"), {"type": "bold"}),
-            ("\n\n" + P().bot_text("welcome_text", "Пришло время для по-настоящему качественного сервиса."), None),
+            (P().bot_text("welcome_gap", "\n\n") + P().bot_text("welcome_text", "Пришло время для по-настоящему качественного сервиса."), None),
         ]
     text = ""
     entities: list[dict[str, Any]] = []
@@ -292,7 +296,16 @@ def handle_start(message: dict[str, Any]) -> None:
             (db.utcnow_iso(), user["id"]),
         )
 
-    if payload.startswith("ref_") and user:
+    amb = None
+    if payload and user:
+        try:
+            amb = ambassadors.by_tg(payload, P().id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ambassador] {exc}", flush=True)
+    if amb:
+        # своя ссылка амбассадора (t.me/бот?start=<что угодно>) — как реф. ссылка на него
+        _apply_referral(user, str(amb["id"]), is_new)
+    elif payload.startswith("ref_") and user:
         _apply_referral(user, payload[4:].strip(), is_new)
     elif payload.startswith("trk_") and user:
         _apply_tracking(user, payload[4:].strip(), frm, is_new)

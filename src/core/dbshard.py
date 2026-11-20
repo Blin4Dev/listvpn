@@ -660,10 +660,17 @@ class ShardedConnection:
 
         if verb in ("INSERT", "REPLACE"):
             rest = masked[b:]
-            # INSERT … SELECT: в каждом файле — из строк этого же файла
             is_select = re.match(r"\s*(\([^)]*\)\s*)?(SELECT|WITH)\b", rest, re.I | re.S)
             if is_select:
-                return self._each(lambda alias: at(alias, sql[:b] + _qualify_from(sql[b:], alias)), params)
+                sel_at = b + is_select.start(2)
+                if _top_level_from_project(masked[sel_at:]):
+                    # копирование строк таблиц проекта (миграции, заполнение): в каждом файле — из строк этого же файла
+                    return self._each(lambda alias: at(alias, sql[:b] + _qualify_from(sql[b:], alias)), params)
+                if _has_top_level(masked[sel_at:], ("ON CONFLICT", "RETURNING")):
+                    raise sqlite3.OperationalError("dbshard: INSERT … SELECT без таблиц проекта с ON CONFLICT/RETURNING не поддерживается")
+                # INSERT … SELECT ?, ?, … WHERE (условие): выборка — один раз, как в одной базе;
+                # каждая строка — в файл своего проекта (как INSERT … VALUES)
+                return self._insert_rows(sql, masked, params, table, b, sel_at, m.group("verb"))
             vals = self.parse_insert(sql, params, table)
             pid = self.target_for_insert(sql, params, table, vals) or self._context_pid()
             alias = self.files[pid]
@@ -686,6 +693,31 @@ class ShardedConnection:
         if verb == "UPDATE" and base_name(table) in GLOBAL_UNIQUE:
             self._check_update_unique(sql, masked, params, table, b)
         return self._each(lambda alias: at(alias), params)
+
+    def _insert_rows(self, sql: str, masked: str, params: Any, table: str, name_end: int, sel_at: int, verb: str):
+        cm = re.match(r"\s*\(([^)]*)\)", masked[name_end:sel_at])
+        cols = ([c.strip().strip('"`[]') for c in sql[name_end + cm.start(1):name_end + cm.end(1)].split(",")]
+                if cm else self._table_columns(table))
+        rows = self.raw.execute(sql[sel_at:], params).fetchall()
+        head = re.sub(r"\s+", " ", verb.strip())
+        ins = (f'{head} "{table}" (' + ", ".join(f'"{c}"' for c in cols) + ") VALUES ("
+               + ", ".join("?" for _ in cols) + ")")
+        self.raw.execute("SAVEPOINT dbshard_rows")
+        total, last = 0, None
+        try:
+            for r in rows:
+                cur = self._write(ins, tuple(r))
+                n = self.raw.execute("SELECT changes()").fetchone()[0] if not isinstance(cur, _Rows) else cur.rowcount
+                total += int(n or 0)
+                if n and not isinstance(cur, _Rows):
+                    last = cur.lastrowid
+        except BaseException:
+            self.raw.execute("ROLLBACK TO dbshard_rows")
+            self.raw.execute("RELEASE dbshard_rows")
+            raise
+        self.raw.execute("RELEASE dbshard_rows")
+        self._multi_changes = total
+        return _Rows([], total, last)
 
     def _unique_clash(self, table: str, vals: dict[str, tuple[bool, Any]], alias: str):
         """значение уникального столбца уже есть в другом файле → (столбец, [(файл, столбец, значение)])."""
@@ -888,6 +920,38 @@ class _CursorShim:
 
     def close(self) -> None:
         pass
+
+
+def _top_level_spans(masked: str) -> list[tuple[int, int]]:
+    """куски текста вне скобок."""
+    spans, depth, start = [], 0, 0
+    for i, ch in enumerate(masked):
+        if ch == "(":
+            if depth == 0:
+                spans.append((start, i))
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                start = i + 1
+    if depth == 0:
+        spans.append((start, len(masked)))
+    return spans
+
+
+def _top_level_text(masked: str) -> str:
+    return " ".join(masked[a:b] for a, b in _top_level_spans(masked))
+
+
+def _top_level_from_project(masked_select: str) -> bool:
+    """у SELECT верхнего уровня во FROM/JOIN есть таблица проекта (копирование строк)."""
+    top = _top_level_text(masked_select)
+    return any(n.lower() in PROJECT_SET for n in re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_]\w*)", top, re.I))
+
+
+def _has_top_level(masked_select: str, words: tuple[str, ...]) -> bool:
+    top = re.sub(r"\s+", " ", _top_level_text(masked_select)).upper()
+    return any(w in top for w in words)
 
 
 def _qualify_from(sql: str, alias: str) -> str:

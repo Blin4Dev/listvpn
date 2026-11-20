@@ -425,6 +425,13 @@ export default function Site() {
   const account = authed ? { href: LINKS.cabinet, label: "Кабинет" } : { href: loginHref, label: "Войти" };
 
   // пришёл по реф. ссылке и ещё не вошёл — в бота с тем же рефералом (бот засчитает его новому пользователю)
+  // реферер мог определиться уже после отрисовки (ссылка амбассадора) — перерисовать кнопку бота
+  const [, setRefTick] = useState(0);
+  useEffect(() => {
+    const on = () => setRefTick((x) => x + 1);
+    window.addEventListener("blin-ref", on);
+    return () => window.removeEventListener("blin-ref", on);
+  }, []);
   const webRef = authed ? "" : getWebRef();
   const botName = bot || DEFAULT_BOT;
   const botUrl = botName ? `https://t.me/${botName}${/^\d{1,12}$/.test(webRef) ? `?start=ref_${webRef}` : ""}` : "";

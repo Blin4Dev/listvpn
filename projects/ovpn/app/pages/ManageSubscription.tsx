@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import { useSmartBack } from "../utils/navigation";
-import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, SUPPORT_PREFILL_KEY, type TrafficInfo } from "../utils/api";
+import { appFetch, fetchAppLink, fetchTraffic, formatBytesRu, type TrafficInfo } from "../utils/api";
 import { formatDateRu } from "../utils/date";
 import SetupSheet from "../components/SetupSheet";
 import ReissueKey from "../components/ReissueKey";
@@ -194,15 +194,6 @@ export default function ManageSubscription() {
       <div style={rise(2)}>
         <OLabel>Трафик</OLabel>
         <TrafficRow name="Основной" value={trafficText(traffic)} style={{ marginTop: 8 }} />
-        <OMenuRow
-          title="Сбросить трафик"
-          subtitle="Сброс по заявке в поддержку."
-          chevron
-          onClick={() => {
-            try { sessionStorage.setItem(SUPPORT_PREFILL_KEY, "Здравствуйте. Прошу сбросить трафик по моей подписке."); } catch { /* ignore */ }
-            navigate("/support");
-          }}
-        />
       </div>
 
       <div style={{ ...rise(3), display: "flex", flexDirection: "column", gap: 12, paddingTop: 12 }}>
@@ -215,7 +206,6 @@ export default function ManageSubscription() {
         {canBuyDevices ? <OMenuRow icon="smartphone" title="Купить устройства" onClick={() => navigate("/subscription/increase")} /> : null}
         <OMenuRow icon="monitor" title="Управление устройствами" onClick={() => navigate("/subscription/devices")} />
         <OMenuRow icon="refresh-cw" title="Сбросить ключ" onClick={() => setSheet("reissue")} />
-        <OMenuRow icon="key-round" title="Как вставить ключ" onClick={() => setSheet("key")} />
       </div>
 
       {sheet === "setup" && <SetupSheet onClose={closeSheet} />}

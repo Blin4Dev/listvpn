@@ -11,6 +11,7 @@ import type { PaymentRow, ToastType } from '../../lib/types';
 import { can, canUserAction, isAdmin, isOwner, useMe } from '../../lib/access';
 import { ExchangeModal, TransferModal } from './SubscriptionActions';
 import { PaymentActions } from '../../components/PaymentActions';
+import { AmbassadorCard, type AmbassadorInfo } from './AmbassadorCard';
 
 export interface UserDetailData {
   id: number; telegram_id: number | null; username: string | null;
@@ -22,6 +23,7 @@ export interface UserDetailData {
   moderation?: { id: number; kind: string; label: string; reason: string | null; sub_id: number | null; actor: string | null; actor_name: string | null; created_at: string | null }[];
   aa_warning?: { sub_id: number; at: string; reason: string | null; grace_until: string; valid_until: string } | null;
   balance: number; partner_rate: number;
+  ambassador?: AmbassadorInfo;
   partner_balance: number; is_partner: boolean; has_trial: boolean; trial_resettable?: boolean;
   trial_status?: Record<string, { available: boolean; reason: string | null; text: string }>;
   referrals: { id: number; telegram_id: number | null; username: string | null; email: string | null; full_name: string | null }[];
@@ -333,6 +335,11 @@ export const UserDetailPage: React.FC<{
           </div>
         </DCard>
       </div>
+
+      {detail.ambassador && (
+        <AmbassadorCard userId={userId} info={detail.ambassador} canEdit={canEdit && ownerOr('users.action.SET_PARTNER_RATE')}
+          onSaved={() => void load()} onToast={onToast} />
+      )}
 
       <DCard title="Скидка / Промокод" icon={Gift}>
         {detail.discount ? (

@@ -521,6 +521,30 @@ export function captureWebRef(): void {
   }
 }
 
+// сайт открыт по ссылке амбассадора (любой путь/параметры, заданные в панели): запоминаем его номер.
+// Ссылка амбассадора важнее «сырого» ?ref= из этого же адреса; реферер, сохранённый раньше, не меняем.
+const SITE_PAGES = /^\/(login|support|tariffs|download|rules|cabinet|gifts|checkout|payment)(\/|$)/;
+export async function resolveSiteRef(): Promise<void> {
+  try {
+    const path = window.location.pathname || "/";
+    const search = window.location.search || "";
+    if (path === "/" && !search) return;
+    const rawRef = new URLSearchParams(search).get("ref") || "";
+    const stored = localStorage.getItem("blinvpn_ref") || "";
+    if (stored && stored !== rawRef) return;
+    const r = await appFetch<{ ref: string | null }>(`/site-ref?path=${encodeURIComponent(path)}&q=${encodeURIComponent(search.replace(/^\?/, ""))}`);
+    if (!r?.ref) return;
+    localStorage.setItem("blinvpn_ref", r.ref);
+    // свой адрес амбассадора (fgn.best/blogger) — это главная: в адресной строке оставляем «/»
+    if (path !== "/" && !SITE_PAGES.test(path)) window.history.replaceState(null, "", "/" + window.location.hash);
+    // перерисовать сайт: кнопка «Telegram bot» поведёт в бота уже с привязкой к амбассадору
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    window.dispatchEvent(new Event("blin-ref"));
+  } catch {
+    /* ignore */
+  }
+}
+
 export async function verifyEmailCode(email: string, code: string, captchaToken?: string): Promise<AppUser> {
   const ref = getWebRef();
   const body: Record<string, string> = { email, code };

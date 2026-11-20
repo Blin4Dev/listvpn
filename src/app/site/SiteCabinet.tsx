@@ -502,25 +502,7 @@ function SubLink({ nav, desktop }: { nav: CabNav; desktop: Desktop }) {
         </div>
 
         <div className="fs-cab-card">
-          <div className="fs-cab-k">Как вставить</div>
-          <div className="fs-howto" style={{ marginTop: 4 }}>
-            <div>
-              <i>1</i>
-              <div><b>Откройте хаб</b><span>Happ, Hiddify, Streisand или v2rayNG.</span></div>
-            </div>
-            <div>
-              <i>2</i>
-              <div><b>Добавьте подписку</b><span>Пункт «Добавить из буфера» или вставка ссылки.</span></div>
-            </div>
-            <div>
-              <i>3</i>
-              <div><b>Вставьте ссылку</b><span>Дальше соединение включается уже в хабе.</span></div>
-            </div>
-          </div>
-          <button type="button" className="fs-cab-link g" style={{ fontSize: 14.5 }} onClick={() => nav.go("/cabinet/key")}>
-            Подробная инструкция →
-          </button>
-          <div className="fs-cab-k" style={{ marginTop: 26 }}>Локации в подписке</div>
+          <div className="fs-cab-k">Локации в подписке</div>
           <div className="fs-locs">
             {LOCATIONS.map((l) => (
               <span key={l.name}>{l.flag} {l.name}</span>
