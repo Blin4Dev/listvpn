@@ -50,12 +50,16 @@ ARCHIVE_PREFIX = "legacy_lyam200_"       # полный архив старой 
 PAY_PREFIX = "lyam200old:"               # payment_id перенесённых платежей
 LABEL = "ЛЯМ200"                         # в заметках: «старый бот ЛЯМ200»
 SRC, SRC_TG = "lyam200", "lyam200-tg"    # rw_legacy_users.source
+# имена пользователей СТАРОГО бота в Remnawave: только такие привязываются (adopt и relink)
+OLD_RW_PREFIX = {"fgn": "user_", "lyam200": "lyaam200vpn_"}
+RW_PREFIX = "lyaam200vpn_"
 
 
 def configure(pid: str) -> None:
     """все имена — от проекта. Для fgn — ровно как в legacy_fgn.py (совместимость с уже сделанным переносом)."""
-    global PROJECT, SETTING, ARCHIVE_PREFIX, PAY_PREFIX, LABEL, SRC, SRC_TG
+    global PROJECT, SETTING, ARCHIVE_PREFIX, PAY_PREFIX, LABEL, SRC, SRC_TG, RW_PREFIX
     PROJECT = pid
+    RW_PREFIX = OLD_RW_PREFIX.get(pid, "")
     SETTING = f"legacy_{pid}_import"
     ARCHIVE_PREFIX = f"legacy_{pid}_"
     PAY_PREFIX = f"{pid}old:"
@@ -731,14 +735,23 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         "WHERE s.status IN ('Active', 'Expired') AND s.short_uuid IS NOT NULL AND s.rw_id IS NULL ORDER BY s.id")
     if args.limit:
         rows = rows[:args.limit]
-    log(f"К привязке: {len(rows)}{' (пробно, без изменений)' if args.dry_run else ''}")
+    log(f"К привязке: {len(rows)}{' (пробно, без изменений)' if args.dry_run else ''} · берём только {RW_PREFIX}…")
+    if not RW_PREFIX:
+        raise SystemExit("Не задан префикс имён старого бота в Remnawave: --rw-name-prefix")
     res = Counter()
     issues: list[str] = []
+    by_short: Optional[dict[str, dict[str, Any]]] = None
+    if len(rows) > 50:
+        # быстрее прочитать панель целиком (stream, ~1000 за запрос), чем по запросу на каждую подписку
+        by_short = {}
+        for x in sorted(_scan_rw(client), key=lambda x: int(x.get("id") or 0)):
+            if x.get("shortUuid"):
+                by_short.setdefault(str(x["shortUuid"]), x)   # shortUuid в панели уникален; на всякий — первый, как при поиске
     for i, r in enumerate(rows, 1):
         short, uid, tg = r["short"], int(r["uid"]), int(r["tg"])
         want = provisioning.rw_username(uid)
         try:
-            u = client.find_user_by_short_uuid(short)
+            u = by_short.get(str(short)) if by_short is not None else client.find_user_by_short_uuid(short)
         except Exception as exc:  # noqa: BLE001
             res["ошибка чтения"] += 1
             issues.append(f"sub {r['sid']} {short}: чтение: {exc}")
@@ -766,6 +779,11 @@ def cmd_adopt(args: argparse.Namespace) -> int:
                 and name not in provisioning.own_names(uid):
             res["уже batman_ другого"] += 1
             issues.append(f"sub {r['sid']} user {uid}: в Remnawave уже {name} — пропущено")
+            continue
+        if name not in provisioning.own_names(uid) and not is_old_name(name):
+            # ключ нашёлся, но создан не старым ботом этого проекта (другое имя) — не берём
+            res[f"имя не {RW_PREFIX}… — пропущено"] += 1
+            issues.append(f"sub {r['sid']} user {uid} tg {tg}: ключ {short} в Remnawave у {name!r} — не {RW_PREFIX}…, пропущено")
             continue
         other = db.fetchone("SELECT user_id FROM rw_legacy_users WHERE (rw_id = ? OR username = ?) AND user_id != ?",
                             (rw_num, name, uid))
@@ -808,7 +826,8 @@ def cmd_adopt(args: argparse.Namespace) -> int:
         res["привязан"] += 1
         if i % 200 == 0:
             log(f"  … {i}/{len(rows)}: {dict(res)}")
-        time.sleep(args.pause)
+        if by_short is None:
+            time.sleep(args.pause)
     # статусы пользователей после уточнения сроков
     import fulfillment  # type: ignore
     for uid in {int(r["uid"]) for r in rows}:
@@ -828,10 +847,67 @@ def cmd_adopt(args: argparse.Namespace) -> int:
 
 # ── relink: старый пользователь Remnawave по Telegram ID ──
 
-OLD_NAME_RE = re.compile(r"^user_[A-Za-z0-9_-]{6,}$")   # имена пользователей старого бота FGN в Remnawave
+def is_old_name(name: Any) -> bool:
+    """пользователь Remnawave, созданный старым ботом этого проекта: <префикс><что-то> (у FGN user_<код>,
+    у ЛЯМ200 lyaam200vpn_<…>). Префикс — --rw-name-prefix, по умолчанию из OLD_RW_PREFIX."""
+    n = str(name or "")
+    if not RW_PREFIX or not n.startswith(RW_PREFIX) or len(n) == len(RW_PREFIX):
+        return False
+    if RW_PREFIX == "user_":   # как в legacy_fgn.py
+        return bool(re.fullmatch(r"user_[A-Za-z0-9_-]{6,}", n))
+    return bool(re.fullmatch(re.escape(RW_PREFIX) + r"[A-Za-z0-9_-]+", n))
+
+
+_RW_SCAN: Optional[list[dict[str, Any]]] = None   # один проход по панели на запуск (link: adopt + relink)
 
 
 def _scan_rw(client: Any) -> list[dict[str, Any]]:
+    """все пользователи панели (только чтение). Remnawave 3.x: GET /api/users/stream — keyset-курсор по id,
+    до 1000 за запрос, страницы не «съезжают» при создании/удалении пользователей. Старая панель без stream —
+    прежний проход offset-страницами внахлёст."""
+    global _RW_SCAN
+    if _RW_SCAN is not None:
+        return _RW_SCAN
+    t0 = time.time()
+    try:
+        users = _scan_rw_stream(client)
+        how = "stream"
+    except Exception as exc:  # noqa: BLE001
+        log(f"  /api/users/stream недоступен ({exc}) — читаю постранично")
+        users = _scan_rw_offset(client)
+        how = "offset"
+    log(f"  панель прочитана ({how}): {len(users)} пользователей за {time.time() - t0:.0f} с")
+    _RW_SCAN = users
+    return users
+
+
+def _scan_rw_stream(client: Any) -> list[dict[str, Any]]:
+    seen: dict[str, dict[str, Any]] = {}
+    cursor: Any = None
+    for n in range(100000):
+        params: dict[str, Any] = {"size": 1000}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = client.get("/api/users/stream", params=params)
+        if isinstance(page, dict) and isinstance(page.get("response"), dict):
+            page = page["response"]
+        if not isinstance(page, dict) or not isinstance(page.get("users"), list):
+            raise RuntimeError(f"неожиданный ответ stream: {str(page)[:200]}")
+        for u in page["users"]:
+            if isinstance(u, dict) and u.get("id") is not None:
+                seen[str(u["id"])] = u
+        nxt = page.get("nextCursor")
+        if not page.get("hasMore") or nxt is None or not page["users"]:
+            break
+        if nxt == cursor:
+            raise RuntimeError(f"stream: курсор не двигается ({nxt})")
+        cursor = nxt
+        if n and n % 50 == 0:
+            log(f"  … прочитано {len(seen)}")
+    return list(seen.values())
+
+
+def _scan_rw_offset(client: Any) -> list[dict[str, Any]]:
     """все пользователи панели (только чтение), страницами внахлёст."""
     seen: dict[str, dict[str, Any]] = {}
     start, size, total = 0, 500, None
@@ -951,8 +1027,10 @@ def cmd_relink(args: argparse.Namespace) -> int:
         raise SystemExit("Сначала import")
     if not provisioning.is_configured():
         raise SystemExit("Remnawave не настроена")
+    if not RW_PREFIX:
+        raise SystemExit("Не задан префикс имён старого бота в Remnawave: --rw-name-prefix")
     client = remnawave.get_client()
-    log("Читаю всех пользователей Remnawave (только чтение)…")
+    log(f"Читаю всех пользователей Remnawave (только чтение), берём только {RW_PREFIX}…")
     rw_all = _scan_rw(client)
     bound = db.fetchall("SELECT user_id, rw_id, username, source FROM rw_legacy_users")
     bound_by_user = {int(r["user_id"]): r for r in bound}
@@ -971,7 +1049,7 @@ def cmd_relink(args: argparse.Namespace) -> int:
     by_tg: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for u in rw_all:
         name = str(u.get("username") or "")
-        if not OLD_NAME_RE.match(name) or int(u["id"]) in bound_ids:
+        if not is_old_name(name) or int(u["id"]) in bound_ids:
             continue
         if str(u.get("shortUuid") or "") in anti:
             continue
@@ -980,7 +1058,8 @@ def cmd_relink(args: argparse.Namespace) -> int:
         except ValueError:
             continue
         by_tg[tg].append(u)
-    log(f"В Remnawave: всего {len(rw_all)}, старых user_… с Telegram ID и без привязки — {sum(len(v) for v in by_tg.values())}")
+    log(f"В Remnawave: всего {len(rw_all)}, с именем {RW_PREFIX}…: {sum(1 for u in rw_all if is_old_name(u.get('username')))}, "
+        f"из них с Telegram ID и без привязки — {sum(len(v) for v in by_tg.values())}")
     users = db.fetchall(f"SELECT m.user_id, m.telegram_id FROM {ARCHIVE_PREFIX}map_users m ORDER BY m.user_id")
     merged = {int(r["user_id"]): r for r in db.fetchall(f"SELECT * FROM {ARCHIVE_PREFIX}merged_users")}
     mig_sub = {int(r["telegram_id"]): int(r["subscription_id"]) for r in db.fetchall(f"SELECT * FROM {ARCHIVE_PREFIX}map_subs")}
@@ -1095,7 +1174,8 @@ def cmd_relink(args: argparse.Namespace) -> int:
         done += 1
         if done % 500 == 0:
             log(f"  … {done}: {dict(res)}")
-        time.sleep(args.pause)
+        if live:
+            time.sleep(args.pause)   # истёкшие привязываются только записью в базу — панель не трогаем
     log(f"Итог: {dict(res)}")
     for line in issues[:100]:
         log("  " + line)
@@ -1314,6 +1394,8 @@ def cmd_link(args: argparse.Namespace) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Перенос старой базы бота (bot2.db) в проект новой платформы")
     ap.add_argument("--project", default="lyam200", help="проект платформы (fgn, lyam200, …)")
+    ap.add_argument("--rw-name-prefix", default=None,
+                    help="имена пользователей старого бота в Remnawave (по умолчанию: fgn → user_, lyam200 → lyaam200vpn_)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("check", "import", "verify"):
         s = sub.add_parser(name)
@@ -1333,7 +1415,10 @@ def main() -> int:
     if not projects.exists(args.project):
         raise SystemExit(f"Нет проекта {args.project}")
     configure(args.project)
-    log(f"Проект: {PROJECT} · архив {ARCHIVE_PREFIX}* · платежи {PAY_PREFIX}*")
+    global RW_PREFIX
+    if args.rw_name_prefix is not None:
+        RW_PREFIX = args.rw_name_prefix.strip()
+    log(f"Проект: {PROJECT} · архив {ARCHIVE_PREFIX}* · платежи {PAY_PREFIX}* · имена в Remnawave {RW_PREFIX or '—'}*")
     return {"check": cmd_check, "import": cmd_import, "adopt": cmd_adopt, "provision": cmd_provision,
             "verify": cmd_verify, "relink": cmd_relink, "link": cmd_link}[args.cmd](args)
 
