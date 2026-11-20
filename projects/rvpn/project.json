@@ -2,6 +2,7 @@
   "id": "rvpn",
   "name": "R-VPN",
   "order": 6,
+  "rw_username_prefix": "rvpn_",
   "channel": {
     "id": "",
     "url": ""
