@@ -51,7 +51,7 @@ PAY_PREFIX = "lyam200old:"               # payment_id перенесённых �
 LABEL = "ЛЯМ200"                         # в заметках: «старый бот ЛЯМ200»
 SRC, SRC_TG = "lyam200", "lyam200-tg"    # rw_legacy_users.source
 # имена пользователей СТАРОГО бота в Remnawave: только такие привязываются (adopt и relink)
-OLD_RW_PREFIX = {"fgn": "user_", "lyam200": "lyaam200vpn_"}
+OLD_RW_PREFIX = {"fgn": "user_", "lyam200": "lyaam200vpn_", "hustler": "HUSTLER_"}
 RW_PREFIX = "lyaam200vpn_"
 
 
@@ -370,7 +370,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     if not projects.exists(PROJECT):
         raise SystemExit(f"В сети нет проекта {PROJECT}")
     if db.get_setting(SETTING, ""):
-        raise SystemExit("Перенос уже сделан (настройка legacy_fgn_import). Повторно не запускаю.")
+        raise SystemExit(f"Перенос {PROJECT} уже сделан (настройка {SETTING}). Повторно не запускаю — дальше verify и link.")
     n = db.fetchone("SELECT COUNT(*) AS c FROM users WHERE project_id = ?", (PROJECT,))["c"]
     if n and not args.allow_existing:
         raise SystemExit(f"В {PROJECT} уже есть пользователи ({n}). Импорт рассчитан на пустой проект — "
@@ -1395,7 +1395,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Перенос старой базы бота (bot2.db) в проект новой платформы")
     ap.add_argument("--project", default="lyam200", help="проект платформы (fgn, lyam200, …)")
     ap.add_argument("--rw-name-prefix", default=None,
-                    help="имена пользователей старого бота в Remnawave (по умолчанию: fgn → user_, lyam200 → lyaam200vpn_)")
+                    help="имена пользователей старого бота в Remnawave (по умолчанию: fgn → user_, lyam200 → lyaam200vpn_, hustler → HUSTLER_)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("check", "import", "verify"):
         s = sub.add_parser(name)
