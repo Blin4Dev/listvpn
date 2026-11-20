@@ -51,7 +51,7 @@ PAY_PREFIX = "lyam200old:"               # payment_id перенесённых �
 LABEL = "ЛЯМ200"                         # в заметках: «старый бот ЛЯМ200»
 SRC, SRC_TG = "lyam200", "lyam200-tg"    # rw_legacy_users.source
 # имена пользователей СТАРОГО бота в Remnawave: только такие привязываются (adopt и relink)
-OLD_RW_PREFIX = {"fgn": "user_", "lyam200": "lyaam200vpn_", "hustler": "HUSTLER_"}
+OLD_RW_PREFIX = {"fgn": "user_", "lyam200": "lyaam200vpn_", "hustler": "HUSTLER_", "ovpn": "OEV_"}
 RW_PREFIX = "lyaam200vpn_"
 
 
@@ -1280,10 +1280,21 @@ def cmd_verify(args: argparse.Namespace) -> int:
                                           - float((merged.get(int(u["telegram_id"])) or {"prev_partner_balance": 0})["prev_partner_balance"])) > 0.001]
     ok("реф. баланс совпадает у каждого", not bad, f"расхождений {len(bad)}")
     bad = []
+    # пригласившие из partn.db (partn_import.py): у пришедших по коду амбассадора referred_by = амбассадор
+    by_partner: dict[int, int] = {}
+    praw = db.get_setting(f"legacy_{PROJECT}_partn_import", "")
+    if praw:
+        amb = {c: int(x) for c, x in (json.loads(praw).get("ambassadors") or {}).items()}
+        for r in db.fetchall(f"SELECT user_id, referrer FROM legacy_{PROJECT}_partn_partner_user WHERE referrer IS NOT NULL"):
+            if r["referrer"] in amb:
+                by_partner[int(r["user_id"])] = amb[r["referrer"]]
+        log(f"     с учётом амбассадоров из partn.db: {len(by_partner)} пришедших по коду")
     for u in old["users"]:
         r = u.get("referrer_id")
         got = new_users[mp[int(u["telegram_id"])]]["referred_by"]
         want = mp.get(int(r)) if r and int(r) != int(u["telegram_id"]) else None
+        if want is None and by_partner.get(int(u["telegram_id"])) not in (None, mp[int(u["telegram_id"])]):
+            want = by_partner[int(u["telegram_id"])]
         mg = merged.get(int(u["telegram_id"]))
         if mg is not None and mg["prev_referred_by"]:
             want = int(mg["prev_referred_by"])
@@ -1395,7 +1406,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Перенос старой базы бота (bot2.db) в проект новой платформы")
     ap.add_argument("--project", default="lyam200", help="проект платформы (fgn, lyam200, …)")
     ap.add_argument("--rw-name-prefix", default=None,
-                    help="имена пользователей старого бота в Remnawave (по умолчанию: fgn → user_, lyam200 → lyaam200vpn_, hustler → HUSTLER_)")
+                    help="имена пользователей старого бота в Remnawave (по умолчанию: fgn → user_, lyam200 → lyaam200vpn_, hustler → HUSTLER_, ovpn → OEV_)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("check", "import", "verify"):
         s = sub.add_parser(name)
