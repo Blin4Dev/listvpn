@@ -2,6 +2,7 @@
   "id": "hustler",
   "name": "Hustler",
   "order": 3,
+  "rw_username_prefix": "hustler_",
   "channel": {
     "id": "",
     "url": ""
