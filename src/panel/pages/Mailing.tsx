@@ -1,7 +1,7 @@
 import { useProject } from '../lib/project';
 import React, { useState, useEffect } from 'react';
 import {
-  Users, Mail, Plus, Send,
+  Users, Mail, Plus, Send, Play,
 } from 'lucide-react';
 import { Modal, PageHead, Spinner, Stat } from '../components/ui';
 import { apiFetch } from '../lib/api';
@@ -24,6 +24,7 @@ export const MailingPage: React.FC<{ onToast: (t: string, m: string, ty: ToastTy
   const [chEmail, setChEmail] = useState(false);
   const [subject, setSubject] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [resumingId, setResumingId] = useState<number | null>(null);
 
   const loadHistory = async () => { try { const d = await apiFetch('/panel/mailing/history'); if (Array.isArray(d)) setHistory(d); } catch (e) { console.error(e); } };
   const loadStats = async () => { try { const d = await apiFetch('/panel/mailing/stats'); if (d) setStats(d); } catch (e) { console.error(e); } };
@@ -55,6 +56,19 @@ export const MailingPage: React.FC<{ onToast: (t: string, m: string, ty: ToastTy
       setMessage(''); setButtonType(''); setButtonLabel(''); setButtonUrl(''); setPromoCode(''); setImageUrl(''); setSubject('');
       loadStats(); loadHistory();
     } catch (e: any) { let m = 'Не удалось запустить рассылку'; try { const p = JSON.parse(e?.message || ''); m = p?.detail?.message || m; } catch {} onToast('Ошибка', m, 'error'); } finally { setIsSending(false); }
+  };
+
+  const handleResume = async (item: any) => {
+    if (!confirm('Продолжить рассылку?\n\nСообщение получат только те, кому оно ещё не было отправлено до перезапуска.')) return;
+    setResumingId(item.id);
+    try {
+      const r = await apiFetch(`/panel/mailing/${item.id}/resume`, { method: 'POST' });
+      const left = Number(r?.recipients_left || 0);
+      onToast('Рассылка', left ? `Продолжается: осталось ${fmtInt(left)} получ.` : 'Все уже получили — рассылка завершена', 'success');
+      if (r?.note) onToast('Почта', r.note, 'info');
+      loadHistory(); loadStats();
+    } catch (e: any) { let m = 'Не удалось продолжить рассылку'; try { const p = JSON.parse(e?.message || ''); m = p?.detail?.message || m; } catch {} onToast('Ошибка', m, 'error'); }
+    finally { setResumingId(null); }
   };
 
   const targets = [{ v: 'all', l: 'Все' }, { v: 'active', l: 'Активные' }, { v: 'expired', l: 'Истёкшие' }, { v: 'no_subscription', l: 'Без подписки' }];
@@ -125,6 +139,7 @@ export const MailingPage: React.FC<{ onToast: (t: string, m: string, ty: ToastTy
                       </div>
                       <div className="flex gap-2 mt-3">
                         <button className="btn sm" onClick={() => setSelected(item)}>Открыть</button>
+                        {item.status === 'Interrupted' && <button className="btn sm solid" disabled={resumingId === item.id} onClick={() => handleResume(item)}>{resumingId === item.id ? <Spinner size={12} /> : <Play size={12} />} Продолжить</button>}
                         {item.status !== 'Deleting' && <button className="btn sm danger" onClick={async () => {
                           const hasEmail = String(item.channel || '').includes('email');
                           const text = 'Удалить рассылку?\n\n'
