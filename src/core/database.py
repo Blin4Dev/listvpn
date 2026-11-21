@@ -664,6 +664,14 @@ CREATE TABLE IF NOT EXISTS mailing_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_mailing_messages_m ON mailing_messages(mailing_id);
 
+-- кому рассылка уже ушла (или кого уже пытались): по ней «Продолжить» после перезапуска пропускает обработанных
+CREATE TABLE IF NOT EXISTS mailing_progress (
+    mailing_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    ok INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mailing_progress_mu ON mailing_progress(mailing_id, user_id);
+
 CREATE TABLE IF NOT EXISTS promotions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -1367,6 +1375,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         },
         "mailings": {
             "channel": "ALTER TABLE mailings ADD COLUMN channel TEXT NOT NULL DEFAULT 'telegram'",
+            # тема письма: нужна, чтобы продолжить прерванную email-рассылку
+            "subject": "ALTER TABLE mailings ADD COLUMN subject TEXT",
         },
         "support_chats": {
             "open_ticket_id": "ALTER TABLE support_chats ADD COLUMN open_ticket_id INTEGER",
