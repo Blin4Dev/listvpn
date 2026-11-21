@@ -267,7 +267,7 @@ _PROJECT_ENTITY_RX: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^/api/panel/promocodes/(\d+)$"), "SELECT project_id FROM promocodes WHERE id = ?"),
     (re.compile(r"^/api/panel/promotions/(\d+)$"), "SELECT project_id FROM promotions WHERE id = ?"),
     (re.compile(r"^/api/panel/tracking-links/(\d+)$"), "SELECT project_id FROM tracking_links WHERE id = ?"),
-    (re.compile(r"^/api/panel/mailing/(\d+)$"), "SELECT project_id FROM mailings WHERE id = ?"),
+    (re.compile(r"^/api/panel/mailing/(\d+)(?:/|$)"), "SELECT project_id FROM mailings WHERE id = ?"),
     (re.compile(r"^/api/telegram/webhook/([a-z][a-z0-9]{0,23})$"), ""),
 ]
 
@@ -2139,6 +2139,7 @@ def serialize_mailing(m: dict[str, Any]) -> dict[str, Any]:
         "button_value": m.get("button_value"),
         "image_url": m.get("image_url"),
         "channel": m.get("channel") or "telegram",
+        "subject": m.get("subject"),
     }
 
 
@@ -5927,13 +5928,15 @@ def _mailing_project(mailing_id: int) -> str:
     return projects.of(db.fetchone("SELECT project_id FROM mailings WHERE id = ?", (int(mailing_id),)))
 
 
-def _deliver_mailing(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str]) -> None:
+def _deliver_mailing(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str],
+                     start_sent: int = 0) -> None:
     """фоновая доставка рассылки — ботом проекта рассылки."""
     with projects.use(_mailing_project(mailing_id)):
-        _deliver_mailing_impl(mailing_id, body, recipients, channels)
+        _deliver_mailing_impl(mailing_id, body, recipients, channels, start_sent)
 
 
-def _deliver_mailing_impl(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str]) -> None:
+def _deliver_mailing_impl(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str],
+                          start_sent: int = 0) -> None:
     """фоновая доставка рассылки пулом воркеров."""
     import concurrent.futures as _fut
 
@@ -5943,7 +5946,7 @@ def _deliver_mailing_impl(mailing_id: int, body: MailingBody, recipients: list[d
     email_html = _email_html_from_message(body.message) if do_email else ""
 
     limiter = _RateLimiter(BROADCAST_RATE)
-    counter = {"sent": 0, "done": 0}
+    counter = {"sent": int(start_sent or 0), "done": 0}  # start_sent — уже отправленные до перезапуска
     lock = threading.Lock()
     total = len(recipients)
 
@@ -5977,6 +5980,13 @@ def _deliver_mailing_impl(mailing_id: int, body: MailingBody, recipients: list[d
                 ok_any = ok or ok_any
             except Exception:  # noqa: BLE001
                 pass
+        # отметка «этот получатель обработан» — по ней «Продолжить» после перезапуска не шлёт повторно
+        try:
+            if u.get("id") is not None:
+                db.execute("INSERT OR IGNORE INTO mailing_progress (mailing_id, user_id, ok) VALUES (?, ?, ?)",
+                           (mailing_id, int(u["id"]), 1 if ok_any else 0))
+        except Exception:  # noqa: BLE001
+            pass
         with lock:
             if ok_any:
                 counter["sent"] += 1
@@ -6036,6 +6046,10 @@ def _purge_mailing_impl(mailing_id: int) -> None:
             list(pool.map(projects.bind(_del_one), rows))
 
     db.execute("DELETE FROM mailing_messages WHERE mailing_id = ?", (mailing_id,))
+    try:
+        db.execute("DELETE FROM mailing_progress WHERE mailing_id = ?", (mailing_id,))
+    except Exception:  # noqa: BLE001
+        pass
     db.execute("DELETE FROM mailings WHERE id = ?", (mailing_id,))
     _MAILING_CANCELLED.discard(mailing_id)
     _MAILING_THREADS.pop(mailing_id, None)
@@ -6063,11 +6077,11 @@ def panel_mailing_create(body: MailingBody, _: dict = Depends(require_panel)) ->
     status = "Sending" if reach else "Completed"
     db.execute(
         "INSERT INTO mailings (title, message_text, target_users, status, sent_count, "
-        "button_type, button_value, image_url, channel, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+        "button_type, button_value, image_url, channel, subject, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
         (
             title, body.message, body.target_users, status,
             body.button_type, body.button_value, body.image_url,
-            "+".join(channels), now,
+            "+".join(channels), (body.subject or None), now,
         ),
     )
     mailing_id = db.last_id()
@@ -6086,6 +6100,86 @@ def panel_mailing_create(body: MailingBody, _: dict = Depends(require_panel)) ->
     assert item is not None
     result = serialize_mailing(item)
     result["recipients_total"] = len(reach)
+    return result
+
+
+@app.post("/api/panel/mailing/{mailing_id}/resume")
+def panel_mailing_resume(mailing_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """продолжить рассылку, прерванную перезапуском: шлём только тем, кому ещё не отправляли."""
+    row = db.fetchone("SELECT * FROM mailings WHERE id = ?", (mailing_id,))
+    if not row:
+        raise HTTPException(404, detail={"message": "Рассылка не найдена"})
+    if row.get("status") != "Interrupted":
+        raise HTTPException(409, detail={"message": "Продолжить можно только прерванную рассылку"})
+    t = _MAILING_THREADS.get(mailing_id)
+    if t is not None and t.is_alive():
+        raise HTTPException(409, detail={"message": "Рассылка уже отправляется"})
+
+    channels = [c for c in str(row.get("channel") or "telegram").split("+") if c in ("telegram", "email")] or ["telegram"]
+    done_ids = {int(r["user_id"]) for r in db.fetchall(
+        "SELECT user_id FROM mailing_progress WHERE mailing_id = ?", (mailing_id,))}
+    note = ""
+    if done_ids:
+        start_sent = int((db.fetchone(
+            "SELECT COUNT(*) AS n FROM mailing_progress WHERE mailing_id = ? AND ok = 1", (mailing_id,)) or {}).get("n") or 0)
+        skip = lambda u: int(u["id"]) in done_ids  # noqa: E731
+    else:
+        # рассылка запущена до обновления: обработанных не отмечали — пропускаем тех, кому ушло в Telegram
+        start_sent = int(row.get("sent_count") or 0)
+        sent_chats = {int(r["chat_id"]) for r in db.fetchall(
+            "SELECT chat_id FROM mailing_messages WHERE mailing_id = ?", (mailing_id,))}
+        if "email" in channels:
+            # кому ушли письма — неизвестно, повторно слать почту нельзя
+            channels = [c for c in channels if c != "email"]
+            note = "Письма не продолжены: для старой рассылки неизвестно, кому они уже ушли"
+            if not channels:
+                raise HTTPException(409, detail={"message": "Эту email-рассылку продолжить нельзя: "
+                                                           "она запущена до обновления, неизвестно, кому письма уже ушли"})
+        skip = lambda u: bool(u.get("telegram_id")) and int(u["telegram_id"]) in sent_chats  # noqa: E731
+
+    if "email" in channels and not mailer.is_configured():
+        raise HTTPException(400, detail={"message": "Почта не настроена (Настройки → Почта)"})
+
+    recipients = _mailing_recipients(str(row.get("target_users") or "all"))
+    reach = [
+        u for u in recipients
+        if (("telegram" in channels and u.get("telegram_id")) or ("email" in channels and u.get("email")))
+        and not skip(u)
+    ]
+
+    # захват атомарно: двойной клик не запустит две отправки
+    db.execute("UPDATE mailings SET status = 'Sending' WHERE id = ? AND status = 'Interrupted'", (mailing_id,))
+    if db.changes() < 1:
+        raise HTTPException(409, detail={"message": "Рассылка уже продолжается"})
+    _MAILING_CANCELLED.discard(mailing_id)
+
+    if not reach:
+        db.execute("UPDATE mailings SET status = 'Completed', sent_count = ? WHERE id = ?", (start_sent, mailing_id))
+    else:
+        body = MailingBody(
+            message=str(row.get("message_text") or ""),
+            target_users=str(row.get("target_users") or "all"),
+            title=row.get("title"),
+            button_type=row.get("button_type"),
+            button_value=row.get("button_value"),
+            image_url=row.get("image_url"),
+            channels=channels,
+            subject=row.get("subject"),
+        )
+        t = threading.Thread(
+            target=_deliver_mailing,
+            args=(mailing_id, body, reach, channels, start_sent),
+            name=f"mailing-{mailing_id}",
+            daemon=True,
+        )
+        _MAILING_THREADS[mailing_id] = t
+        t.start()
+
+    item = db.fetchone("SELECT * FROM mailings WHERE id = ?", (mailing_id,))
+    result = serialize_mailing(item or row)
+    result["recipients_left"] = len(reach)
+    if note:
+        result["note"] = note
     return result
 
 
