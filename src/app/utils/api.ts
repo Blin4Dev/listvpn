@@ -1,0 +1,1055 @@
+// клиент api мини-приложения
+import { PACK_DEVICES, PROJECT_ID } from "./brand";
+import { isTelegramClient } from "./telegram";
+
+export type Plan = { devices: number; price_rub: number; price_stars: number };
+export type PlansResponse = {
+  plans: Plan[];
+  extra_device_price: number;
+  default_devices: number;
+};
+
+export type Discount = {
+  percent: number;
+  expires_at?: string | null;
+  code?: string | null;
+  name?: string | null;
+} | null;
+
+export type AppUser = {
+  id?: number;
+  telegram_id?: number;
+  username?: string;
+  email?: string | null;
+  subscription_status?: string;
+  subscription_until?: string | null;
+  is_banned?: boolean;
+  blacklisted?: boolean;
+  referral_code?: string;
+  is_partner?: boolean;
+  partner_balance?: number;
+  discount?: Discount;
+  // приняты оферта и политика
+  terms_accepted?: boolean;
+  trial_available?: boolean;
+};
+
+// активная скидка для зачёркнутой цены; percent 0 если нет
+export async function fetchDiscount(): Promise<{ active: boolean; percent: number; expires_at?: string | null }> {
+  try {
+    return await appFetch("/discount");
+  } catch {
+    return { active: false, percent: 0 };
+  }
+}
+
+// применить скидку %; округлить, минимум 1
+export function applyDiscount(amount: number, percent: number): number {
+  if (!percent || percent <= 0) return amount;
+  return Math.max(1, Math.round(amount * (1 - percent / 100)));
+}
+
+const APP_TOKEN_KEY = "blinvpn_app_token";
+
+export function getAppToken(): string {
+  try {
+    return localStorage.getItem(APP_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setAppToken(token: string): void {
+  try {
+    localStorage.setItem(APP_TOKEN_KEY, token);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearAppToken(): void {
+  try {
+    localStorage.removeItem(APP_TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function initDataHeader(): Record<string, string> {
+  // проект сети (BatmanVPN, FGN …): бэкенд один, бот / цены / платёжка — по проекту
+  const headers: Record<string, string> = { "X-Project": PROJECT_ID };
+  try {
+    const initData = (
+      window as unknown as { Telegram?: { WebApp?: { initData?: string } } }
+    ).Telegram?.WebApp?.initData?.trim();
+    if (initData) headers["X-Telegram-Init-Data"] = initData;
+  } catch {
+    /* ignore */
+  }
+  const token = getAppToken();
+  if (token) headers["X-App-Session"] = token;
+  return headers;
+}
+
+// ошибка api с detail ответа (напр. предупреждение об объединении)
+export class ApiError extends Error {
+  status: number;
+  detail: any;
+  constructor(message: string, status: number, detail: any) {
+    super(message);
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+// предупреждение, если email/tg уже у другого аккаунта
+export type MergePreview = {
+  merge: true;
+  other: { id: number; label: string };
+  keep?: { days: number; devices: number; has_sub: boolean };
+  drop?: { days: number; devices: number; has_sub: boolean };
+  result: { days: number; devices: number };
+  link_changes: boolean;
+  balance?: number;
+  text: string;
+};
+
+export function mergeFromError(e: unknown): MergePreview | null {
+  return e instanceof ApiError && e.detail && typeof e.detail === "object" && e.detail.merge ? (e.detail.merge as MergePreview) : null;
+}
+
+export async function appFetch<T = unknown>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const clean = path.startsWith("/") ? path : `/${path}`;
+  const method = String(options.method || "GET").toUpperCase();
+  const headers: Record<string, string> = {
+    ...initDataHeader(),
+    ...(options.headers as Record<string, string> | undefined),
+  };
+  const mutating = method !== "GET" && method !== "HEAD";
+  if (mutating) headers["Content-Type"] = "application/json";
+  // абсолютный url: в Telegram WebView относительный /api иногда уходит на web.telegram.org → Failed to fetch
+  const url = `${window.location.origin}/api/app${clean}`;
+  const res = await fetch(url, {
+    ...options,
+    method,
+    headers,
+    body: mutating && options.body == null ? "{}" : options.body,
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg =
+      (body && (body.detail?.message || body.detail || body.error)) ||
+      `Ошибка ${res.status}`;
+    throw new ApiError(typeof msg === "string" ? msg : JSON.stringify(msg), res.status, body?.detail);
+  }
+  return body as T;
+}
+
+export async function fetchPlans(): Promise<PlansResponse> {
+  const data = await appFetch<PlansResponse>("/plans");
+  return {
+    plans: Array.isArray(data?.plans) ? data.plans : [],
+    extra_device_price: Number(data?.extra_device_price ?? 40),
+    default_devices: Number(data?.default_devices ?? 2),
+  };
+}
+
+export function plansToPriceMap(plans: Plan[]): Record<number, number> {
+  const map: Record<number, number> = {};
+  for (const p of plans) map[p.devices] = p.price_rub;
+  return map;
+}
+
+export function plansToStarsMap(plans: Plan[]): Record<number, number> {
+  const map: Record<number, number> = {};
+  for (const p of plans) map[p.devices] = p.price_stars;
+  return map;
+}
+
+export function minPlanPrice(plans: Plan[]): number {
+  if (!plans.length) return 99;
+  return Math.min(...plans.map((p) => p.price_rub));
+}
+
+export async function fetchLegal(): Promise<{ offer: string; privacy: string }> {
+  return appFetch("/legal");
+}
+
+export async function authAndGetUser(): Promise<AppUser | null> {
+  try {
+    const headers = initDataHeader();
+    if (!headers["X-Telegram-Init-Data"]) return null;
+    const res = await fetch(`${window.location.origin}/api/app/auth`, { method: "POST", headers });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { user?: AppUser };
+    return body.user || null;
+  } catch {
+    return null;
+  }
+}
+
+
+export type PaymentMethod = "sbp" | "card" | "sberpay" | "tg_stars";
+export type PaymentPurpose = "subscription" | "extend" | "devices" | "traffic_reset" | "gift";
+
+export type CreatePaymentRequest = {
+  plan_devices: number;
+  months?: number;
+  method: PaymentMethod;
+  extra_devices?: number;
+  purpose?: PaymentPurpose;
+  subscription_id?: number | null;
+  use_referral_balance?: boolean;
+  // экран для возврата после оплаты (если закрыли приложение во время платежа)
+  return_to?: string;
+};
+
+// тарифы по периодам. цена периода — пакет устройств проекта (3, у BatmanVPN — 1); сверх пакета только плюсуются
+export const PLAN_PACK_DEVICES = PACK_DEVICES;
+export type TariffPeriod = { months: number; days: number; price: number; stars?: number; by_devices?: Record<string, number> };
+export type TariffsResponse = {
+  devices: number;
+  min_devices?: number;
+  default_devices?: number;
+  max_devices?: number;
+  extra_device_price?: number;
+  device_prices?: number[];
+  periods: TariffPeriod[];
+};
+
+export function extraAbovePack(total: number, pack = PLAN_PACK_DEVICES): number {
+  return Math.max(0, Math.round(Number(total) || 0) - pack);
+}
+
+export function periodTotalRub(
+  p: TariffPeriod,
+  selected: number,
+  table: number[],
+  extraPrice: number,
+  fallbackPrice: number,
+  pack = PLAN_PACK_DEVICES,
+): number {
+  const n = Math.max(pack, Math.round(Number(selected) || pack));
+  const listed = p.by_devices?.[String(n)];
+  if (listed != null && Number(listed) > 0) return Math.round(Number(listed));
+  const base = Number(p.price) > 0 ? Number(p.price) : Number(fallbackPrice) || 0;
+  let monthly = 0;
+  for (let i = pack + 1; i <= n; i++) {
+    monthly += table.length ? Number(table[Math.min(i, table.length) - 1] ?? extraPrice) : extraPrice;
+  }
+  return Math.round(base + monthly * p.months);
+}
+
+export async function fetchTariffs(): Promise<TariffsResponse> {
+  const d = await appFetch<Partial<TariffsResponse>>("/plans");
+  return {
+    devices: Number(d?.devices ?? PLAN_PACK_DEVICES),
+    min_devices: Number(d?.min_devices ?? PLAN_PACK_DEVICES),
+    default_devices: Number(d?.default_devices ?? 5),
+    max_devices: Number(d?.max_devices ?? 20),
+    extra_device_price: Number(d?.extra_device_price ?? 0),
+    device_prices: Array.isArray(d?.device_prices) ? d.device_prices!.map(Number) : [],
+    periods: Array.isArray(d?.periods) ? d!.periods! : [],
+  };
+}
+
+export type CreatePaymentResponse = {
+  payment_id: string;
+  amount: number;
+  full_price?: number;
+  referral_applied?: number;
+  currency: string;
+  method: string;
+  provider: "yookassa" | "tg_stars" | "balance";
+  pay_url?: string | null;
+  invoice_link?: string | null;
+  transaction_id?: string;
+  status: string;
+  paid?: boolean;
+};
+
+export type PaymentStatusResponse = {
+  payment_id: string;
+  status: "pending" | "paid" | "failed";
+  provider?: string;
+  amount?: number;
+  currency?: string;
+  pay_url?: string | null;
+  invoice_link?: string | null;
+  purpose?: string;
+  method?: string;
+  // купленный подарок: код для друга
+  gift_code?: string | null;
+  subscription?: unknown;
+  // для экрана итога оплаты
+  months?: number;
+  days?: number | null;
+  stars?: number | null;
+  referral_applied?: number;
+  extra_devices?: number;
+};
+
+export type UnseenPayment = {
+  payment_id: string;
+  status: string;
+  provider?: string;
+  purpose?: string;
+  return_to?: string | null;
+  pay_url?: string | null;
+  invoice_link?: string | null;
+};
+
+// платёж, итог которого пользователь ещё не видел (закрыл приложение во время оплаты)
+export async function fetchUnseenPayment(paymentId?: string): Promise<UnseenPayment | null> {
+  try {
+    const q = paymentId ? `?payment_id=${encodeURIComponent(paymentId)}` : "";
+    const r = await appFetch<{ payment: UnseenPayment | null }>(`/payment/unseen${q}`);
+    return r?.payment || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function markPaymentSeen(paymentId: string): Promise<void> {
+  try {
+    await appFetch("/payment/seen", { method: "POST", body: JSON.stringify({ payment_id: paymentId }) });
+  } catch {
+    /* не критично */
+  }
+}
+
+export async function createPayment(
+  req: CreatePaymentRequest,
+): Promise<CreatePaymentResponse> {
+  return appFetch<CreatePaymentResponse>("/payment/create", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function fetchPaymentStatus(
+  paymentId: string,
+): Promise<PaymentStatusResponse> {
+  return appFetch<PaymentStatusResponse>(
+    `/payment/status?payment_id=${encodeURIComponent(paymentId)}`,
+  );
+}
+
+export type PaymentQuote = {
+  purpose: string;
+  price: number;
+  stars: number;
+  referral_applied: number;
+  charge: number;
+  provider_min: number;
+  is_stars: boolean;
+  // цена до скидки + % скидки
+  full_price?: number;
+  discount_percent?: number;
+  // итог к оплате (₽ или ⭐)
+  total?: number;
+  method_enabled?: boolean;
+  // подписка/продление: устройства и разбивка цены (до скидки)
+  plan_devices?: number;
+  devices_total?: number;
+  min_devices?: number;
+  default_devices?: number;
+  max_devices?: number;
+  extra_device_price?: number;
+  base_price?: number | null;
+  devices_price?: number;
+  // участник семьи: число устройств меняет только владелец
+  devices_locked?: boolean;
+  // участник семьи: оплата продлит семейную подписку (минимум — текущее число устройств)
+  family_member?: boolean;
+  device_prices?: number[]; // цена n-го устройства в месяц (индекс n-1)
+};
+
+export type PayMethodInfo = { id: PaymentMethod; title: string; enabled: boolean };
+
+// превью цены (итого + списание с реф. баланса) без создания платежа
+export async function fetchQuote(req: CreatePaymentRequest): Promise<PaymentQuote | null> {
+  try {
+    return await appFetch<PaymentQuote>("/payment/quote", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  } catch {
+    return null;
+  }
+}
+
+export type SubKey = {
+  id?: number;
+  status?: string;
+  expiry_date?: string | null;
+  days_left?: number | null;
+  devices_limit?: number;
+  type?: string;
+};
+
+export async function fetchSubscription(): Promise<{ until?: string | null; key?: SubKey | null } | null> {
+  try {
+    return await appFetch("/subscription");
+  } catch {
+    return null;
+  }
+}
+
+
+type TgWebApp = {
+  openInvoice?: (
+    url: string,
+    callback?: (status: "paid" | "cancelled" | "failed" | "pending") => void,
+  ) => void;
+  openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
+  openTelegramLink?: (url: string) => void;
+  initData?: string;
+};
+
+export function tgWebApp(): TgWebApp | null {
+  try {
+    return (
+      (window as unknown as { Telegram?: { WebApp?: TgWebApp } }).Telegram
+        ?.WebApp ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+export function openStarsInvoice(url: string): Promise<string> {
+  return new Promise((resolve) => {
+    const wa = tgWebApp();
+    if (wa?.openInvoice) {
+      wa.openInvoice(url, (status) => resolve(status));
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+      resolve("pending");
+    }
+  });
+}
+
+export function openTgLink(url: string): void {
+  const wa = tgWebApp();
+  if (wa?.openTelegramLink) wa.openTelegramLink(url);
+  else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+export function openPayUrl(url: string): void {
+  const wa = tgWebApp();
+  if (wa?.openLink) wa.openLink(url);
+  else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+export const SUPPORT_PREFILL_KEY = "blin_support_prefill";
+
+// открыть чат поддержки с готовым текстом ошибки
+export function openSupportWithError(errorLog: string, _supportBase?: string): void {
+  try { sessionStorage.setItem(SUPPORT_PREFILL_KEY, `Здравствуйте. У меня возникла ошибка: ${errorLog}`); } catch { /* ignore */ }
+  // модалка ошибки вне роутера: push url + событие
+  window.history.pushState(null, "", "/support");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+
+export async function acceptTerms(): Promise<AppUser> {
+  const b = await appFetch<{ user: AppUser }>("/me/terms", { method: "POST" });
+  return b.user;
+}
+
+export async function fetchMe(): Promise<AppUser | null> {
+  try {
+    const b = await appFetch<{ user: AppUser }>("/me");
+    return b.user;
+  } catch {
+    return null;
+  }
+}
+
+export async function requestBindEmailCode(email: string): Promise<EmailRequestResult> {
+  return appFetch<EmailRequestResult>("/me/email/request", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function updateEmail(email: string, code: string, merge = false): Promise<AppUser> {
+  const b = await appFetch<{ user: AppUser }>("/me/email", {
+    method: "PUT",
+    body: JSON.stringify({ email, code, merge }),
+  });
+  return b.user;
+}
+
+export async function unbindEmail(): Promise<AppUser> {
+  const b = await appFetch<{ user: AppUser }>("/me/email", { method: "DELETE" });
+  return b.user;
+}
+
+
+export type EmailRequestResult = { ok: boolean; throttled: boolean; resend_after: number; dev_code?: string; merge?: MergePreview };
+
+export async function requestEmailCode(email: string, captchaToken?: string): Promise<EmailRequestResult> {
+  return appFetch<EmailRequestResult>("/auth/email/request", {
+    method: "POST",
+    body: JSON.stringify(captchaToken ? { email, captcha_token: captchaToken } : { email }),
+  });
+}
+
+// реф. код с сайта ?ref=, сохраняется при первом визите
+export function getWebRef(): string {
+  try {
+    return localStorage.getItem("blinvpn_ref") || "";
+  } catch {
+    return "";
+  }
+}
+
+// сохранить ?ref= один раз (первый реферер побеждает)
+export function captureWebRef(): void {
+  try {
+    const ref = new URLSearchParams(window.location.search).get("ref");
+    if (ref && /^[A-Za-z0-9]{1,32}$/.test(ref) && !localStorage.getItem("blinvpn_ref")) {
+      localStorage.setItem("blinvpn_ref", ref);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+// сайт открыт по ссылке амбассадора (любой путь/параметры, заданные в панели): запоминаем его номер.
+// Ссылка амбассадора важнее «сырого» ?ref= из этого же адреса; реферер, сохранённый раньше, не меняем.
+const SITE_PAGES = /^\/(login|support|tariffs|download|rules|cabinet|gifts|checkout|payment)(\/|$)/;
+export async function resolveSiteRef(): Promise<void> {
+  try {
+    const path = window.location.pathname || "/";
+    const search = window.location.search || "";
+    if (path === "/" && !search) return;
+    const rawRef = new URLSearchParams(search).get("ref") || "";
+    const stored = localStorage.getItem("blinvpn_ref") || "";
+    if (stored && stored !== rawRef) return;
+    const r = await appFetch<{ ref: string | null }>(`/site-ref?path=${encodeURIComponent(path)}&q=${encodeURIComponent(search.replace(/^\?/, ""))}`);
+    if (!r?.ref) return;
+    localStorage.setItem("blinvpn_ref", r.ref);
+    // свой адрес амбассадора (fgn.best/blogger) — это главная: в адресной строке оставляем «/»
+    if (path !== "/" && !SITE_PAGES.test(path)) window.history.replaceState(null, "", "/" + window.location.hash);
+    // перерисовать сайт: кнопка «Telegram bot» поведёт в бота уже с привязкой к амбассадору
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    window.dispatchEvent(new Event("blin-ref"));
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function verifyEmailCode(email: string, code: string, captchaToken?: string): Promise<AppUser> {
+  const ref = getWebRef();
+  const body: Record<string, string> = { email, code };
+  if (ref) body.ref = ref;
+  if (captchaToken) body.captcha_token = captchaToken;
+  const b = await appFetch<{ user: AppUser; token: string }>("/auth/email/verify", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (b.token) setAppToken(b.token);
+  return b.user;
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await appFetch("/auth/logout", { method: "POST" });
+  } catch {
+    /* ignore */
+  }
+  clearAppToken();
+}
+
+// проверка авторизации (tg initData или сохранённая сессия)
+export async function checkAuth(): Promise<boolean> {
+  const inTelegram = (() => {
+    try {
+      const wa = (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp;
+      return Boolean(wa?.initData && wa.initData.length > 0);
+    } catch {
+      return false;
+    }
+  })();
+  if (inTelegram) {
+    // запасная сессия, если подпись tg истечёт, пока приложение открыто
+    try {
+      const headers = initDataHeader();
+      delete headers["X-App-Session"];
+      const res = await fetch(`${window.location.origin}/api/app/auth`, { method: "POST", headers });
+      if (res.ok) {
+        const body = (await res.json()) as { token?: string };
+        if (body.token) setAppToken(body.token);
+      }
+    } catch {
+      /* ignore */
+    }
+    return true;
+  }
+  if (!getAppToken()) return false;
+  const me = await fetchMe();
+  if (!me) {
+    clearAppToken();
+    return false;
+  }
+  return true;
+}
+
+export type TelegramOAuthPayload = {
+  id: number | string;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  photo_url?: string;
+  auth_date?: number | string;
+  hash: string;
+};
+
+export async function bindTelegram(payload: TelegramOAuthPayload, merge = false): Promise<AppUser> {
+  const b = await appFetch<{ user: AppUser }>(`/me/telegram${merge ? "?merge=1" : ""}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+  return b.user;
+}
+
+
+export async function revokeDevice(deviceId: string): Promise<boolean> {
+  try {
+    await appFetch(`/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
+// перевыпуск ключа: новая ссылка, старая перестаёт работать, устройства отвязываются
+export async function reissueKey(): Promise<{ subscription_url?: string | null }> {
+  return appFetch("/subscription/reissue", { method: "POST" });
+}
+
+export async function fetchConfig(): Promise<Record<string, unknown>> {
+  try {
+    return await appFetch("/config");
+  } catch {
+    return {};
+  }
+}
+
+export function isTelegram(): boolean {
+  return isTelegramClient();
+}
+
+export type Membership = {
+  required: boolean;
+  subscribed: boolean;
+  channel_url: string;
+};
+
+// статус обязательной подписки на канал (только вход через tg)
+export async function fetchMembership(force = false): Promise<Membership> {
+  try {
+    return await appFetch<Membership>(`/membership${force ? "?force=1" : ""}`);
+  } catch {
+    // проверка не удалась: не блокируем
+    return { required: false, subscribed: true, channel_url: "https://t.me/BATMANNETWORK" };
+  }
+}
+
+export type SetupStatus = {
+  show_setup_prompt: boolean;
+  has_subscription: boolean;
+  ever_connected: boolean | null;
+};
+
+// подсказка настройки, если подписка есть, но ни разу не подключался; при ошибке скрыть
+export async function fetchSetupStatus(): Promise<SetupStatus> {
+  try {
+    return await appFetch<SetupStatus>("/setup-status");
+  } catch {
+    return { show_setup_prompt: false, has_subscription: false, ever_connected: null };
+  }
+}
+
+export async function activateTrial(): Promise<{ success: boolean; message?: string; code?: string }> {
+  try {
+    const r = await appFetch<{ success: boolean }>("/trial", { method: "POST" });
+    return { success: !!r?.success };
+  } catch (e) {
+    const code = e instanceof ApiError && e.detail && typeof e.detail === "object" ? String(e.detail.code || "") : "";
+    return { success: false, message: e instanceof Error ? e.message : "Ошибка", code };
+  }
+}
+
+
+export type Withdrawal = {
+  id: number;
+  amount: number;
+  address: string;
+  method?: string;          // usdt_ton | sbp
+  bank?: string | null;     // sbp: банк
+  status: "pending" | "approved" | "rejected";
+  tx_link?: string | null;
+  created_at?: string;
+  processed_at?: string | null;
+};
+
+export async function fetchWithdrawals(): Promise<{ items: Withdrawal[]; min_withdraw: number }> {
+  try {
+    return await appFetch("/withdrawals");
+  } catch {
+    return { items: [], min_withdraw: 2000 };
+  }
+}
+
+export type WithdrawMethod = "usdt_ton" | "sbp";
+
+/** вывод: usdt_ton — address = кошелёк TON; sbp — address = телефон «+7 9xx xxx xx xx», bank — банк */
+export async function requestWithdraw(
+  amount: number,
+  address: string,
+  method: WithdrawMethod = "usdt_ton",
+  bank = "",
+): Promise<{ success: boolean; partner_balance: number; withdrawal: Withdrawal }> {
+  return appFetch("/withdraw", {
+    method: "POST",
+    body: JSON.stringify({ amount, address, method, bank }),
+  });
+}
+
+/** ввод телефона для СБП с маской «+7 9xx xxx xx xx» */
+export function formatSbpPhone(raw: string): string {
+  const t = raw.trim();
+  // «+7 …» — уже наш префикс (или вставили международный номер): цифры после него
+  let d = t.startsWith("+7") ? t.slice(2).replace(/\D/g, "") : t.replace(/\D/g, "");
+  // вставили «89…» / «79…» целиком
+  if (!t.startsWith("+7") && d.length === 11 && (d[0] === "7" || d[0] === "8")) d = d.slice(1);
+  // ввод с восьмёрки или семёрки: «8» / «7» в начале — это код страны
+  if (!t.startsWith("+7") && (d[0] === "7" || d[0] === "8")) d = d.slice(1);
+  d = d.slice(0, 10);
+  if (!d) return "";
+  const parts = [d.slice(0, 3), d.slice(3, 6), d.slice(6, 8), d.slice(8, 10)].filter(Boolean);
+  return `+7 ${parts.join(" ")}`;
+}
+
+export const SBP_PHONE_RE = /^\+7 9\d{2} \d{3} \d{2} \d{2}$/;
+
+
+export type SubAppLink = { app: string; link: string; encrypted: boolean; open_url?: string };
+
+export async function fetchAppLink(app: "koala" | "incy" | "happ" | "other"): Promise<SubAppLink> {
+  return appFetch<SubAppLink>(`/subscription/applink?app=${encodeURIComponent(app)}`);
+}
+
+// открыть подписку в клиенте через https open_url (tg не открывает incy:// / happ://)
+export function openDeepLink(res: SubAppLink | string): void {
+  const wa = tgWebApp();
+  // вне Telegram (сайт, браузер) — сразу ссылка приложения (koala:// happ:// incy://): браузер спросит
+  // «Открыть приложение?», а страница останется. Промежуточная https-страница нужна только Telegram —
+  // в браузере она уводила с сайта и «зависала», если приложение не открылось.
+  if (typeof res !== "string" && res.link && !/^https?:\/\//i.test(res.link) && !String(wa?.initData || "").trim()) {
+    window.location.href = res.link;
+    return;
+  }
+  const link = typeof res === "string" ? res : (res.open_url || res.link);
+  const isHttp = /^https?:\/\//i.test(link);
+  if (isHttp && wa?.openLink) {
+    wa.openLink(link);
+    return;
+  }
+  // fallback вне tg / без https open_url
+  try {
+    window.location.href = link;
+  } catch {
+    window.open(link, "_blank", "noopener,noreferrer");
+  }
+}
+
+
+export type TrafficInfo = {
+  available: boolean;
+  used_bytes?: number | null;
+  limit_bytes?: number;
+  strategy?: string;
+  last_reset_at?: string | null;
+};
+
+export async function fetchTraffic(): Promise<TrafficInfo> {
+  try {
+    return await appFetch<TrafficInfo>("/subscription/traffic");
+  } catch {
+    return { available: false };
+  }
+}
+
+// 12,4 ГБ / 850 МБ
+export function formatBytesRu(v: number): string {
+  const gb = v / 1024 ** 3;
+  if (gb >= 100) return `${Math.round(gb)} ГБ`;
+  if (gb >= 1) return `${gb.toFixed(1).replace(/\.0$/, "").replace(".", ",")} ГБ`;
+  const mb = v / 1024 ** 2;
+  return `${Math.max(0, Math.round(mb))} МБ`;
+}
+
+
+export type SupportFile = { id: string; kind: "image" | "video" | "file" | "deleted"; name: string; size: number; url: string };
+export type SupportQuote = { id: number; sender?: string; text?: string; files?: number; deleted?: boolean };
+export type SupportMessage = {
+  id: number; ticket_id?: number | null; sender: "user" | "admin" | "system"; author?: string | null; text: string;
+  created_at: string; files: SupportFile[]; reply_to?: SupportQuote | null;
+  // close_prompt = «ещё помочь?» + «нет, спасибо»
+  kind?: "close_prompt" | null; action_active?: boolean | null;
+  ticket_closed?: boolean;
+  edited?: boolean;
+};
+export type SupportState = {
+  chat: { id: number; unread: number } | null;
+  ticket: { status: "open" | "closed" } | null;
+  messages: SupportMessage[];
+  // изменённые или удалённые ({id, deleted: true}) среди уже загруженных
+  changes?: (SupportMessage & { deleted?: boolean })[];
+  limits: { max_file_mb: number; max_files: number; max_text: number; keep_days?: number };
+};
+
+export function fetchSupport(after = 0): Promise<SupportState> {
+  return appFetch<SupportState>(`/support?after=${after}`);
+}
+
+export function sendSupportMessage(text: string, files: string[], replyTo?: number | null): Promise<SupportMessage> {
+  return appFetch<SupportMessage>("/support/messages", { method: "POST", body: JSON.stringify({ text, files, reply_to: replyTo || null }) });
+}
+
+export function closeSupportTicket(messageId: number): Promise<unknown> {
+  return appFetch("/support/close", { method: "POST", body: JSON.stringify({ message_id: messageId }) });
+}
+
+export function markSupportRead(): Promise<unknown> {
+  return appFetch("/support/read", { method: "POST" }).catch(() => null);
+}
+
+// большие файлы (видео) — частями: одним долгим запросом видео на 10+ секунд с телефона часто не доходит
+const CHUNKED_FROM = 4 * 1024 * 1024;
+
+function supportForm(): FormData {
+  const fd = new FormData();
+  try {
+    const initData = (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData?.trim();
+    if (initData) fd.append("init_data", initData);
+  } catch { /* ignore */ }
+  return fd;
+}
+
+type XhrResult = { status: number; body: any; text: string; server: string | null; cfRay: string | null };
+
+function supportXhr(url: string, fd: FormData, onProgress: ((loaded: number) => void) | null, track: (x: XMLHttpRequest | null) => void): Promise<XhrResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    track(xhr);
+    xhr.open("POST", `${window.location.origin}${url}`);
+    const h = initDataHeader();
+    Object.keys(h).forEach((k) => {
+      try { xhr.setRequestHeader(k, h[k]); } catch { /* webview */ }
+    });
+    xhr.timeout = 120000; // кусок 2 МБ: дольше 2 минут — соединение зависло, пробуем заново
+    if (onProgress) xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
+    xhr.onload = () => {
+      track(null);
+      let body: any = null;
+      try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+      resolve({ status: xhr.status, body, text: xhr.responseText || "", server: xhr.getResponseHeader("server"), cfRay: xhr.getResponseHeader("cf-ray") });
+    };
+    xhr.onerror = () => { track(null); reject(new Error("net")); };
+    xhr.ontimeout = () => { track(null); reject(new Error("net")); };
+    xhr.onabort = () => { track(null); reject(new Error("Отменено")); };
+    xhr.send(fd);
+  });
+}
+
+function supportErr(r: XhrResult, fallback: string): Error {
+  const detail = r.body?.detail;
+  const msg = (detail && typeof detail === "object" ? detail.message : typeof detail === "string" ? detail : "") || r.body?.error;
+  const who = !r.body ? (/cloudflare/i.test(r.text) || r.cfRay ? " (Cloudflare)" : r.server ? ` (${r.server})` : "") : "";
+  return new Error(msg || (r.status === 413 ? "Файл слишком большой" : r.status === 401 ? "Сессия истекла, откройте чат заново" : `${fallback}${who}`));
+}
+
+function uploadSupportFileChunked(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
+  let cur: XMLHttpRequest | null = null;
+  let aborted = false;
+  let uploadId = "";
+  let single: { abort: () => void } | null = null;
+  const track = (x: XMLHttpRequest | null) => { cur = x; };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const promise = (async () => {
+    const name = encodeURIComponent(file.name || "file");
+    const st = await supportXhr(`/api/app/support/upload/start?name=${name}&size=${file.size}`, supportForm(), null, track)
+      .catch(() => { throw new Error("Нет соединения"); });
+    if (st.status === 404 || st.status === 405) {
+      // сервер ещё без загрузки частями (обновили только мини-приложение) — отправляем целиком, как раньше
+      const one = uploadSupportFileSingle(file, onProgress);
+      single = one;
+      return one.promise;
+    }
+    if (st.status < 200 || st.status >= 300 || !st.body?.upload_id) throw supportErr(st, "Не удалось начать загрузку");
+    uploadId = String(st.body.upload_id);
+    const size = Math.max(256 * 1024, Number(st.body.chunk_size) || 2 * 1024 * 1024);
+    let offset = 0;
+    while (offset < file.size) {
+      if (aborted) throw new Error("Отменено");
+      const part = file.slice(offset, Math.min(file.size, offset + size));
+      let done = false;
+      for (let attempt = 0; attempt < 6 && !done; attempt++) {
+        if (aborted) throw new Error("Отменено");
+        if (attempt) await sleep(Math.min(8000, 1000 * 2 ** (attempt - 1)));
+        const fd = supportForm();
+        fd.append("chunk", part, "chunk");
+        let r: XhrResult;
+        try {
+          r = await supportXhr(`/api/app/support/upload/${encodeURIComponent(uploadId)}/chunk?offset=${offset}`, fd,
+            (loaded) => onProgress(Math.min(0.99, (offset + loaded) / file.size)), track);
+        } catch (e) {
+          if ((e as Error).message === "Отменено") throw e;
+          continue; // обрыв — повторяем этот же кусок
+        }
+        if (r.status === 409 && typeof r.body?.detail?.received === "number") {
+          offset = r.body.detail.received; // сервер уже получил больше/меньше — продолжаем с его места
+          done = true;
+          break;
+        }
+        if (r.status >= 500 || r.status === 0 || r.status === 429) continue;
+        if (r.status < 200 || r.status >= 300) throw supportErr(r, "Не удалось загрузить");
+        offset = Number(r.body?.received) || offset + part.size;
+        done = true;
+      }
+      if (!done) throw new Error("Не удалось загрузить — плохое соединение, попробуйте ещё раз");
+      onProgress(Math.min(0.99, offset / file.size));
+    }
+    let fin: XhrResult | null = null;
+    for (let attempt = 0; attempt < 4 && !fin; attempt++) {
+      if (attempt) await sleep(1500 * attempt);
+      try { fin = await supportXhr(`/api/app/support/upload/${encodeURIComponent(uploadId)}/finish`, supportForm(), null, track); }
+      catch (e) { if ((e as Error).message === "Отменено") throw e; }
+    }
+    if (!fin) throw new Error("Нет соединения");
+    if (fin.status < 200 || fin.status >= 300 || !fin.body?.id) throw supportErr(fin, "Не удалось загрузить");
+    onProgress(1);
+    return fin.body as Omit<SupportFile, "url">;
+  })();
+  const abort = () => {
+    aborted = true;
+    try { (single as { abort: () => void } | null)?.abort(); } catch { /* ignore */ }
+    try { (cur as XMLHttpRequest | null)?.abort(); } catch { /* ignore */ }
+    if (uploadId) void supportXhr(`/api/app/support/upload/${encodeURIComponent(uploadId)}/abort`, supportForm(), null, () => {}).catch(() => null);
+  };
+  return { promise, abort };
+}
+
+// загрузка вложения с прогрессом 0..1
+export function uploadSupportFile(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
+  if (file.size > CHUNKED_FROM) return uploadSupportFileChunked(file, onProgress);
+  return uploadSupportFileSingle(file, onProgress);
+}
+
+// одним запросом (маленькие файлы; запасной путь для сервера без загрузки частями)
+function uploadSupportFileSingle(file: File, onProgress: (p: number) => void): { promise: Promise<Omit<SupportFile, "url">>; abort: () => void } {
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise<Omit<SupportFile, "url">>((resolve, reject) => {
+    // FormData без Content-Type: Telegram WebView режет octet-stream + X-Telegram-Init-Data
+    const fd = new FormData();
+    fd.append("file", file, file.name || "file");
+    try {
+      const initData = (window as unknown as { Telegram?: { WebApp?: { initData?: string } } }).Telegram?.WebApp?.initData?.trim();
+      if (initData) fd.append("init_data", initData);
+    } catch { /* ignore */ }
+    xhr.open("POST", `${window.location.origin}/api/app/support/upload`);
+    const h = initDataHeader();
+    Object.keys(h).forEach((k) => {
+      try { xhr.setRequestHeader(k, h[k]); } catch { /* webview */ }
+    });
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let body: any = null;
+      try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+      if (xhr.status >= 200 && xhr.status < 300 && body?.id) resolve(body);
+      else {
+        const detail = body?.detail;
+        const msg = (detail && typeof detail === "object" ? detail.message : typeof detail === "string" ? detail : "") || body?.error;
+        // ответ не от нашего API (прокси/защита сайта) — показать, кто отказал, чтобы было видно сразу
+        const who = !body ? (/cloudflare/i.test(xhr.responseText || "") || xhr.getResponseHeader("cf-ray") ? " (Cloudflare)"
+          : xhr.getResponseHeader("server") ? ` (${xhr.getResponseHeader("server")})` : "") : "";
+        reject(new Error(msg || (xhr.status === 413 ? "Файл слишком большой" : xhr.status === 401 ? "Сессия истекла, откройте чат заново" : `Не удалось загрузить${who}`)));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Нет соединения"));
+    xhr.onabort = () => reject(new Error("Отменено"));
+    xhr.send(fd);
+  });
+  return { promise, abort: () => xhr.abort() };
+}
+
+
+// ── подарочные дни «нажмите Забрать» (промокод на дни, подарок вернувшимся) ──
+export type DayGift = { id: number; days: number; source: string; text: string; expires_at?: string | null };
+
+export async function fetchDayGifts(): Promise<DayGift[]> {
+  try {
+    const r = await appFetch<{ items: DayGift[] }>("/day-gifts");
+    return Array.isArray(r?.items) ? r.items : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function claimDayGift(id: number): Promise<{ days: number; expires_at?: string | null; message: string }> {
+  return appFetch(`/day-gifts/${id}/claim`, { method: "POST" });
+}
+
+// перенос из старого VPN (ресейл): «<name> теперь <target>», кнопка «Заменить ключ»
+export type MigrationPending = { name: string; target: string; days: number; info_url?: string };
+export type MigrationClaim = {
+  success: boolean;
+  already?: boolean;
+  name: string;
+  target: string;
+  days: number;
+  expires_at?: string | null;
+};
+
+export async function fetchMigration(): Promise<MigrationPending | null> {
+  try {
+    const r = await appFetch<{ pending: MigrationPending | null }>("/migration");
+    return r?.pending && r.pending.name ? r.pending : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function claimMigration(): Promise<MigrationClaim> {
+  return appFetch<MigrationClaim>("/migration/claim", { method: "POST" });
+}
+
+// подписка изменилась не на экране оплаты (перенос, подарок) — главная перечитывает /me
+export const SUBSCRIPTION_CHANGED_EVENT = "blin:subscription-changed";
+export function notifySubscriptionChanged(): void {
+  try { window.dispatchEvent(new Event(SUBSCRIPTION_CHANGED_EVENT)); } catch { /* ignore */ }
+}
+
+export type PromoRedeem = {
+  type?: "discount" | "gift" | "days";
+  value?: number;
+  discount_percent?: number;
+  expires_at?: string;
+  days?: number;
+  gift_id?: number;
+  message?: string;
+};
+
+export async function redeemPromo(code: string): Promise<PromoRedeem> {
+  return appFetch<PromoRedeem>("/promocode/redeem", { method: "POST", body: JSON.stringify({ code }) });
+}

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-12 4 188 92" width="188" height="92">
+<defs><linearGradient id="rl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E0141B"/><stop offset="1" stop-color="#5A0000"/></linearGradient>
+<radialGradient id="rh" cx="40" cy="54" r="26" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff"/><stop offset="0.25" stop-color="#FF3B3B"/><stop offset="1" stop-color="#FF3B3B" stop-opacity="0"/></radialGradient>
+<radialGradient id="rg" cx="40" cy="54" r="50" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FF3B3B" stop-opacity="0.75"/><stop offset="0.55" stop-color="#FF3B3B" stop-opacity="0.22"/><stop offset="1" stop-color="#FF3B3B" stop-opacity="0"/></radialGradient>
+<linearGradient id="bl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1648F0"/><stop offset="1" stop-color="#001A66"/></linearGradient>
+<radialGradient id="bh" cx="124" cy="54" r="26" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff"/><stop offset="0.25" stop-color="#3B8BFF"/><stop offset="1" stop-color="#3B8BFF" stop-opacity="0"/></radialGradient>
+<radialGradient id="bg" cx="124" cy="54" r="50" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3B8BFF" stop-opacity="0.75"/><stop offset="0.55" stop-color="#3B8BFF" stop-opacity="0.22"/><stop offset="1" stop-color="#3B8BFF" stop-opacity="0"/></radialGradient>
+
+<linearGradient id="sheen" x1="0" y1="36" x2="0" y2="56" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity="0.55"/><stop offset="0.35" stop-color="#fff" stop-opacity="0.08"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<linearGradient id="base" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3A3A3E"/><stop offset="1" stop-color="#0C0C0E"/></linearGradient>
+</defs>
+<ellipse cx="40" cy="54" rx="50" ry="38" fill="url(#rg)"/><path d="M10 70 L8 52 Q7 38 22 36 H80 V70 Z" fill="url(#rl)"/><path d="M10 70 L8 52 Q7 38 22 36 H80 V70 Z" fill="url(#rh)"/><path d="M10 70 L8 52 Q7 38 22 36 H80 V70 Z" fill="url(#sheen)" opacity="0.9"/><path d="M10 70 L8 52 Q7 38 22 36 H80 V70 Z" fill="none" stroke="#000" stroke-opacity="0.45" stroke-width="1.2"/><ellipse cx="124" cy="54" rx="50" ry="38" fill="url(#bg)"/><path d="M154 70 L156 52 Q157 38 142 36 H84 V70 Z" fill="url(#bl)"/><path d="M154 70 L156 52 Q157 38 142 36 H84 V70 Z" fill="url(#bh)"/><path d="M154 70 L156 52 Q157 38 142 36 H84 V70 Z" fill="url(#sheen)" opacity="0.9"/><path d="M154 70 L156 52 Q157 38 142 36 H84 V70 Z" fill="none" stroke="#000" stroke-opacity="0.45" stroke-width="1.2"/>
+<rect x="78" y="40" width="8" height="30" rx="1.5" fill="url(#base)"/>
+<rect x="6" y="70" width="152" height="5" rx="2.5" fill="url(#base)"/>
+</svg>

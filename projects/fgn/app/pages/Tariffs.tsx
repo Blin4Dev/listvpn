@@ -1,0 +1,202 @@
+// FGN: «Выбор тарифа» (переопределение src/app/pages/Tariffs.tsx).
+// Макет: шапка, карточка «Устройства» со степпером (−/N/+, подпись «N в тарифе · следующее +X ₽/мес»),
+// подпись «Выберите период», 4 карточки периодов («30 дней, 2 устройства», цена справа).
+import React, { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSmartBack } from "../utils/navigation";
+import { applyDiscount, fetchDiscount, fetchQuote, fetchTariffs, periodTotalRub, PLAN_PACK_DEVICES, type TariffPeriod } from "../utils/api";
+import { C, FgnCard, FgnHeader, FgnIcon, FgnPage } from "../components/fgn";
+
+const FALLBACK: TariffPeriod[] = [
+  { months: 1, days: 30, price: 200 },
+  { months: 3, days: 90, price: 580 },
+  { months: 6, days: 180, price: 1100 },
+  { months: 12, days: 365, price: 2200 },
+];
+
+function plural(n: number, one: string, few: string, many: string) {
+  const a = n % 10, b = n % 100;
+  if (a === 1 && b !== 11) return one;
+  if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return few;
+  return many;
+}
+
+function periodTitle(m: number) {
+  if (m === 12) return "1 год";
+  return `${m} ${plural(m, "месяц", "месяца", "месяцев")}`;
+}
+
+// ru-RU не группирует 4-значные числа («1100»), а в макете «1 100 ₽» — группируем сами
+const rub = (n: number) => `${String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
+
+const MUTED = "rgba(196, 196, 206, 0.62)";
+
+/** круглая кнопка степпера: 35px, контур; выключенная — почти невидимая */
+function StepBtn({ icon, disabled, onClick, label }: { icon: string; disabled: boolean; onClick: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={disabled ? undefined : "blin-press"}
+      style={{
+        appearance: "none",
+        margin: 0,
+        padding: 0,
+        width: 35,
+        height: 35,
+        flexShrink: 0,
+        borderRadius: "50%",
+        background: "#0E0E10",
+        border: `1px solid ${disabled ? "rgba(255, 255, 255, 0.06)" : "rgba(255, 255, 255, 0.16)"}`,
+        color: disabled ? "rgba(255, 255, 255, 0.28)" : C.text,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: disabled ? "default" : "pointer",
+        boxSizing: "border-box",
+        transition: "color 0.15s ease, border-color 0.15s ease",
+      }}
+    >
+      <FgnIcon name={icon} size={17} stroke={1.8} />
+    </button>
+  );
+}
+
+export default function Tariffs() {
+  const navigate = useNavigate();
+  const goBack = useSmartBack("/");
+  const [params] = useSearchParams();
+  const returnTo = params.get("return") || "";
+
+  const [periods, setPeriods] = useState<TariffPeriod[]>(FALLBACK);
+  const [devices, setDevices] = useState(5);
+  const [discount, setDiscount] = useState(0);
+  // устройства: сколько всего (минимум — тариф или то, что уже есть в подписке), цена доп. устройства в месяц
+  const [devTotal, setDevTotal] = useState(PLAN_PACK_DEVICES);
+  const [devMin, setDevMin] = useState(3);
+  const [devMax, setDevMax] = useState(20);
+  const [devPrice, setDevPrice] = useState(0);
+  const [devTable, setDevTable] = useState<number[]>([]); // цена n-го устройства в месяц
+  // участник семьи: продлевает семейную подписку — на столько устройств, сколько в ней сейчас, или больше
+  const [famMember, setFamMember] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const t = await fetchTariffs();
+        if (t.periods.length) setPeriods(t.periods);
+        setDevices(t.devices);
+        const min = Number(t.min_devices || 3);
+        setDevMin(min);
+        setDevMax(Number(t.max_devices || 20));
+        setDevPrice(Number(t.extra_device_price || 0));
+        if (t.device_prices?.length) setDevTable(t.device_prices);
+        setDevTotal(Math.max(min, Number(t.default_devices || PLAN_PACK_DEVICES)));
+      } catch { /* запасные цены */ }
+      try {
+        const d = await fetchDiscount();
+        if (d.active && d.percent > 0) setDiscount(d.percent);
+      } catch { /* без скидки */ }
+      try {
+        const q = await fetchQuote({ plan_devices: PLAN_PACK_DEVICES, months: 1, method: "sbp", extra_devices: 0, purpose: "subscription",
+          subscription_id: null, use_referral_balance: false });
+        if (!q) return;
+        const min = Number(q.min_devices || PLAN_PACK_DEVICES);
+        setDevMin(min);
+        if (q.max_devices) setDevMax(Number(q.max_devices));
+        if (q.extra_device_price != null) setDevPrice(Number(q.extra_device_price));
+        if (Array.isArray(q.device_prices) && q.device_prices.length) setDevTable(q.device_prices.map(Number));
+        // по умолчанию — сколько устройств сейчас в подписке (уменьшить можно до минимума)
+        setDevTotal(Math.max(min, Number(q.default_devices || min)));
+        if (q.family_member) setFamMember(true);
+      } catch { /* степпер уже есть из /plans */ }
+    })();
+  }, []);
+
+  const choose = (m: number) => {
+    const q = new URLSearchParams();
+    q.set("months", String(m));
+    q.set("dev", String(devNow));
+    if (returnTo) q.set("return", returnTo);
+    navigate(`/payment?${q.toString()}`);
+  };
+
+  const pack = PLAN_PACK_DEVICES;
+  const devNow = devTotal ?? devices;
+  const included = pack;
+  const priceOf = (n: number) => (devTable.length ? Number(devTable[Math.min(n, devTable.length) - 1] ?? devPrice) : devPrice);
+  const nextPrice = Math.round(devNow >= devMax ? priceOf(devNow) : priceOf(devNow + 1));
+  const setDev = (n: number) => setDevTotal(Math.min(devMax, Math.max(devMin, n)));
+
+  return (
+    <FgnPage>
+      <FgnHeader title="Выбор тарифа" onBack={goBack} />
+
+      <div
+          style={{
+            marginTop: 20.5,
+            padding: "17px 17px 16px 17px",
+            borderRadius: 30,
+            border: "1px solid rgba(42, 42, 48, 1)",
+            background: C.cardBg,
+            boxSizing: "border-box",
+            animation: "fgnFade 0.35s ease both",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", height: 35 }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 17, fontWeight: 500, lineHeight: "20px", letterSpacing: "-0.005em" }}>
+              Устройства
+            </div>
+            <StepBtn icon="minus" label="Меньше устройств" disabled={devNow <= devMin} onClick={() => setDev(devNow - 1)} />
+            <div style={{ width: 41, textAlign: "center", fontSize: 18, fontWeight: 600, lineHeight: "22px", fontVariantNumeric: "tabular-nums" }}>
+              {devNow}
+            </div>
+            <StepBtn icon="plus" label="Больше устройств" disabled={devNow >= devMax} onClick={() => setDev(devNow + 1)} />
+          </div>
+          <div style={{ marginTop: 13.5, fontSize: 14.5, lineHeight: "18px", color: MUTED }}>
+            {included} в тарифе · следующее +{nextPrice}{" "}₽/мес
+          </div>
+          {famMember ? (
+            <div style={{ marginTop: 6, fontSize: 13.5, lineHeight: "17px", color: MUTED }}>
+              Оплата продлит семейную подписку: на {devMin} {plural(devMin, "устройство", "устройства", "устройств")} или больше. Уменьшить число устройств может только владелец семьи.
+            </div>
+          ) : devMin > devices ? (
+            <div style={{ marginTop: 6, fontSize: 13.5, lineHeight: "17px", color: MUTED }}>
+              Сейчас в подписке {devMin} {plural(devMin, "устройство", "устройства", "устройств")} — при продлении они сохраняются.
+            </div>
+          ) : null}
+        </div>
+
+      <div style={{ marginTop: 21.5, fontSize: 14.5, lineHeight: "18px", color: MUTED }}>
+        Выберите период
+      </div>
+
+      <div style={{ marginTop: 13.5, display: "flex", flexDirection: "column", gap: 8 }}>
+        {periods.map((p, i) => {
+          const fb = FALLBACK.find((x) => x.months === p.months)?.price ?? 0;
+          const full = periodTotalRub(p, devNow, devTable, devPrice, fb);
+          const final = discount > 0 ? applyDiscount(full, discount) : full;
+          return (
+            <FgnCard
+              key={p.months}
+              onClick={() => choose(p.months)}
+              style={{ animation: `fgnFade 0.35s ease ${0.04 * i}s both` }}
+              title={periodTitle(p.months)}
+              subtitle={`${p.days} ${plural(p.days, "день", "дня", "дней")}, ${devNow} ${plural(devNow, "устройство", "устройства", "устройств")}`}
+              right={
+                <span style={{ display: "flex", alignItems: "baseline", gap: 8, flexShrink: 0 }}>
+                  {final < full ? (
+                    <span style={{ fontSize: 14, color: C.muted, textDecoration: "line-through" }}>{rub(full)}</span>
+                  ) : null}
+                  <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "-0.005em", fontVariantNumeric: "tabular-nums" }}>{rub(final)}</span>
+                </span>
+              }
+            />
+          );
+        })}
+      </div>
+    </FgnPage>
+  );
+}

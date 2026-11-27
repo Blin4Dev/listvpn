@@ -1,0 +1,612 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Key, Gift, Percent, X, CheckCircle, CreditCard, ArrowUpRight, ArrowDownLeft, Hash, Ban, Clock, Edit2, Copy, Database, Wallet, Plus, Send, Trash2, Save, RefreshCw, Shield, ArrowLeft, ExternalLink,
+  AlertTriangle,
+} from 'lucide-react';
+import { UserActionModal } from '../../components/UserActionModal';
+import { DCard, InfoRow, Modal, PaymentStatusBadge, Spinner, refundedRowStyle } from '../../components/ui';
+import { apiFetch, copyToClipboard, mergeInfo, parseErr } from '../../lib/api';
+import { DEFAULT_REF_RATE, fmtDateTime, relTime, whenRu } from '../../lib/format';
+import type { PaymentRow, ToastType } from '../../lib/types';
+import { can, canUserAction, isAdmin, isOwner, useMe } from '../../lib/access';
+import { ExchangeModal, TransferModal } from './SubscriptionActions';
+import { PaymentActions } from '../../components/PaymentActions';
+import { AmbassadorCard, type AmbassadorInfo } from './AmbassadorCard';
+
+export interface UserDetailData {
+  id: number; telegram_id: number | null; username: string | null;
+  first_name: string | null; last_name: string | null; email: string | null;
+  registration_date: string | null; status: string; is_banned: boolean; key_blocked?: boolean; ban_reason?: string | null; blacklist_reason?: string | null; blacklist_ignored?: boolean;
+  family?: { role: 'member'; owner_id: number; owner_name: string; active: boolean } | { role: 'owner'; max_members: number; members: { id: number; name: string; status: string; user_id?: number | null }[] } | null;
+  subscriptions_history?: { id: number; status: string; type?: string; expiry_date?: string | null; created_at?: string | null; deleted_at?: string | null; devices_limit?: number; ban_reason?: string | null; banned_at?: string | null }[];
+  banned_at?: string | null;
+  moderation?: { id: number; kind: string; label: string; reason: string | null; sub_id: number | null; actor: string | null; actor_name: string | null; created_at: string | null }[];
+  aa_warning?: { sub_id: number; at: string; reason: string | null; grace_until: string; valid_until: string } | null;
+  balance: number; partner_rate: number;
+  ambassador?: AmbassadorInfo;
+  partner_balance: number; is_partner: boolean; has_trial: boolean; trial_resettable?: boolean;
+  trial_status?: Record<string, { available: boolean; reason: string | null; text: string }>;
+  referrals: { id: number; telegram_id: number | null; username: string | null; email: string | null; full_name: string | null }[];
+  subscription: any | null;
+  discount?: { percent: number; expires_at: string | null; code: string | null; name: string | null; compensation_id?: number } | null;
+  compensations?: { id: number; days: number; days_applied: number; discount_percent: number; mass: number; actor_name: string | null; created_at: string; used_at: string | null; used_payment_id: string | null }[];
+  promo_activations?: { id: number; code: string | null; name: string | null; discount_percent: number; expires_at: string | null; created_at: string | null; active: boolean }[];
+}
+
+export interface RwDevice { hwid: string; platform: string | null; os_version: string | null; device_model: string | null; user_agent: string | null; created_at: string | null; updated_at: string | null; }
+
+export interface RwInfo { configured: boolean; found: boolean; online_at: string | null; first_connected_at: string | null; last_user_agent: string | null; status: string | null; used_traffic_bytes: number | null; traffic_limit_bytes: number | null; expire_at: string | null; hwid_device_limit: number | null; subscription_url: string | null; devices: RwDevice[]; error: string | null; }
+
+export const STATUS_META: Record<string, { label: string; cls: string }> = {
+  trial:   { label: 'Пробная подписка', cls: 'mute' },
+  active:  { label: 'Платная подписка', cls: 'solid' },
+  expired: { label: 'Истекла', cls: 'line' },
+  lapsed:  { label: 'Истекла', cls: 'line' },
+  never:   { label: 'Никогда не было подписки', cls: 'line' },
+  banned:  { label: 'Заблокирован', cls: 'danger' },
+  blocked: { label: 'Ключ заблокирован', cls: 'danger' },
+};
+
+const daysLabel = (d: number, has: boolean) => (!has ? 'нет подписки' : d < 1 ? 'меньше дня' : `${Math.floor(d)} дн.`);
+
+// merge: было / станет таблицей
+const MergeTable: React.FC<{ m: any }> = ({ m }) => {
+  const any = Boolean(m.keep?.has_sub || m.drop?.has_sub);
+  const cell: React.CSSProperties = { padding: '10px 12px', borderBottom: '1px solid var(--border)', fontVariantNumeric: 'tabular-nums' };
+  const notes: string[] = [];
+  if (m.balance > 0) notes.push(`Реферальный баланс второго аккаунта (${m.balance} ₽) перейдёт сюда.`);
+  if (m.link_changes) notes.push('Ссылка на подписку второго аккаунта перестанет работать — пользователю нужно заново добавить подписку в VPN-приложение.');
+  notes.push('Платежи, история и приглашённые друзья переедут сюда, второй аккаунт удалится.');
+  return (
+    <div className="flex flex-col gap-3">
+      {any && m.keep && m.drop && (
+        <div className="inset" style={{ padding: 0, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+            <thead><tr className="sub" style={{ fontSize: 12, textAlign: 'left' }}>
+              <th style={cell} /><th style={cell}>Этот</th><th style={cell}>Второй</th><th style={{ ...cell, color: 'var(--text)' }}>Станет</th>
+            </tr></thead>
+            <tbody>
+              <tr><td style={cell} className="sub">Подписка</td><td style={cell}>{daysLabel(m.keep.days, m.keep.has_sub)}</td><td style={cell}>{daysLabel(m.drop.days, m.drop.has_sub)}</td><td style={{ ...cell, fontWeight: 600 }}>{daysLabel(m.result.days, true)}</td></tr>
+              <tr><td style={{ ...cell, borderBottom: 0 }} className="sub">Устройства</td><td style={{ ...cell, borderBottom: 0 }}>{m.keep.has_sub ? m.keep.devices : '—'}</td><td style={{ ...cell, borderBottom: 0 }}>{m.drop.has_sub ? m.drop.devices : '—'}</td><td style={{ ...cell, borderBottom: 0, fontWeight: 600 }}>{m.result.devices}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      {any && <div className="sub" style={{ fontSize: 13 }}>Дни складываются, устройств остаётся больше из двух.</div>}
+      <div className="sub flex flex-col gap-1" style={{ fontSize: 13, lineHeight: 1.5 }}>
+        {notes.map((n) => <div key={n} className="flex gap-2"><span className="faint">•</span><span>{n}</span></div>)}
+      </div>
+    </div>
+  );
+};
+
+export const UserDetailPage: React.FC<{
+  userId: number; onBack: () => void; onToast: (t: string, m: string, ty?: ToastType) => void; onOpenUser: (id: number) => void;
+  canEdit?: boolean;
+}> = ({ userId, onBack, onToast, onOpenUser, canEdit = true }) => {
+  const me = useMe();
+  const owner = isOwner(me);  // возвраты только owner
+  // администратор: каждая кнопка — по его правам; остальным — как раньше (canEdit)
+  const ca = (action: string) => canEdit && canUserAction(me, action);
+  const cp = (perm: string) => canEdit && (!isAdmin(me) || can(me, perm));
+  const ownerOr = (perm: string) => owner || can(me, perm);
+  const [detail, setDetail] = useState<UserDetailData | null>(null);
+  const [payments, setPayments] = useState<PaymentRow[]>([]);
+  const [rw, setRw] = useState<RwInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [action, setAction] = useState<string | null>(null);
+  const [editTg, setEditTg] = useState(false);
+  const [editEmail, setEditEmail] = useState(false);
+  const [tgDraft, setTgDraft] = useState('');
+  const [emailDraft, setEmailDraft] = useState('');
+  const [promoDraft, setPromoDraft] = useState('');
+  const [special, setSpecial] = useState<'' | 'exchange' | 'transfer'>('');
+  // привязка email/tg, уже занятых другим аккаунтом → предупреждение о merge
+  const [mergeAsk, setMergeAsk] = useState<{ act: string; value: any; message: string; merge: any } | null>(null);
+
+  // семья: убрать участника (row — строка семьи владельца) или вывести самого пользователя из семьи
+  const familyRemove = async (row?: number) => {
+    if (!window.confirm(row ? 'Убрать из семьи? Ключ владельца будет перевыпущен.' : 'Вывести пользователя из семьи? Ключ владельца будет перевыпущен.')) return;
+    try {
+      await apiFetch(`/panel/users/${userId}/family${row ? `?row=${row}` : ''}`, { method: 'DELETE' });
+      onToast('Готово', 'Убран из семьи', 'success');
+      void load();
+    } catch (e) { onToast('Ошибка', parseErr(e), 'error'); }
+  };
+
+  const load = async () => {
+    try { setDetail(await apiFetch(`/panel/users/${userId}/detail`)); }
+    catch (e) { onToast('Ошибка', parseErr(e), 'error'); }
+    finally { setLoading(false); }
+  };
+  const loadPayments = async () => { try { setPayments((await apiFetch(`/panel/users/${userId}/payments`)) || []); } catch { /* ignore */ } };
+  const loadRw = async () => { try { setRw(await apiFetch(`/panel/users/${userId}/remnawave`)); } catch { /* ignore */ } };
+
+  useEffect(() => { setLoading(true); setRw(null); void load(); void loadPayments(); void loadRw(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [userId]);
+
+  const doAction = async (act: string, value: any = null, notify = false, confirmMsg?: string, confirm = false, channel?: 'telegram' | 'email') => {
+    if (confirmMsg && !window.confirm(confirmMsg)) return;
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/panel/users/${userId}/action`, { method: 'POST', body: JSON.stringify({ action: act, value, notify, confirm, channel }) });
+      if (res && res.deleted) { onToast('Готово', 'Аккаунт удалён', 'success'); onBack(); return; }
+      const sent = act === 'NOTIFY'
+        ? (res?.delivery?.telegram ? 'Сообщение отправлено в Telegram' : res?.delivery?.email ? 'Письмо отправлено' : 'Сообщение отправлено')
+        : (confirm ? 'Аккаунты объединены' : 'Действие выполнено');
+      onToast('Готово', sent, 'success');
+      await load(); await loadPayments(); await loadRw();
+    } catch (e) {
+      const m = mergeInfo(e);
+      if (m) setMergeAsk({ act, value, ...m });
+      else onToast('Ошибка', parseErr(e), 'error');
+    }
+    finally { setBusy(false); }
+  };
+
+  // компенсация: +1 день к подписке (если есть, даже истёкшей) и разовая скидка 7% — может выдать любой сотрудник
+  const compensate = async () => {
+    if (!window.confirm('Выдать компенсацию?\n\n+1 день к подписке (если она есть, даже истёкшая) и скидка 7% на следующую покупку. Пользователь получит сообщение.')) return;
+    setBusy(true);
+    try {
+      const r = await apiFetch(`/panel/users/${userId}/compensate`, { method: 'POST', body: JSON.stringify({ notify: true }) });
+      onToast('Компенсация выдана', r?.message || 'Готово', 'success');
+      await load(); await loadRw();
+    } catch (e) { onToast('Ошибка', parseErr(e), 'error'); }
+    finally { setBusy(false); }
+  };
+
+  const unlinkDevice = async (hwid: string) => {
+    if (!window.confirm('Отвязать это устройство?')) return;
+    try { await apiFetch(`/panel/users/${userId}/hwid/unlink`, { method: 'POST', body: JSON.stringify({ hwid }) }); onToast('Готово', 'Устройство отвязано', 'success'); await loadRw(); }
+    catch (e) { onToast('Ошибка', parseErr(e), 'error'); }
+  };
+
+  const unlinkReferral = async (refId: number) => {
+    try { await apiFetch(`/panel/users/${userId}/referrals/${refId}/unlink`, { method: 'POST' }); onToast('Готово', 'Реферал отвязан', 'success'); await load(); }
+    catch (e) { onToast('Ошибка', parseErr(e), 'error'); }
+  };
+
+  if (loading) return <div style={{ padding: 60, display: "flex", justifyContent: "center" }}><Spinner size={22} /></div>;
+  if (!detail) return (
+    <div className="flex flex-col gap-4">
+      <button className="btn" onClick={onBack}><ArrowLeft size={16} /> Назад</button>
+      <div className="muted">Пользователь не найден.</div>
+    </div>
+  );
+
+  const uname = detail.username ? `@${detail.username}` : (detail.telegram_id ? `id${detail.telegram_id}` : `#${detail.id}`);
+  const stMeta = detail.key_blocked ? STATUS_META.blocked : detail.is_banned ? STATUS_META.banned : (STATUS_META[detail.status] || STATUS_META.never);
+  const sub = detail.subscription;
+  // ссылка на подписку: из бд, иначе из remnawave
+  const subLink: string = (sub?.key_config && /^https?:\/\//.test(String(sub.key_config)) ? String(sub.key_config) : '') || rw?.subscription_url || '';
+
+  return (
+    <div className="flex flex-col gap-5">
+      {action && (
+        <UserActionModal type={action} onClose={() => setAction(null)}
+          canTelegram={!!detail.telegram_id} canEmail={!!detail.email}
+          onConfirm={(value, notify, channel) => { const a = action; setAction(null); void doAction(a, value, notify, undefined, false, channel); }} />
+      )}
+
+      <div className="flex items-center justify-between gap-3" style={{ flexWrap: 'wrap' }}>
+        <button className="btn" onClick={onBack}><ArrowLeft size={16} /> К пользователям</button>
+        <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {!detail.is_banned && cp('users.compensate') && <button className="btn" disabled={busy} onClick={() => void compensate()} title="+1 день к подписке и скидка 7% на следующую покупку"><Gift size={15} /> Компенсация</button>}
+        {canEdit && (
+          <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {detail.key_blocked
+              ? ca('UNBLOCK_KEY') && <button className="btn" disabled={busy} onClick={() => void doAction('UNBLOCK_KEY', null, false)}><CheckCircle size={15} /> Разблокировать ключ</button>
+              : ca('BLOCK_KEY') && <button className="btn danger" disabled={busy} onClick={() => void doAction('BLOCK_KEY', null, false, 'Заблокировать ключ (подписку) пользователя?')}><Ban size={15} /> Заблокировать ключ</button>}
+            {ca('DELETE_USER') && <button className="btn danger" disabled={busy} onClick={() => void doAction('DELETE_USER', null, false, 'Удалить аккаунт безвозвратно из базы и Remnawave?')}><Trash2 size={15} /> Удалить</button>}
+          </div>
+        )}
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: 18 }}>
+        <div className="flex items-center gap-3" style={{ flexWrap: 'wrap' }}>
+          <span className="avatar" style={{ width: 48, height: 48, fontSize: 16 }}>{uname.replace('@', '').slice(0, 2).toUpperCase()}</span>
+          <div className="flex-1" style={{ minWidth: 0 }}>
+            <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+              <span className="h-sec" style={{ fontSize: 18 }}>{uname}</span>
+              <span className={`badge ${stMeta.cls}`}>{stMeta.label}</span>
+              {Number(detail.partner_rate ?? DEFAULT_REF_RATE) !== DEFAULT_REF_RATE && <span className="badge mute" title="Индивидуальный процент реферальной программы">Реф. {detail.partner_rate}%</span>}
+              {sub?.no_renew && <span className="badge line">Без продления</span>}
+            </div>
+            {detail.is_banned && <div className="sub" style={{ color: 'var(--danger)' }}>Причина блокировки: {detail.ban_reason || 'не указана'}{detail.banned_at ? ` · ${fmtDateTime(detail.banned_at)}` : ''}</div>}
+            {(detail.subscriptions_history || []).filter((h) => h.status === 'Banned').map((h) => (
+              <div key={h.id} className="sub" style={{ color: 'var(--danger)' }}>Подписка #{h.id} заблокирована: {h.ban_reason || 'причина не записана'}{h.banned_at ? ` · ${fmtDateTime(h.banned_at)}` : ''}</div>
+            ))}
+            {detail.family && detail.family.role === 'member' && (
+              <div className="sub">
+                Участник семьи <button className="link" style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }} onClick={() => onOpenUser((detail.family as any).owner_id)}>{detail.family.owner_name}</button>
+                {detail.family.active ? '' : ' (сейчас не действует)'}
+                {cp('users.family') && <> · <button style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove()}>вывести из семьи</button></>}
+              </div>
+            )}
+            {detail.family && detail.family.role === 'owner' && (
+              <div className="sub">
+                Семья ({detail.family.members.length + 1}/{detail.family.max_members}):{' '}
+                {detail.family.members.map((m, i) => (
+                  <span key={m.id}>
+                    {i > 0 && ', '}
+                    {m.user_id ? <button style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', textDecoration: 'underline', color: 'inherit' }} onClick={() => onOpenUser(Number(m.user_id))}>{m.name}</button> : m.name}
+                    {m.status === 'pending' ? ' (приглашён)' : ''}
+                    {cp('users.family') && <button title="Убрать из семьи" style={{ background: 'none', border: 0, padding: '0 2px', cursor: 'pointer', color: 'var(--danger)' }} onClick={() => familyRemove(m.id)}>×</button>}
+                  </span>
+                ))}
+              </div>
+            )}
+            {detail.aa_warning && (
+              <div className="sub" style={{ color: '#fb923c' }}>
+                <AlertTriangle size={13} style={{ display: 'inline', verticalAlign: '-2px' }} /> Предупреждение анти-абуза {fmtDateTime(detail.aa_warning.at)}{detail.aa_warning.reason ? `: ${detail.aa_warning.reason}` : ''}. Повторное нарушение после {fmtDateTime(detail.aa_warning.grace_until)} — бан (действует до {fmtDateTime(detail.aa_warning.valid_until)}).
+              </div>
+            )}
+            {!detail.is_banned && detail.blacklist_ignored && detail.blacklist_reason != null && <div className="sub">В общем чёрном списке ({detail.blacklist_reason || 'без причины'}) — разблокирован вручную</div>}
+            {!canEdit && <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>Только просмотр — менять данные можно, когда обращение у вас в работе</div>}
+          </div>
+          {ca('NOTIFY') && <button className="btn solid" onClick={() => setAction('NOTIFY')}><Send size={15} /> Написать</button>}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <DCard title="Профиль" icon={Hash}>
+          <InfoRow label="Внутренний ID"><span className="mono">{detail.id}</span></InfoRow>
+          <InfoRow label="Telegram ID">
+            {ca('SET_TELEGRAM_ID') && editTg ? (
+              <>
+                <input className="input mono sm" style={{ width: 150 }} value={tgDraft} onChange={(e) => setTgDraft(e.target.value)} placeholder="123456789" />
+                <button className="icon-btn" title="Сохранить" onClick={async () => { await doAction('SET_TELEGRAM_ID', tgDraft); setEditTg(false); }}><Save size={15} /></button>
+                <button className="icon-btn" title="Отмена" onClick={() => setEditTg(false)}><X size={15} /></button>
+              </>
+            ) : (
+              <>
+                <span className="mono">{detail.telegram_id ?? '—'}</span>
+                {ca('SET_TELEGRAM_ID') && <button className="icon-btn" title={detail.telegram_id ? 'Изменить' : 'Привязать'} onClick={() => { setTgDraft(String(detail.telegram_id ?? '')); setEditTg(true); }}><Edit2 size={14} /></button>}
+                {ca('UNBIND_TELEGRAM') && detail.telegram_id && detail.email && <button className="btn sm danger" onClick={() => void doAction('UNBIND_TELEGRAM', null, false, 'Отвязать Telegram от аккаунта?')}>Отвязать</button>}
+              </>
+            )}
+          </InfoRow>
+          <InfoRow label="Email">
+            {ca('SET_EMAIL') && editEmail ? (
+              <>
+                <input className="input mono sm" style={{ width: 190 }} value={emailDraft} onChange={(e) => setEmailDraft(e.target.value)} placeholder="user@mail.com" />
+                <button className="icon-btn" title="Сохранить" onClick={async () => { await doAction('SET_EMAIL', emailDraft); setEditEmail(false); }}><Save size={15} /></button>
+                <button className="icon-btn" title="Отмена" onClick={() => setEditEmail(false)}><X size={15} /></button>
+              </>
+            ) : (
+              <>
+                <span className="mono">{detail.email ?? '—'}</span>
+                {ca('SET_EMAIL') && <button className="icon-btn" title={detail.email ? 'Изменить' : 'Привязать'} onClick={() => { setEmailDraft(detail.email ?? ''); setEditEmail(true); }}><Edit2 size={14} /></button>}
+                {ca('UNBIND_EMAIL') && detail.email && detail.telegram_id && <button className="btn sm danger" onClick={() => void doAction('UNBIND_EMAIL', null, false, 'Отвязать email от аккаунта?')}>Отвязать</button>}
+              </>
+            )}
+          </InfoRow>
+          <InfoRow label="Регистрация"><span className="mono">{fmtDateTime(detail.registration_date)}</span></InfoRow>
+          <InfoRow label="Статус"><span className={`badge ${stMeta.cls}`}>{stMeta.label}</span></InfoRow>
+          {detail.trial_status && (
+            <InfoRow label="Пробный">
+              <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {(['miniapp', 'web'] as const).map((src) => {
+                  const t = detail.trial_status?.[src];
+                  if (!t) return null;
+                  return (
+                    <span key={src} className={t.available ? '' : 'faint'}>
+                      {src === 'miniapp' ? 'Мини-приложение' : 'Сайт'}: {t.available ? 'можно взять' : `нельзя — ${t.text || t.reason}`}
+                    </span>
+                  );
+                })}
+              </span>
+            </InfoRow>
+          )}
+          {ca('RESET_TRIAL') && (
+            <div className="flex gap-2 mt-3">
+              <button className="btn sm" title={(detail.trial_resettable ?? detail.has_trial) ? '' : 'Сбрасывать нечего — пробный и так доступен'} disabled={!(detail.trial_resettable ?? detail.has_trial)} onClick={() => void doAction('RESET_TRIAL', null, false, 'Сбросить пробный период? Пользователь сможет активировать его заново.')}><RefreshCw size={14} /> Сбросить триал</button>
+            </div>
+          )}
+        </DCard>
+
+        <DCard title="Реферальная программа" icon={Percent}>
+          <InfoRow label="Процент реферала">
+            <span className="mono">{detail.partner_rate}%</span>
+            {canEdit && ownerOr('users.action.SET_PARTNER_RATE') && <button className="icon-btn" title="Изменить" onClick={() => setAction('SET_PARTNER_RATE')}><Edit2 size={14} /></button>}
+          </InfoRow>
+          <InfoRow label="Реферальный баланс">
+            <span className="mono">{detail.partner_balance} ₽</span>
+            {canEdit && (owner || isAdmin(me)) && (<>
+              {ca('ADD_PARTNER_BALANCE') && <button className="icon-btn" title="Начислить" onClick={() => setAction('ADD_PARTNER_BALANCE')}><Plus size={14} /></button>}
+              {ca('SUB_PARTNER_BALANCE') && <button className="icon-btn" title="Списать" onClick={() => setAction('SUB_PARTNER_BALANCE')}><ArrowDownLeft size={14} /></button>}
+              {ca('SET_PARTNER_BALANCE') && <button className="icon-btn" title="Установить" onClick={() => setAction('SET_PARTNER_BALANCE')}><Wallet size={14} /></button>}
+            </>)}
+          </InfoRow>
+          <div className="mt-3">
+            <div className="sub mb-2">Рефералы ({detail.referrals.length})</div>
+            {detail.referrals.length === 0 ? <div className="muted sm">Нет рефералов</div> : (
+              <div className="flex flex-col gap-1">
+                {detail.referrals.map((r) => (
+                  <div key={r.id} className="inset flex items-center justify-between" style={{ padding: '8px 10px' }}>
+                    <button className="btn sm" style={{ background: 'transparent', border: 'none', padding: 0 }} onClick={() => onOpenUser(r.id)}>{r.username ? `@${r.username}` : (r.telegram_id ? `id${r.telegram_id}` : `#${r.id}`)}</button>
+                    {canEdit && ownerOr('users.referrals') && <button className="icon-btn danger" title="Отвязать" onClick={() => void unlinkReferral(r.id)}><X size={14} /></button>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </DCard>
+      </div>
+
+      {detail.ambassador && (
+        <AmbassadorCard userId={userId} info={detail.ambassador} canEdit={canEdit && ownerOr('users.action.SET_PARTNER_RATE')}
+          onSaved={() => void load()} onToast={onToast} />
+      )}
+
+      <DCard title="Скидка / Промокод" icon={Gift}>
+        {detail.discount ? (
+          <InfoRow label="Активная скидка">
+            <span style={{ fontWeight: 700, color: 'var(--accent, #F18726)' }}>{detail.discount.percent}%</span>
+            <span className="sub">{detail.discount.code}{detail.discount.name ? `${detail.discount.code ? ' · ' : ''}${detail.discount.name}` : ''}</span>
+            <span className="sub">{detail.discount.compensation_id ? 'на одну покупку' : `до ${fmtDateTime(detail.discount.expires_at)}`}</span>
+            {ca('REMOVE_PROMO') && <button className="btn sm danger" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', detail.discount?.compensation_id ? '@compensation' : (detail.discount?.code || null), false, 'Снять скидку у пользователя?')}>Снять</button>}
+          </InfoRow>
+        ) : (
+          <div className="muted sm" style={{ marginBottom: 10 }}>Активной скидки нет.</div>
+        )}
+        {ca('APPLY_PROMO') && (
+          <div className="flex items-center gap-2 mt-3" style={{ flexWrap: 'wrap' }}>
+            <input className="input mono sm" style={{ width: 170 }} value={promoDraft} onChange={(e) => setPromoDraft(e.target.value.toUpperCase())} placeholder="ПРОМОКОД" />
+            <button className="btn sm solid" disabled={busy || !promoDraft.trim()} onClick={async () => { await doAction('APPLY_PROMO', promoDraft.trim()); setPromoDraft(''); }}>Выдать промокод</button>
+          </div>
+        )}
+        {detail.promo_activations && detail.promo_activations.length > 0 && (
+          <div className="mt-3">
+            <div className="sub mb-2">История активаций</div>
+            <div className="flex flex-col gap-1">
+              {detail.promo_activations.map((a) => (
+                <div key={a.id} className="inset flex items-center justify-between" style={{ padding: '8px 10px' }}>
+                  <span className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+                    <span className="mono">{a.code}</span>
+                    <span style={{ fontWeight: 600 }}>{a.discount_percent}%</span>
+                    <span className={`badge ${a.active ? 'solid' : 'line'}`}>{a.active ? 'активна' : 'истекла'}</span>
+                    <span className="sub">до {fmtDateTime(a.expires_at)}</span>
+                  </span>
+                  {ca('REMOVE_PROMO') && a.active && <button className="icon-btn danger" title="Снять" disabled={busy} onClick={() => void doAction('REMOVE_PROMO', a.code || null)}><X size={14} /></button>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {detail.compensations && detail.compensations.length > 0 && (
+          <div className="mt-3">
+            <div className="sub mb-2">Компенсации</div>
+            <div className="flex flex-col gap-1">
+              {detail.compensations.map((c) => (
+                <div key={c.id} className="inset flex items-center gap-2" style={{ padding: '8px 10px', flexWrap: 'wrap' }}>
+                  <span className="mono sub">{fmtDateTime(c.created_at)}</span>
+                  <span>{c.days_applied ? `+${c.days} дн.` : 'без дней'} · {c.discount_percent}%</span>
+                  <span className={`badge ${c.used_at ? 'line' : 'solid'}`}>{c.used_at ? (c.used_payment_id === 'removed' ? 'скидка снята' : 'скидка использована') : 'скидка ждёт покупки'}</span>
+                  <span className="sub">{c.mass ? 'всем' : ''}{c.actor_name ? `${c.mass ? ' · ' : ''}${c.actor_name}` : ''}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </DCard>
+
+      {mergeAsk && (
+        <Modal onClose={() => setMergeAsk(null)} title="Объединить аккаунты?" icon={AlertTriangle} width={520}
+          footer={<><button className="btn" onClick={() => setMergeAsk(null)}>Отмена</button>
+            <button className="btn solid" disabled={busy} onClick={async () => { const a = mergeAsk; setMergeAsk(null); await doAction(a.act, a.value, false, undefined, true); }}>Объединить</button></>}>
+          <div className="sub" style={{ marginBottom: 12 }}>
+            {mergeAsk.message}. Второй аккаунт — <b style={{ color: 'var(--text)' }}>{mergeAsk.merge.other?.label}</b> (#{mergeAsk.merge.other?.id}).
+          </div>
+          <MergeTable m={mergeAsk.merge} />
+        </Modal>
+      )}
+      {special === 'exchange' && sub && <ExchangeModal userId={userId} current={sub.devices_limit ?? 1} onClose={() => setSpecial('')} onDone={() => { setSpecial(''); void load(); void loadRw(); }} onToast={onToast} />}
+      {special === 'transfer' && <TransferModal userId={userId} onClose={() => setSpecial('')} onDone={(tid) => { setSpecial(''); if (window.confirm('Подписка перенесена. Открыть карточку получателя?')) onOpenUser(tid); else { void load(); void loadRw(); } }} onToast={onToast} />}
+      <DCard title="Подписка" icon={Key}>
+        {!sub ? (
+          <div className="flex flex-col gap-3">
+            <div className="muted sm">Активной подписки нет.</div>
+            {ca('EXTEND_ALL') && <button className="btn sm solid" style={{ alignSelf: 'flex-start' }} onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Выдать подписку</button>}
+          </div>
+        ) : (
+          <>
+            <InfoRow label="Действует до">
+              <span className="mono">{fmtDateTime(sub.expiry_date)}</span>
+              {typeof sub.days_left === 'number' && <span className="sub">({sub.days_left} дн.)</span>}
+            </InfoRow>
+            <InfoRow label="Срок">
+              {ca('EXTEND_ALL') || ca('REDUCE_SUB') ? (<>
+                {ca('EXTEND_ALL') && <button className="btn sm solid" onClick={() => setAction('EXTEND_ALL')}><Plus size={14} /> Продлить</button>}
+                {ca('REDUCE_SUB') && <button className="btn sm" onClick={() => setAction('REDUCE_SUB')}>Уменьшить</button>}
+              </>) : <span className="faint">—</span>}
+            </InfoRow>
+            <InfoRow label="Трафик (ГБ)">
+              <span className="mono">{sub.traffic_used ?? 0} / {sub.traffic_limit ? sub.traffic_limit : '∞'}</span>
+              {canEdit && (<>
+                {ca('ADD_TRAFFIC') && <button className="icon-btn" title="Добавить" onClick={() => setAction('ADD_TRAFFIC')}><Plus size={14} /></button>}
+                {ca('SUB_TRAFFIC') && <button className="icon-btn" title="Убавить" onClick={() => setAction('SUB_TRAFFIC')}><ArrowDownLeft size={14} /></button>}
+                {ca('SET_TRAFFIC') && <button className="icon-btn" title="Установить лимит" onClick={() => setAction('SET_TRAFFIC')}><Database size={14} /></button>}
+              </>)}
+            </InfoRow>
+            <InfoRow label="Ссылка на подписку">
+              {subLink ? (
+                <>
+                  <span className="mono sub" style={{ maxWidth: 'min(300px, 100%)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', minWidth: 0 }} title={subLink}>
+                    {subLink.replace(/^https?:\/\//, '')}
+                  </span>
+                  <button className="btn sm" onClick={async () => { if (await copyToClipboard(subLink)) onToast('Скопировано', 'Ссылка на подписку', 'success'); }}>
+                    <Copy size={14} /> Копировать
+                  </button>
+                  <a className="icon-btn" href={subLink} target="_blank" rel="noreferrer" title="Открыть"><ExternalLink size={14} /></a>
+                </>
+              ) : <span className="faint">нет ссылки</span>}
+            </InfoRow>
+            <InfoRow label="Устройств">
+              <span className="mono">{rw?.found ? rw.devices.length : (sub.devices_used ?? 0)} / {sub.devices_limit ?? 1}</span>
+              {ca('SET_DEVICES') && <button className="icon-btn" title="Изменить лимит" onClick={() => setAction('SET_DEVICES')}><Edit2 size={14} /></button>}
+            </InfoRow>
+            {canEdit && (
+              <InfoRow label="Особые действия">
+                {cp('users.devices') && <button className="btn sm" onClick={() => setSpecial('exchange')}><RefreshCw size={14} /> Устройства ⇄ дни</button>}
+                {cp('users.transfer') && <button className="btn sm" onClick={() => setSpecial('transfer')}><ArrowUpRight size={14} /> Перенести</button>}
+              </InfoRow>
+            )}
+            <InfoRow label="Продление пользователем">
+              {sub.no_renew ? (
+                <>
+                  <span className="badge danger">Запрещено</span>
+                  {ca('SET_NO_RENEW') && <button className="btn sm" disabled={busy} onClick={() => void doAction('SET_NO_RENEW', 0, false)}>Разрешить</button>}
+                </>
+              ) : (
+                <>
+                  <span className="badge solid">Разрешено</span>
+                  {ca('SET_NO_RENEW') && (
+                    <button className="btn sm danger" disabled={busy}
+                      onClick={() => void doAction('SET_NO_RENEW', 1, false,
+                        'Запретить продление?\n\nПодписка работает до конца срока, но продлить её пользователь не сможет. После окончания она сразу удалится (без 7 дней ожидания).\n\nДокупать устройства, сбрасывать трафик и добавлять подписку в приложение — можно. Сами вы продлить можете, как и раньше.')}>
+                      <Ban size={14} /> Запретить
+                    </button>
+                  )}
+                </>
+              )}
+            </InfoRow>
+            {sub.no_renew && (
+              <div className="sub" style={{ marginTop: 6 }}>
+                Пользователь не может продлить подписку. После окончания ({fmtDateTime(sub.expiry_date)}) она сразу удалится.
+              </div>
+            )}
+          </>
+        )}
+      </DCard>
+
+      {detail.subscriptions_history && detail.subscriptions_history.length > 0 && (
+        <DCard title="История подписок" icon={Clock}>
+          <div className="flex flex-col gap-1">
+            {detail.subscriptions_history.map((h) => {
+              const expired = h.status === 'Active' && h.expiry_date && new Date(h.expiry_date).getTime() < Date.now();
+              const badge = h.status === 'Deleted' ? { cls: 'line', label: 'Удалена' }
+                : h.status === 'Banned' ? { cls: 'danger', label: 'Заблокирована' }
+                : (h.status === 'Expired' || expired) ? { cls: 'mute', label: 'Истекла' }
+                : { cls: 'solid', label: 'Активна' };
+              return (
+                <div key={h.id} className="inset flex items-center justify-between gap-3" style={{ padding: '9px 12px', flexWrap: 'wrap' }}>
+                  <span className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+                    <span className="mono muted">#{h.id}</span>
+                    <span>{h.type === 'trial' ? 'Пробная' : 'Платная'}</span>
+                    <span className="sub">{h.devices_limit ?? 1} устр.</span>
+                    <span className={`badge ${badge.cls}`}>{badge.label}</span>
+                  </span>
+                  <span className="sub mono" style={{ fontSize: 12 }}>
+                    {fmtDateTime(h.created_at)} → {fmtDateTime(h.expiry_date)}
+                    {h.deleted_at ? <> · удалена {fmtDateTime(h.deleted_at)}</> : null}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </DCard>
+      )}
+
+      {detail.moderation && detail.moderation.length > 0 && (
+        <DCard title="Блокировки и нарушения" icon={AlertTriangle}>
+          <div className="flex flex-col gap-1">
+            {detail.moderation.map((e) => {
+              const cls = e.kind === 'aa_warn' ? 'line' : (e.kind === 'unban' || e.kind === 'key_unblock') ? 'mute' : 'danger';
+              const who = e.actor === 'antiabuse' ? 'анти-абуз' : e.actor === 'blacklist' ? 'чёрный список' : e.actor_name || (e.actor === 'owner' ? 'администратор' : e.actor || '');
+              return (
+                <div key={e.id} className="inset flex items-center justify-between gap-3" style={{ padding: '9px 12px', flexWrap: 'wrap' }}>
+                  <span className="flex items-center gap-2" style={{ flexWrap: 'wrap', minWidth: 0 }}>
+                    <span className={`badge ${cls}`}>{e.label}</span>
+                    {e.sub_id ? <span className="mono muted">#{e.sub_id}</span> : null}
+                    {e.reason ? <span style={{ wordBreak: 'break-word' }}>{e.reason}</span> : null}
+                  </span>
+                  <span className="sub" style={{ fontSize: 12 }}>{fmtDateTime(e.created_at)}{who ? ` · ${who}` : ''}</span>
+                </div>
+              );
+            })}
+          </div>
+        </DCard>
+      )}
+
+      <DCard title="Remnawave" icon={Shield}>
+        {!rw ? <div className="center" style={{ padding: 20 }}><Spinner size={18} /></div>
+          : !rw.configured ? <div className="muted sm">Remnawave не настроена.</div>
+          : !rw.found ? <div className="muted sm">Пользователь не найден в Remnawave.</div>
+          : (
+          <>
+            <InfoRow label="Онлайн / последний вход"><span>{rw.online_at ? relTime(rw.online_at) : '—'}</span></InfoRow>
+            <InfoRow label="Первое подключение"><span className="mono">{fmtDateTime(rw.first_connected_at)}</span></InfoRow>
+            <InfoRow label="Подписка">
+              {rw.subscription_url
+                ? <button className="btn ghost sm mono" style={{ padding: 0, maxWidth: 'min(230px, 100%)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', minWidth: 0 }}
+                    title="Скопировать ссылку на подписку"
+                    onClick={async () => { if (await copyToClipboard(rw.subscription_url!)) onToast('Скопировано', 'Ссылка на подписку', 'success'); }}>
+                    {rw.subscription_url.replace(/^https?:\/\//, '')}
+                  </button>
+                : <span className="faint">—</span>}
+              {ca('RESET_SUB') && (
+                <button className="btn sm danger" disabled={busy}
+                  onClick={() => void doAction('RESET_SUB', null, true,
+                    'Сбросить подписку?\n\nRemnawave выдаст новый ключ: старая ссылка и все настроенные на неё приложения перестанут работать. Пользователь получит сообщение в Telegram, что нужно заново добавить подписку.')}>
+                  <RefreshCw size={14} /> Сбросить
+                </button>
+              )}
+            </InfoRow>
+            {rw.last_user_agent && <InfoRow label="Клиент"><span className="sub" style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{rw.last_user_agent}</span></InfoRow>}
+            <div className="mt-3">
+              <div className="sub mb-2">Устройства ({rw.devices.length}{rw.hwid_device_limit ? ` / ${rw.hwid_device_limit}` : ''})</div>
+              {rw.devices.length === 0 ? <div className="muted sm">Нет привязанных устройств</div> : (
+                <div className="flex flex-col gap-1">
+                  {rw.devices.map((d) => (
+                    <div key={d.hwid} className="inset flex items-center justify-between gap-2" style={{ padding: '8px 10px' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 500 }}>{[d.platform, d.device_model].filter(Boolean).join(' · ') || 'Устройство'}</div>
+                        <div className="sub" style={{ fontSize: 12 }}>
+                          активность: {whenRu(d.updated_at || d.created_at)}{d.created_at ? ` · добавлено ${whenRu(d.created_at)}` : ''}
+                        </div>
+                        <div className="faint mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 280, fontSize: 11 }}>{d.hwid}</div>
+                      </div>
+                      {cp('users.devices') && <button className="icon-btn danger" title="Отвязать" onClick={() => void unlinkDevice(d.hwid)}><Trash2 size={14} /></button>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {rw.error && <div className="sub" style={{ marginTop: 8 }}>{rw.error}</div>}
+          </>
+        )}
+      </DCard>
+
+      <DCard title="История платежей" icon={CreditCard}>
+        {payments.length === 0 ? <div className="muted sm">Платежей нет.</div> : (
+          <div className="tbl-wrap"><div style={{ overflowX: 'auto' }}>
+            <table className="tbl">
+              <thead><tr><th>Дата</th><th>Провайдер</th><th>Сумма</th><th>Назначение</th><th>Статус</th><th></th></tr></thead>
+              <tbody>
+                {payments.map((pm) => (
+                  <tr key={String(pm.id)} style={refundedRowStyle(pm.status)}>
+                    <td className="muted mono">{fmtDateTime(pm.created_at)}</td>
+                    <td>{pm.provider || '—'}</td>
+                    <td className="mono">
+                      {pm.stars ? `${pm.stars} ⭐` : `${pm.amount ?? 0} ${pm.currency || ''}`}
+                      {pm.referral_applied ? <span className="sub" style={{ marginLeft: 6 }}>+{pm.referral_applied}₽ реф.</span> : null}
+                    </td>
+                    <td className="sub">{pm.description || pm.purpose || '—'}{pm.provider_payment_id ? <div className="faint mono" style={{ fontSize: 11 }}>{pm.provider_payment_id}</div> : null}</td>
+                    <td><PaymentStatusBadge status={pm.status} />{pm.chargeback_reported && pm.status === 'paid' && <div className="badge danger" style={{ marginTop: 4 }}>пришёл чарджбек</div>}</td>
+                    <td style={{ textAlign: 'right' }}>
+                      {ownerOr('finance.refund') && <PaymentActions pm={pm} onToast={onToast} onDone={() => { void loadPayments(); void load(); void loadRw(); }} />}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div></div>
+        )}
+      </DCard>
+
+    </div>
+  );
+};

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 -6 132 132" width="132" height="132">
+<defs><filter id="g" x="-20%" y="-20%" width="140%" height="140%">
+  <feGaussianBlur in="SourceAlpha" stdDeviation="2.2" result="b"/>
+  <feFlood flood-color="#FFFFFF" flood-opacity="0.45"/><feComposite in2="b" operator="in" result="glow"/>
+  <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+<mask id="m" maskUnits="userSpaceOnUse" x="-6" y="-6" width="132" height="132">
+  <path d="M49.15 16.33 L50.81 4.76 L69.19 4.76 L70.85 16.33 L83.21 21.45 L92.56 14.44 L105.56 27.44 L98.55 36.79 L103.67 49.15 L115.24 50.81 L115.24 69.19 L103.67 70.85 L98.55 83.21 L105.56 92.56 L92.56 105.56 L83.21 98.55 L70.85 103.67 L69.19 115.24 L50.81 115.24 L49.15 103.67 L36.79 98.55 L27.44 105.56 L14.44 92.56 L21.45 83.21 L16.33 70.85 L4.76 69.19 L4.76 50.81 L16.33 49.15 L21.45 36.79 L14.44 27.44 L27.44 14.44 L36.79 21.45 Z" fill="#fff" stroke="#fff" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="60" cy="60" r="35" fill="#000"/>
+  <circle cx="60" cy="60" r="27" fill="none" stroke="#fff" stroke-width="7"/>
+  <line x1="60" y1="60" x2="33.69" y2="50.42" stroke="#fff" stroke-width="7.5" stroke-linecap="round"/><line x1="60" y1="60" x2="86.31" y2="50.42" stroke="#fff" stroke-width="7.5" stroke-linecap="round"/><line x1="60" y1="60" x2="60.00" y2="88.00" stroke="#fff" stroke-width="7.5" stroke-linecap="round"/>
+  <circle cx="60" cy="60" r="9" fill="#fff"/>
+</mask></defs>
+<g filter="url(#g)"><rect x="-6" y="-6" width="132" height="132" fill="#FFFFFF" mask="url(#m)"/></g></svg>

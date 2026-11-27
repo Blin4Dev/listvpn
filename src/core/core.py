@@ -1,0 +1,10950 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import math
+import os
+import re
+import asyncio
+import secrets
+import string
+import threading
+import time
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Optional
+from urllib.parse import parse_qsl, urlparse
+
+try:
+    from . import database as db
+    from . import projects  # type: ignore
+except ImportError:
+    import database as db  # type: ignore
+    import projects  # type: ignore
+
+# src/api (yookassa, telegram_stars, remnawave) в sys.path
+import sys as _sys
+_API_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "api"))
+if os.path.isdir(_API_DIR) and _API_DIR not in _sys.path:
+    _sys.path.insert(0, _API_DIR)
+
+try:
+    from . import fulfillment
+    from . import contest
+except ImportError:
+    import contest  # type: ignore
+    import fulfillment  # type: ignore
+
+try:
+    from . import provisioning
+except ImportError:
+    import provisioning  # type: ignore
+
+try:
+    from . import services
+except ImportError:
+    import services  # type: ignore
+
+try:
+    from . import notifier
+except ImportError:
+    import notifier  # type: ignore
+
+try:
+    from . import forum
+except ImportError:
+    import forum  # type: ignore
+
+
+try:
+    from . import mailer
+except ImportError:
+    import mailer  # type: ignore
+
+try:
+    from . import reflevels
+    from . import ambassadors  # type: ignore
+except ImportError:
+    import reflevels  # type: ignore
+    import ambassadors  # type: ignore
+
+try:
+    from . import ratelimit
+except ImportError:
+    import ratelimit  # type: ignore
+
+try:
+    from . import blacklist  # type: ignore
+except ImportError:
+    import blacklist  # type: ignore
+
+try:
+    from . import moderation  # type: ignore
+except ImportError:  # pragma: no cover
+    import moderation  # type: ignore
+
+try:
+    from . import teamchat  # type: ignore
+except ImportError:  # pragma: no cover
+    import teamchat  # type: ignore
+
+try:
+    from . import grace  # type: ignore
+    from . import names  # type: ignore
+except ImportError:  # pragma: no cover
+    import grace  # type: ignore
+    import names  # type: ignore
+
+try:
+    from . import antiabuse  # type: ignore
+except ImportError:  # pragma: no cover
+    import antiabuse  # type: ignore
+
+try:
+    from . import family  # type: ignore
+except ImportError:  # pragma: no cover
+    import family  # type: ignore
+
+try:
+    from . import resale  # type: ignore
+except ImportError:  # pragma: no cover
+    import resale  # type: ignore
+
+try:
+    from . import apiv1_app  # type: ignore
+except ImportError:  # pragma: no cover
+    import apiv1_app  # type: ignore
+
+try:
+    from . import support  # type: ignore
+    from . import s3store  # type: ignore
+    from . import captcha as captcha_mod  # type: ignore
+except ImportError:  # pragma: no cover
+    import support  # type: ignore
+    import s3store  # type: ignore
+    import captcha as captcha_mod  # type: ignore
+try:
+    from . import monitoring  # type: ignore
+except ImportError:
+    import monitoring  # type: ignore
+try:
+    from . import staff as staffmod  # type: ignore
+    from . import staffpay  # type: ignore
+    from . import webpush  # type: ignore
+    from . import autofine  # type: ignore
+except ImportError:  # pragma: no cover
+    import staff as staffmod  # type: ignore
+    import staffpay  # type: ignore
+    import webpush  # type: ignore
+    import autofine  # type: ignore
+try:
+    from . import stats as stats_mod  # type: ignore
+except ImportError:  # pragma: no cover
+    import stats as stats_mod  # type: ignore
+
+try:
+    import yookassa  # type: ignore
+except Exception:  # noqa: BLE001
+    yookassa = None  # type: ignore
+try:
+    import telegram_stars  # type: ignore
+except Exception:  # noqa: BLE001
+    telegram_stars = None  # type: ignore
+
+import subdomain  # type: ignore  # домены ссылок подписки из .env
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
+
+
+def _env(key: str, default: str = "") -> str:
+    return (os.getenv(key) or default).strip()
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(_env(key, str(default)))
+    except ValueError:
+        return default
+
+
+def P() -> "projects.Project":
+    """проект текущего запроса: бот, канал, мини-приложение, платёжка (см. projects.py)."""
+    return projects.current()
+
+
+# бот, канал, адреса — у каждого проекта свои: P().bot_token, P().channel_id, P().miniapp_url …
+# канал задаётся в projects/<id>/project.json
+CHANNEL_CHECK_TTL = _env_int("CHANNEL_CHECK_TTL", 600)  # кэш проверки подписки, сек
+
+
+def channel_required() -> bool:
+    """обязательна ли подписка на канал (панель → Цены → «Канал»); по умолчанию — нет, можно пропустить."""
+    return bool(P().channel_id) and db.get_setting("channel_required", "0") in ("1", "true", "True", "yes")
+TELEGRAM_ADMIN_ID = _env("TELEGRAM_ADMIN_ID")
+PANEL_SETUP_TOKEN = _env("PANEL_SETUP_TOKEN")
+INTERNAL_API_SECRET = _env("INTERNAL_API_SECRET")
+TELEGRAM_INITDATA_MAX_AGE = _env_int("TELEGRAM_INITDATA_MAX_AGE", 3600)
+MINIAPP_ALLOW_UNAUTH = _env("MINIAPP_ALLOW_UNAUTH", "0") in ("1", "true", "True", "yes")
+CORS_ORIGINS = [o.strip() for o in _env("CORS_ORIGINS", "*").split(",") if o.strip()]
+# fail-closed: без ENV считаем production
+ENV = _env("ENV", "production")
+IS_PROD = ENV == "production"
+
+
+
+# в проде без swagger/openapi
+app = FastAPI(
+    title="BatmanVPN API",
+    version="1.0.0",
+    docs_url=None if IS_PROD else "/api/docs",
+    redoc_url=None,
+    openapi_url=None if IS_PROD else "/api/openapi.json",
+)
+
+# при origin=* credentials нельзя: куки утекли бы на любой сайт
+# у нас auth в заголовках, при wildcard credentials выключаем
+_cors_wildcard = CORS_ORIGINS == ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if _cors_wildcard else CORS_ORIGINS,
+    allow_credentials=not _cors_wildcard,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Telegram-Init-Data",
+                   "X-App-Session", "X-Panel-Setup-Token", "X-Project",
+                   "X-App-Key", "X-HWID", "X-Device-OS", "X-Device-OS-Version", "X-Device-Model"],
+)
+
+
+# get карточки юзера/подписки тоже пишем в журнал
+_AUDIT_GET_RX = re.compile(r"^/api/panel/users/\d+(?:/detail|/remnawave)?$")
+
+
+class PanelAuditMiddleware:
+    """журнал изменяющих запросов панели (asgi, без basehttpmiddleware)."""
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        path = str(scope.get("path") or "")
+        if scope.get("type") != "http" or not path.startswith("/api/panel/") or path.startswith("/api/panel/auth/") \
+                or scope.get("method") == "OPTIONS" \
+                or (scope.get("method") in ("GET", "HEAD") and not _AUDIT_GET_RX.match(path)):
+            return await self.app(scope, receive, send)
+        scope.setdefault("state", {})
+        status = {"code": 0}
+
+        async def _send(msg):
+            if msg.get("type") == "http.response.start":
+                status["code"] = int(msg.get("status") or 0)
+            await send(msg)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            st = scope.get("state") or {}
+            actor = st.get("panel_actor") if isinstance(st, dict) else None
+            if actor:
+                ip = _client_ip(Request(scope))
+                await run_in_threadpool(audit, actor, st.get("panel_actor_name"), f"{scope['method']} {scope['path']}",
+                                        status["code"] or 500, ip)
+
+
+app.add_middleware(PanelAuditMiddleware)
+
+
+# ── проект запроса (сеть listvpn) ──
+# действие над конкретной записью в панели — от имени её проекта (бот, канал, цены этого проекта)
+_PROJECT_ENTITY_RX: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"^/api/panel/users/(\d+)(?:/|$)"), "SELECT project_id FROM users WHERE id = ?"),
+    (re.compile(r"^/api/panel/support/chats/(\d+)(?:/|$)"), "SELECT project_id FROM support_chats WHERE id = ?"),
+    (re.compile(r"^/api/panel/payments/([A-Za-z0-9_-]{1,80})/"), "SELECT project_id FROM payments WHERE payment_id = ?"),
+    (re.compile(r"^/api/panel/withdrawals/(\d+)/"), "SELECT project_id FROM withdrawals WHERE id = ?"),
+    (re.compile(r"^/api/panel/keys/(\d+)/"), "SELECT project_id FROM subscriptions WHERE id = ?"),
+    (re.compile(r"^/api/panel/promocodes/(\d+)$"), "SELECT project_id FROM promocodes WHERE id = ?"),
+    (re.compile(r"^/api/panel/promotions/(\d+)$"), "SELECT project_id FROM promotions WHERE id = ?"),
+    (re.compile(r"^/api/panel/tracking-links/(\d+)$"), "SELECT project_id FROM tracking_links WHERE id = ?"),
+    (re.compile(r"^/api/panel/mailing/(\d+)(?:/|$)"), "SELECT project_id FROM mailings WHERE id = ?"),
+    (re.compile(r"^/api/telegram/webhook/([a-z][a-z0-9]{0,23})$"), ""),
+]
+
+
+def _entity_project(path: str) -> Optional[str]:
+    for rx, sql in _PROJECT_ENTITY_RX:
+        m = rx.match(path)
+        if not m:
+            continue
+        if not sql:
+            return projects.normalize(m.group(1))
+        try:
+            row = db.fetchone(sql, (m.group(1),))
+        except Exception:  # noqa: BLE001
+            return None
+        return projects.normalize((row or {}).get("project_id")) if row else None
+    return None
+
+
+class ProjectContextMiddleware:
+    """projects.current() на время запроса: запись панели → X-Project → домен → проект по умолчанию."""
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        path = str(scope.get("path") or "")
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+        pid = await run_in_threadpool(_entity_project, path) if path.startswith(("/api/panel/", "/api/telegram/")) else None
+        pid = pid or projects.normalize(headers.get("x-project")) or projects.by_host(headers.get("host")) \
+            or projects.DEFAULT
+        token = projects.set_current(pid)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            projects.reset(token)
+
+
+app.add_middleware(ProjectContextMiddleware)
+
+
+def _backup_scheduler_loop() -> None:
+    """автобэкап бд по enabled + interval_hours."""
+    import threading
+
+    while True:
+        try:
+            settings = get_backup_settings()
+            if settings.get("enabled"):
+                interval = max(1, int(settings.get("interval_hours") or 12))
+                last = db.get_setting("backup_last", "") or None
+                due = True
+                if last:
+                    dt = parse_iso(last)
+                    if dt and (utcnow() - dt) < timedelta(hours=interval):
+                        due = False
+                if due:
+                    create_backup()
+        except Exception:  # noqa: BLE001
+            pass
+        # сверка платежей (потерянные callback и т.п.)
+        try:
+            fulfillment.reconcile_payments(lambda m: print(m, flush=True))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[payments] сверка упала: {exc}", flush=True)
+        # истёкшие доп. устройства → уменьшить лимит
+        try:
+            fulfillment.expire_device_addons(lambda m: print(m, flush=True))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[devices] снятие доп. устройств упало: {exc}", flush=True)
+        # закончились белые списки → убрать сквад
+        try:
+            fulfillment.expire_whitelists(lambda m: print(m, flush=True))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[whitelist] снятие белых списков упало: {exc}", flush=True)
+        # чистка старых записей rate limit
+        try:
+            ratelimit.cleanup()
+        except Exception:  # noqa: BLE001
+            pass
+        # цикл раз в 5 мин; бэкап сам смотрит interval_hours
+        threading.Event().wait(300)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exc(request: Request, exc: Exception):
+    # необработанное исключение -> топик «ошибки»
+    try:
+        forum.report_error(
+            f"500 {request.method} {request.url.path}",
+            f"{type(exc).__name__}: {exc}",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return JSONResponse({"detail": {"message": "Внутренняя ошибка сервера"}}, status_code=500)
+
+
+def _bootstrap_admin() -> None:
+    """первый запуск: случайный админ, креды в first_run_credentials.txt."""
+    if get_admin() is not None:
+        return
+    admin, password = create_admin()  # логин случайный; пароль в бд не хранится
+
+    # пароль один раз в файл для install.sh
+    # в логи контейнера пароль не пишем
+    wrote_file = False
+    path = os.path.join(os.path.dirname(os.path.abspath(db.get_db_path())), "first_run_credentials.txt")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"login={admin['username']}\npassword={password}\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        wrote_file = True
+    except Exception:  # noqa: BLE001
+        wrote_file = False
+
+    if wrote_file:
+        print(f"[BatmanVPN] Учётные данные панели записаны в {path} — показ при установке, затем файл удаляется.", flush=True)
+    else:
+        # файл не записался, печатаем в консоль
+        print(
+            "\n============================================================\n"
+            "  BatmanVPN — доступ в панель (сохраните, больше не покажем)\n"
+            f"  Логин:  {admin['username']}\n"
+            f"  Пароль: {password}\n"
+            "============================================================\n",
+            flush=True,
+        )
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    db.init_db()
+    _bootstrap_admin()
+    try:
+        n = unfreeze_legacy_frozen_subscriptions()
+        if n:
+            print(f"[BatmanVPN] заморозка удалена — возвращено в работу подписок: {n}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[BatmanVPN] unfreeze legacy failed: {exc}", flush=True)
+    # ресейл: перенос / выдача срока, оборванные рестартом
+    try:
+        resale.recover_after_restart()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[resale] восстановление после рестарта: {type(exc).__name__}: {exc}", flush=True)
+    # рассылки, прерванные рестартом, не должны висеть «отправляется»
+    try:
+        db.execute("UPDATE mailings SET status = 'Interrupted' WHERE status = 'Sending'")
+    except Exception:  # noqa: BLE001
+        pass
+    # недоделанное удаление рассылки после рестарта
+    try:
+        import threading as _th
+        for m in db.fetchall("SELECT id FROM mailings WHERE status = 'Deleting'"):
+            _th.Thread(target=_purge_mailing, args=(int(m["id"]),), daemon=True).start()
+    except Exception:  # noqa: BLE001
+        pass
+    # статус юзеров по фактическим подпискам
+    # (раньше новым ставили Trial даже без подписки)
+    try:
+        # одной транзакцией и только изменившиеся: раньше — по коммиту на каждого юзера (на 80 тыс. — минуты блокировки базы)
+        cur_st = {int(r["id"]): r.get("status") for r in db.fetchall("SELECT id, status FROM users")}
+        changed = [(st, uid) for uid, st in user_states_map().items() if st != "Banned" and cur_st.get(uid) != st]
+        if changed:
+            db.executemany("UPDATE users SET status = ? WHERE id = ?", changed)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[BatmanVPN] status resync failed: {exc}", flush=True)
+    import threading
+    threading.Thread(target=_backup_scheduler_loop, name="backup-scheduler", daemon=True).start()
+    if db.get_setting("rw_description_backfill_v1") != "1":
+        threading.Thread(target=_rw_description_backfill, name="rw-description-backfill", daemon=True).start()
+
+
+def _rw_description_backfill() -> None:
+    """разово: внутренний id в описание существующих юзеров remnawave."""
+    try:
+        rows = db.fetchall("SELECT id, telegram_id FROM users WHERE telegram_id IS NOT NULL")
+        mapping = {int(r["telegram_id"]): int(r["id"]) for r in rows if r.get("telegram_id")}
+        res = provisioning.backfill_descriptions(mapping)
+        if res.get("ok"):
+            db.set_setting("rw_description_backfill_v1", "1")
+            print(f"[BatmanVPN] Remnawave: ID проставлен в описание у {res['updated']} польз.", flush=True)
+        else:
+            print(f"[BatmanVPN] Remnawave description backfill: {res.get('error')}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[BatmanVPN] Remnawave description backfill failed: {exc}", flush=True)
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(dt: Optional[datetime] = None) -> str:
+    if dt is None:
+        return db.utcnow_iso()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def gen_token(n: int = 48) -> str:
+    return secrets.token_urlsafe(n)
+
+
+def gen_password(n: int = 24) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def gen_ref_code(n: int = 8) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    while True:
+        code = "".join(secrets.choice(alphabet) for _ in range(n))
+        if not db.fetchone("SELECT id FROM users WHERE referral_code = ?", (code,)):
+            return code
+
+
+def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000).hex()
+    return digest, salt
+
+
+def verify_password(password: str, digest: str, salt: str) -> bool:
+    check, _ = hash_password(password, salt)
+    return hmac.compare_digest(check, digest)
+
+
+def paginate(items: list[Any], limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    return {"items": items[offset : offset + limit], "total": len(items)}
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _telegram_data_check_string(fields: dict[str, str]) -> str:
+    return "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+
+
+class InitDataExpired(HTTPException):
+    """подпись initdata верна, но протухла."""
+
+    def __init__(self, telegram_id: int):
+        super().__init__(401, detail={"message": "initData устарел"})
+        self.telegram_id = telegram_id
+
+
+def validate_webapp_init_data(init_data: str) -> dict[str, Any]:
+    if not init_data:
+        raise HTTPException(401, detail={"message": "Пустой initData"})
+    if not P().bot_token:
+        if MINIAPP_ALLOW_UNAUTH or ENV != "production":
+            parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+            user_raw = parsed.get("user", "{}")
+            try:
+                user = json.loads(user_raw)
+            except json.JSONDecodeError:
+                user = {"id": 0}
+            return {"user": user, "raw": parsed}
+        raise HTTPException(503, detail={"message": "TELEGRAM_BOT_TOKEN не задан"})
+
+    parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+    received = parsed.pop("hash", "")
+    if not received:
+        raise HTTPException(401, detail={"message": "Нет hash в initData"})
+
+    check = _telegram_data_check_string(parsed)
+    secret = hmac.new(b"WebAppData", P().bot_token.encode(), hashlib.sha256).digest()
+    calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, received):
+        # чаще всего мини-приложение открыто из другого бота, не того, чей токен в .env у этого проекта
+        print(f"[auth] подпись initData не сошлась: проект {P().id}, бот в .env — {P().bot_id}",
+              flush=True)
+        raise HTTPException(401, detail={"message": "Неверная подпись Telegram"})
+
+    try:
+        user = json.loads(parsed.get("user") or "{}")
+    except json.JSONDecodeError:
+        raise HTTPException(401, detail={"message": "Некорректный user в initData"})
+
+    auth_date = int(parsed.get("auth_date") or 0)
+    if not auth_date or (time.time() - auth_date) > TELEGRAM_INITDATA_MAX_AGE:
+        raise InitDataExpired(int(user.get("id") or 0))
+    return {"user": user, "raw": parsed}
+
+
+def validate_oauth_login(payload: dict[str, Any]) -> dict[str, Any]:
+    if not P().bot_token:
+        if MINIAPP_ALLOW_UNAUTH or ENV != "production":
+            return payload
+        raise HTTPException(503, detail={"message": "TELEGRAM_BOT_TOKEN не задан"})
+
+    data = {k: str(v) for k, v in payload.items() if k != "hash" and v is not None and str(v) != ""}
+    received = str(payload.get("hash") or "")
+    check = _telegram_data_check_string(data)
+    secret = hashlib.sha256(P().bot_token.encode()).digest()
+    calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, received):
+        raise HTTPException(401, detail={"message": "Неверная подпись OAuth"})
+
+    auth_date = int(data.get("auth_date") or 0)
+    if auth_date and (time.time() - auth_date) > TELEGRAM_INITDATA_MAX_AGE:
+        raise HTTPException(401, detail={"message": "OAuth данные устарели"})
+    return data
+
+
+def get_admin() -> Optional[dict[str, Any]]:
+    return db.fetchone("SELECT * FROM admin WHERE id = 1")
+
+
+def gen_admin_username() -> str:
+    """случайный логин админа (не admin)."""
+    alphabet = string.ascii_lowercase + string.digits
+    return "adm-" + "".join(secrets.choice(alphabet) for _ in range(7))
+
+
+def create_admin(username: Optional[str] = None, password: Optional[str] = None) -> tuple[dict[str, Any], str]:
+    """создать/сбросить админа: в бд только соль и pbkdf2-хэш."""
+    username = username or gen_admin_username()
+    password = password or gen_password()
+    digest, salt = hash_password(password)
+    now = db.utcnow_iso()
+    existing = get_admin()
+    if existing:
+        db.execute(
+            "UPDATE admin SET username = ?, password_hash = ?, password_salt = ?, plaintext_once = NULL WHERE id = 1",
+            (username, digest, salt),
+        )
+        # смена пароля сбрасывает все сессии панели
+        try:
+            db.execute("DELETE FROM panel_sessions")
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        db.execute(
+            "INSERT INTO admin (id, username, password_hash, password_salt, plaintext_once, created_at) "
+            "VALUES (1, ?, ?, ?, NULL, ?)",
+            (username, digest, salt, now),
+        )
+    admin = get_admin()
+    assert admin is not None
+    return admin, password
+
+
+def clear_admin_plaintext() -> None:
+    db.execute("UPDATE admin SET plaintext_once = NULL WHERE id = 1")
+
+
+# скользящие 2 суток: при запросе к панели срок сдвигается, если прошла уже половина.
+# выкидывать раз в час/20 мин из-за абсолютного TTL не нужно. PANEL_SESSION_TTL в .env — секунды (1ч…14д).
+PANEL_SESSION_TTL = max(3600, min(_env_int("PANEL_SESSION_TTL", 2 * 86400), 14 * 86400))
+
+
+def _token_hash(token: str) -> str:
+    """в бд храним sha-256 токена сессии, не сам токен."""
+    return hashlib.sha256(str(token or "").encode()).hexdigest()
+
+
+def create_panel_session(username: str, staff_id: Optional[int] = None) -> str:
+    """staff_id=None: сессия владельца, иначе сотрудника."""
+    token = gen_token()
+    now = time.time()
+    db.execute(
+        "INSERT INTO panel_sessions (token, username, expires_at, staff_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        (_token_hash(token), username, now + PANEL_SESSION_TTL, int(staff_id) if staff_id is not None else None, now),
+    )
+    return token
+
+
+def delete_staff_sessions(staff_id: int) -> None:
+    db.execute("DELETE FROM panel_sessions WHERE staff_id = ?", (int(staff_id),))
+    db.execute("DELETE FROM temp_2fa WHERE staff_id = ?", (int(staff_id),))
+
+
+def delete_panel_session(token: str) -> None:
+    db.execute("DELETE FROM panel_sessions WHERE token = ?", (_token_hash(token),))
+
+
+def get_panel_session(token: str) -> Optional[dict[str, Any]]:
+    th = _token_hash(token)
+    row = db.fetchone("SELECT * FROM panel_sessions WHERE token = ?", (th,))
+    if not row:
+        return None
+    now = time.time()
+    exp = float(row["expires_at"])
+    if exp < now:
+        db.execute("DELETE FROM panel_sessions WHERE token = ?", (th,))
+        return None
+    # активность продлевает сессию; не пишем в БД на каждый клик
+    if exp - now < PANEL_SESSION_TTL / 2:
+        new_exp = now + PANEL_SESSION_TTL
+        db.execute("UPDATE panel_sessions SET expires_at = ? WHERE token = ?", (new_exp, th))
+        row = dict(row)
+        row["expires_at"] = new_exp
+    return row
+
+
+APP_SESSION_TTL = 30 * 86400  # 30 дней
+EMAIL_CODE_TTL = 600          # 10 минут
+EMAIL_CODE_RESEND = 60        # анти-спам на повторную отправку
+
+
+def create_app_session(user_id: int, source: str = "web") -> str:
+    """source: miniapp — вход из Telegram Mini App (initData), web — сайт (email / Telegram OAuth)."""
+    token = gen_token()
+    now = time.time()
+    db.execute(
+        "INSERT INTO app_sessions (token, user_id, created_at, expires_at, source) VALUES (?, ?, ?, ?, ?)",
+        (_token_hash(token), int(user_id), now, now + APP_SESSION_TTL, "miniapp" if source == "miniapp" else "web"),
+    )
+    # оставляем 10 свежих сессий, истёкшие удаляем
+    db.execute(
+        "DELETE FROM app_sessions WHERE user_id = ? AND token NOT IN "
+        "(SELECT token FROM app_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 10)",
+        (int(user_id), int(user_id)),
+    )
+    db.execute("DELETE FROM app_sessions WHERE expires_at < ?", (now,))
+    return token
+
+
+def get_app_session(token: str) -> Optional[dict[str, Any]]:
+    th = _token_hash(token)
+    row = db.fetchone("SELECT * FROM app_sessions WHERE token = ?", (th,))
+    if not row:
+        return None
+    if float(row["expires_at"]) < time.time():
+        db.execute("DELETE FROM app_sessions WHERE token = ?", (th,))
+        return None
+    return row
+
+
+def delete_app_session(token: str) -> None:
+    db.execute("DELETE FROM app_sessions WHERE token = ?", (_token_hash(token),))
+
+
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,253}\.(?:[A-Za-z]{2,24}|xn--[A-Za-z0-9\-]{1,59})$")
+
+
+def _valid_email(email: str) -> bool:
+    return bool(email) and len(email) <= 254 and bool(_EMAIL_RE.match(email))
+
+
+def _email_key(email: str) -> str:
+    """код входа по почте — в рамках проекта (один адрес может быть в BatmanVPN и в FGN)."""
+    email = email.strip().lower()
+    return email if db.pid() == projects.DEFAULT else f"{db.pid()}|{email}"
+
+
+def create_email_code(email: str) -> tuple[str, bool]:
+    """создаёт код входа. возвращает (code, throttled)."""
+    email = _email_key(email)
+    now = time.time()
+    existing = db.fetchone("SELECT last_sent_at FROM email_codes WHERE email = ?", (email,))
+    if existing and (now - float(existing.get("last_sent_at") or 0)) < EMAIL_CODE_RESEND:
+        row = db.fetchone("SELECT code FROM email_codes WHERE email = ?", (email,))
+        return (str(row["code"]) if row else ""), True
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    # у каждого кода свои 5 попыток
+    attempts = 0
+    db.execute(
+        "INSERT OR REPLACE INTO email_codes (email, code, expires_at, attempts, last_sent_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (email, code, now + EMAIL_CODE_TTL, attempts, now),
+    )
+    return code, False
+
+
+def verify_email_code(email: str, code: str) -> bool:
+    email = _email_key(email)
+    code = str(code or "").strip()
+    # атомарно тратим попытку; верный код удаляется тут же
+    with db.transaction() as tx:
+        row = tx.execute("SELECT * FROM email_codes WHERE email = ?", (email,)).fetchone()
+        if not row:
+            return False
+        if float(row["expires_at"]) < time.time():
+            tx.execute("DELETE FROM email_codes WHERE email = ?", (email,))
+            return False
+        if int(row["attempts"] or 0) >= 5:
+            return False
+        if not hmac.compare_digest(str(row["code"]).encode(), code.encode()):
+            tx.execute("UPDATE email_codes SET attempts = attempts + 1 WHERE email = ?", (email,))
+            return False
+        tx.execute("DELETE FROM email_codes WHERE email = ?", (email,))
+        return True
+
+
+def send_login_code(email: str, code: str) -> None:
+    """доставка кода на почту; логируем результат."""
+    if mailer.is_configured():
+        ok, err = mailer.send_login_code(email, code)
+        if ok:
+            return
+        print(f"[email] не удалось отправить код на {email}: {err}", flush=True)
+        try:
+            forum.report_error("Не удалось отправить код входа на почту", err)
+        except Exception:  # noqa: BLE001
+            pass
+    # код входа в проде в логи не пишем
+    if not IS_PROD:
+        print(f"[email] код входа для {email}: {code}", flush=True)
+
+
+def set_temp_2fa(username: str, staff_id: Optional[int] = None) -> tuple[str, str]:
+    temp = gen_token(24)
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    db.execute(
+        "INSERT OR REPLACE INTO temp_2fa (token, code, username, expires_at, staff_id) VALUES (?, ?, ?, ?, ?)",
+        (_token_hash(temp), code, username, time.time() + 300, int(staff_id) if staff_id is not None else None),
+    )
+    return temp, code
+
+
+def pop_temp_2fa(token: str) -> Optional[dict[str, Any]]:
+    """забрать код один раз: read+delete в одной транзакции."""
+    th = _token_hash(token)
+    with db.transaction() as tx:
+        row = tx.execute("SELECT * FROM temp_2fa WHERE token = ?", (th,)).fetchone()
+        if not row:
+            return None
+        tx.execute("DELETE FROM temp_2fa WHERE token = ?", (th,))
+    row = dict(row)
+    if float(row["expires_at"]) < time.time():
+        return None
+    return row
+
+
+def get_user(user_id: int) -> Optional[dict[str, Any]]:
+    return db.fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
+
+
+def find_user_by_tg(telegram_id: int) -> Optional[dict[str, Any]]:
+    """аккаунт в ТЕКУЩЕМ проекте (в BatmanVPN и FGN у одного человека разные аккаунты)."""
+    return db.fetchone("SELECT * FROM users WHERE telegram_id = ? AND project_id = ?", (telegram_id, db.pid()))
+
+
+def same_project(u: Optional[dict[str, Any]]) -> bool:
+    """запись из текущего проекта (рефералы, объединение, смена Telegram — только внутри проекта)."""
+    return bool(u) and projects.of(u) == db.pid()
+
+
+def upsert_telegram_user(
+    telegram_id: int,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+) -> dict[str, Any]:
+    # имя/фамилию из telegram не храним (параметры для совместимости)
+    first_name = last_name = None
+    uname = names.tg_username(username)
+    existing = find_user_by_tg(telegram_id)
+    if existing:
+        if uname:
+            db.execute("UPDATE users SET username = ? WHERE id = ?", (uname, existing["id"]))
+        user = get_user(int(existing["id"]))
+        assert user is not None
+        if not user.get("is_banned"):
+            _enforce_blacklist(user)
+            user = get_user(int(existing["id"])) or user
+        return user
+
+    import sqlite3
+
+    code = gen_ref_code()
+    try:
+        db.execute(
+            "INSERT INTO users (project_id, telegram_id, username, first_name, last_name, balance, status, is_banned, "
+            "referral_code, is_partner, partner_balance, partner_rate, "
+            "autopay_enabled, created_at) VALUES (?, ?, ?, ?, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
+            (
+                db.pid(),
+                telegram_id,
+                uname,
+                first_name,
+                last_name,
+                code,
+                db.utcnow_iso(),
+            ),
+        )
+        uid = db.last_id()
+    except sqlite3.IntegrityError:
+        existing = find_user_by_tg(telegram_id)
+        if not existing:
+            raise
+        if uname:
+            db.execute("UPDATE users SET username = ? WHERE id = ?", (uname, existing["id"]))
+        uid = int(existing["id"])
+    user = get_user(uid)
+    assert user is not None
+    _enforce_blacklist(user)
+    return get_user(int(user["id"])) or user
+
+
+def _enforce_blacklist(user: dict[str, Any]) -> None:
+    """юзер из общего чёрного списка блокируется при входе."""
+    try:
+        blacklist.enforce(user)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[blacklist] ошибка проверки: {exc}", flush=True)
+
+
+def referrals_count(user_id: int) -> int:
+    row = db.fetchone("SELECT COUNT(*) AS c FROM users WHERE referred_by = ?", (user_id,))
+    return int(row["c"]) if row else 0
+
+
+def paid_until_for_user(user_id: int) -> Optional[str]:
+    row = db.fetchone(
+        "SELECT expires_at FROM subscriptions WHERE user_id = ? AND status = 'Active' "
+        "AND expires_at IS NOT NULL ORDER BY expires_at DESC LIMIT 1",
+        (user_id,),
+    )
+    return row["expires_at"] if row else None
+
+
+def subscription_status_for_user(u: dict[str, Any]) -> str:
+    """статус юзера: banned/blocked/active/trial/expired/none."""
+    if u.get("is_banned"):
+        return "banned"
+    blocked = db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Banned' LIMIT 1",
+        (u["id"],),
+    )
+    if blocked:
+        return "blocked"
+    active = db.fetchone(
+        "SELECT type, expires_at FROM subscriptions WHERE user_id = ? AND status = 'Active' "
+        "ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END, expires_at DESC LIMIT 1",
+        (u["id"],),
+    )
+    if active:
+        exp = parse_iso(active.get("expires_at"))
+        if not exp or exp > utcnow():
+            return "trial" if active.get("type") == "trial" else "active"
+    if db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('Active', 'Expired') "
+        "AND COALESCE(no_renew, 0) = 0 LIMIT 1",
+        (u["id"],),
+    ):
+        return "expired"
+    if db.fetchone("SELECT id FROM subscriptions WHERE user_id = ? LIMIT 1", (u["id"],)):
+        return "lapsed"
+    return "never"
+
+
+def last_expired_subscription(user_id: int) -> Optional[dict[str, Any]]:
+    """последняя истёкшая, ещё не удалённая подписка (для продления)."""
+    return db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND status IN ('Active', 'Expired') "
+        "AND COALESCE(no_renew, 0) = 0 "
+        "AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at DESC, id DESC LIMIT 1",
+        (user_id, iso()),
+    )
+
+
+def serialize_user(u: dict[str, Any], *, revenue: Optional[float] = None) -> dict[str, Any]:
+    banned = bool(u.get("is_banned"))
+    uid = int(u["id"])
+    if revenue is None:
+        row = db.fetchone(
+            "SELECT COALESCE(SUM(amount), 0) AS s FROM payments "
+            "WHERE user_id = ? AND status IN ('paid', 'completed') AND COALESCE(amount, 0) > 0",
+            (uid,),
+        )
+        revenue = float(row["s"]) if row else 0.0
+    return {
+        "id": u["id"],
+        "project": projects.of(u),
+        "project_name": projects.get(projects.of(u)).name,
+        "telegram_id": u.get("telegram_id"),
+        "username": u.get("username"),
+        "first_name": u.get("first_name"),
+        "last_name": u.get("last_name"),
+        "email": u.get("email"),
+        "balance": u.get("balance", 0),
+        # всегда фактическое состояние по подпискам
+        "status": u.get("_state") or fulfillment.compute_user_state(uid),
+        "in_blacklist": banned,
+        "is_banned": banned,
+        "registration_date": u.get("created_at"),
+        "paid_until": paid_until_for_user(uid),
+        "referral_code": u.get("referral_code"),
+        "is_partner": bool(u.get("is_partner")),
+        "partner_balance": u.get("partner_balance", 0),
+        "partner_rate": u.get("partner_rate", 25),
+        "referrals": referrals_count(uid),
+        "revenue": round(float(revenue or 0), 2),
+        "no_renew": no_renew_for_user(uid),
+    }
+
+
+def no_renew_for_user(user_id: int) -> bool:
+    """есть ли живая подписка с запретом продления."""
+    return bool(db.fetchone(
+        "SELECT 1 FROM subscriptions WHERE user_id = ? AND COALESCE(no_renew, 0) = 1 "
+        "AND status IN ('Active', 'Expired', 'Banned') LIMIT 1",
+        (int(user_id),),
+    ))
+
+
+def serialize_app_user(u: dict[str, Any], source: Optional[str] = None) -> dict[str, Any]:
+    status = subscription_status_for_user(u)
+    until = paid_until_for_user(int(u["id"]))
+    return {
+        "id": u["id"],
+        "telegram_id": u["telegram_id"],
+        "username": u.get("username"),
+        "email": u.get("email"),
+        "subscription_status": status,
+        "subscription_until": until,
+        # чёрный список: в приложении даже поддержка недоступна
+        "blacklisted": bool(u.get("is_banned")) and str(u.get("ban_reason") or "").startswith(blacklist.BAN_REASON_PREFIX),
+        "is_banned": bool(u.get("is_banned")),
+        "referral_code": u.get("referral_code"),
+        "is_partner": bool(u.get("is_partner")),
+        "partner_balance": float(u.get("partner_balance") or 0),
+        "discount": active_discount_for_user(int(u["id"])),
+        # принял ли оферту и политику
+        "terms_accepted": bool(u.get("terms_accepted_at")),
+        "trial_available": _trial_available_for(int(u["id"]), source),
+        "trial_reason": trial_reason(int(u["id"]), source),
+    }
+
+
+def devices_target_user_id(u: dict[str, Any]) -> int:
+    """чью подписку пополняет докупка устройств: гость семьи — владельца, остальные — свою."""
+    owner = family_owner_for(u)
+    return int(owner["id"]) if owner is not None else int(u["id"])
+
+
+def family_renew_owner(u: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """владелец семьи, чью подписку участник продлевает своей оплатой (иначе None).
+
+    Как family_owner_for, но годится и истёкшая семейная подписка: участник может её продлить.
+    """
+    owner = family_owner_for(u)
+    if owner is not None:
+        return owner
+    try:
+        if subscription_status_for_user(u) in ("banned", "blocked", "active", "trial"):
+            return None
+        owner_id = family.active_owner_id(int(u["id"]))
+        owner = get_user(owner_id) if owner_id else None
+        if not owner or owner.get("is_banned") or projects.of(owner) != projects.of(u):
+            return None
+        target, trial = fulfillment.find_extend_target(int(owner["id"]), "subscription", None)
+        if not target or trial or str(target.get("status") or "") not in ("Active", "Expired"):
+            return None
+        return owner
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def family_owner_for(u: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """владелец семьи, чья подписка действует для этого аккаунта (иначе None).
+
+    Своя оплаченная подписка всегда важнее семейной, поэтому проверяем сначала её.
+    """
+    try:
+        status = subscription_status_for_user(u)
+        # заблокированному (бан аккаунта или блок подписки админом) семья не помогает:
+        # иначе блокировка обходилась бы ключом владельца
+        if status in ("banned", "blocked"):
+            return None
+        if status in ("active", "trial"):
+            # своя подписка появилась — место в семье освобождаем (best-effort)
+            try:
+                left_owner = family.leave(int(u["id"])) if family.active_owner_id(int(u["id"])) else None
+                if left_owner is not None:
+                    _family_revoke_owner_key(get_user(left_owner), _user_label(u))
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        owner_id = family.active_owner_id(int(u["id"]))
+        if not owner_id:
+            return None
+        owner = get_user(owner_id)
+        if not owner or owner.get("is_banned"):
+            return None
+        if projects.of(owner) != projects.of(u):
+            return None
+        # делим только платную подписку: пробную на несколько аккаунтов не раздаём
+        if not family.has_paid_sub(int(owner["id"])):
+            return None
+        return owner
+    except Exception:  # noqa: BLE001  — семья не должна ломать приложение
+        return None
+
+
+def app_user_payload(u: dict[str, Any], source: Optional[str] = None) -> dict[str, Any]:
+    """юзер для мини-приложения: своё состояние + семейная подписка и приглашение в семью."""
+    data = serialize_app_user(u, source)
+    try:
+        invite = family.pending_invite(u)
+    except Exception:  # noqa: BLE001
+        invite = None
+    if invite:
+        data["family_invite"] = {"code": invite["code"], "from_name": invite["from_name"]}
+    else:
+        data["family_invite"] = None
+    owner = family_owner_for(u)
+    if owner is not None:
+        data["subscription_status"] = "active" if subscription_status_for_user(owner) == "active" else "trial"
+        data["subscription_until"] = paid_until_for_user(int(owner["id"]))
+        data["family"] = {"role": "member", "owner_name": _user_label(owner), "owner_id": int(owner["id"])}
+        # подписка уже действует через семью — пробный не предлагаем
+        data["trial_available"] = False
+        data["trial_reason"] = "in_family"
+    return data
+
+
+def days_left_for_expiry(expires_at: Optional[str]) -> Optional[int]:
+    if not expires_at:
+        return None
+    dt = parse_iso(expires_at)
+    if not dt:
+        return 0
+    return max(0, int((dt - utcnow()).total_seconds() // 86400))
+
+
+def refresh_subscription_row(sub: dict[str, Any]) -> dict[str, Any]:
+    """обновляет expired при необходимости и добавляет days_left."""
+    status = sub.get("status") or "Active"
+    exp = parse_iso(sub.get("expires_at"))
+    if exp and exp < utcnow() and status == "Active":
+        db.execute("UPDATE subscriptions SET status = 'Expired' WHERE id = ?", (sub["id"],))
+        status = "Expired"
+        sub = {**sub, "status": status}
+    sub = {**sub, "days_left": days_left_for_expiry(sub.get("expires_at")), "status": status}
+    return sub
+
+
+def serialize_key(sub: dict[str, Any], user: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    sub = refresh_subscription_row(sub)
+    if user is None and sub.get("user_id"):
+        user = get_user(int(sub["user_id"]))
+    username = None
+    if user:
+        username = _user_label(user)
+    return {
+        "id": sub["id"],
+        "key_uuid": sub.get("key_uuid"),
+        "short_uuid": sub.get("short_uuid"),
+        "key_config": subdomain.vpn(sub.get("key_config"), project=projects.of(user) if user else projects.of_user(sub.get("user_id"))),
+        "user_id": sub["user_id"],
+        "username": username,
+        "status": sub.get("status", "Active"),
+        "expiry_date": sub.get("expires_at"),
+        "days_left": sub.get("days_left"),
+        "traffic_used": sub.get("traffic_used", 0),
+        "traffic_limit": sub.get("traffic_limit", 0),
+        "devices_used": sub.get("devices_used", 0),
+        "devices_limit": sub.get("devices_limit", 1),
+        "type": sub.get("type", "vpn"),
+        "no_renew": bool(sub.get("no_renew")),
+        "custom_name": sub.get("custom_name"),
+        "rw_id": sub.get("rw_id"),
+        "created_at": sub.get("created_at"),
+        "ban_reason": sub.get("ban_reason") if sub.get("status") == "Banned" else None,
+        "banned_at": sub.get("banned_at") if sub.get("status") == "Banned" else None,
+    }
+
+
+def _aa_warning(user_id: int) -> Optional[dict[str, Any]]:
+    """действующее предупреждение анти-абуза."""
+    row = db.fetchone("SELECT id, aa_warned_at FROM subscriptions WHERE user_id = ? AND status = 'Active' "
+                      "AND aa_warned_at IS NOT NULL ORDER BY aa_warned_at DESC LIMIT 1", (int(user_id),))
+    if not row:
+        return None
+    at = parse_iso(row.get("aa_warned_at"))
+    lim = antiabuse.limits()
+    if not at or utcnow() - at > timedelta(days=lim["warn_days"]):
+        return None
+    ev = db.fetchone("SELECT reason FROM moderation_events WHERE user_id = ? AND kind = 'aa_warn' AND sub_id = ? "
+                     "ORDER BY id DESC LIMIT 1", (int(user_id), row["id"]))
+    return {"sub_id": row["id"], "at": row.get("aa_warned_at"), "reason": (ev or {}).get("reason"),
+            "grace_until": iso(at + timedelta(hours=lim["grace_hours"])),
+            "valid_until": iso(at + timedelta(days=lim["warn_days"]))}
+
+
+def sync_user_status_from_subs(user_id: int) -> None:
+    fulfillment._sync_user_status(user_id)
+
+
+_ALL = "*"  # все проекты сети (только сводная статистика)
+
+
+def _pf(col: str = "project_id", scope: Optional[str] = None) -> tuple[str, tuple]:
+    """фильтр по проекту: (" AND <col> = ?", (pid,)); scope='*' — без фильтра (вся сеть)."""
+    if scope == _ALL:
+        return "", ()
+    return f" AND {col} = ?", (scope or db.pid(),)
+
+
+def user_states_map(scope: Optional[str] = None) -> dict[int, str]:
+    """состояние всех юзеров проекта одним запросом (scope='*' — вся сеть, None — без фильтра)."""
+    now_iso = iso()
+    pw, pp = _pf("u.project_id", scope) if scope else ("", ())
+    spw, spp = _pf("project_id", scope) if scope else ("", ())
+    rows = db.fetchall(
+        """
+        SELECT u.id AS id, u.is_banned AS banned, s.total AS total, s.paid_now AS paid_now, s.trial_now AS trial_now
+        FROM users u LEFT JOIN (
+            SELECT user_id, COUNT(*) AS total,
+                   MAX(CASE WHEN status = 'Active' AND type != 'trial'
+                             AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS paid_now,
+                   MAX(CASE WHEN status = 'Active' AND type = 'trial'
+                             AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS trial_now
+            FROM subscriptions WHERE 1 = 1""" + spw + """
+            GROUP BY user_id
+        ) s ON s.user_id = u.id
+        WHERE 1 = 1""" + pw,
+        (now_iso, now_iso, *spp, *pp),
+    )
+    out: dict[int, str] = {}
+    for r in rows:
+        if r.get("banned"):
+            st = "Banned"
+        elif not r.get("total"):
+            st = "None"
+        elif r.get("paid_now"):
+            st = "Active"
+        elif r.get("trial_now"):
+            st = "Trial"
+        else:
+            st = "Expired"
+        out[int(r["id"])] = st
+    return out
+
+
+def create_key(
+    user_id: int,
+    days: int = 30,
+    traffic: int = 0,
+    devices: int = 1,
+    is_trial: bool = False,
+    is_forever: bool = False,
+    squads: Optional[list[str]] = None,
+    custom_name: Optional[str] = None,
+) -> dict[str, Any]:
+    key_uuid = str(uuid.uuid4())
+    short = key_uuid.split("-")[0]
+    rw_id = str(uuid.uuid4())
+    expiry = None if is_forever else iso(utcnow() + timedelta(days=max(1, days)))
+    now = db.utcnow_iso()
+    db.execute(
+        "INSERT INTO subscriptions (user_id, rw_id, key_uuid, short_uuid, key_config, status, expires_at, "
+        "devices_limit, devices_used, traffic_used, traffic_limit, custom_name, type, squads_json, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 'Active', ?, ?, 0, 0, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            rw_id,
+            key_uuid,
+            short,
+            "",  # конфиг из remnawave, не из vless-плейсхолдера
+            expiry,
+            int(devices or 1),
+            int(traffic or 0),
+            custom_name,
+            "trial" if is_trial else "vpn",
+            db.dumps(squads or []),
+            now,
+        ),
+    )
+    sub = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (db.last_id(),))
+    assert sub is not None
+    sync_user_status_from_subs(user_id)
+    return sub
+
+
+def add_transaction(
+    user_id: int,
+    amount: float,
+    status: str = "completed",
+    payment_method: str = "manual",
+    payment_id: Optional[str] = None,
+    description: Optional[str] = None,
+) -> dict[str, Any]:
+    pid = payment_id or secrets.token_hex(8)
+    now = db.utcnow_iso()
+    db.execute(
+        "INSERT INTO transactions (user_id, amount, status, payment_method, hash, payment_id, description, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, float(amount), status, payment_method, pid, pid, description, now),
+    )
+    return serialize_transaction(db.fetchone("SELECT * FROM transactions WHERE id = ?", (db.last_id(),)))
+
+
+def serialize_transaction(tx: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not tx:
+        return {}
+    username = None
+    if tx.get("user_id"):
+        user = get_user(int(tx["user_id"]))
+        if user:
+            username = user.get("username") or str(user.get("telegram_id"))
+    return {
+        "id": tx["id"],
+        "user_id": tx.get("user_id"),
+        "user": username,
+        "amount": tx.get("amount", 0),
+        "status": tx.get("status"),
+        "payment_method": tx.get("payment_method"),
+        "created_at": tx.get("created_at"),
+        "hash": tx.get("hash"),
+        "payment_id": tx.get("payment_id"),
+        "description": tx.get("description"),
+    }
+
+
+def _grant_fresh_subscription(user_id: int, days: int) -> None:
+    """новая подписка из панели: remnawave (если есть tg) и бд."""
+    user = get_user(user_id)
+    if user and (user.get("telegram_id") or user.get("email")):
+        new_exp = utcnow() + timedelta(days=days)
+        prov = provisioning.provision(
+            user_id=int(user["id"]), telegram_id=int(user["telegram_id"]) if user.get("telegram_id") else None,
+            username=user.get("username"), expire_at=new_exp,
+            devices=1, squads=fulfillment.vpn_squads(), email=user.get("email"),
+            traffic_limit_bytes=fulfillment.paid_traffic_gb() * fulfillment.GB,
+            traffic_reset_strategy=fulfillment.RESET_STRATEGY,
+        )
+        fulfillment._create_subscription_row(
+            user=user, devices=1, expire_at=new_exp, provision=prov,
+            traffic_gb=fulfillment.paid_traffic_gb(), sub_type="vpn",
+        )
+        return
+    create_key(user_id, days=days)
+
+
+def extend_user_sub(user_id: int, days: int, subscription_id: Optional[int] = None) -> None:
+    if subscription_id:
+        subs = db.fetchall(
+            "SELECT * FROM subscriptions WHERE user_id = ? AND id = ?",
+            (user_id, subscription_id),
+        )
+    else:
+        subs = db.fetchall("SELECT * FROM subscriptions WHERE user_id = ? AND status != 'Deleted'", (user_id,))
+    # удалённая подписка не оживает, выдаём новую
+    subs = [x for x in subs if x.get("status") != "Deleted"]
+
+    if not subs:
+        if days > 0:
+            _grant_fresh_subscription(user_id, days)
+        return
+
+    for sub in subs:
+        base = parse_iso(sub.get("expires_at")) or utcnow()
+        if base < utcnow():
+            base = utcnow()
+        new_exp = base + timedelta(days=days)
+        status = "Active" if new_exp > utcnow() else "Expired"
+        db.execute(
+            "UPDATE subscriptions SET expires_at = ?, status = ? WHERE id = ?",
+            (iso(new_exp), status, sub["id"]),
+        )
+    sync_user_status_from_subs(user_id)
+
+
+GB = 1024 ** 3  # трафик в бд в гб, в remnawave в байтах
+
+
+def _rw_client():
+    """клиент remnawave или none."""
+    try:
+        import remnawave  # type: ignore
+        if not provisioning.is_configured():
+            return None
+        return remnawave.get_client()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _rw_find_user(user: dict[str, Any]):
+    """(client, rw_user|none): только пользователь панели с именем batman_<id>."""
+    client = _rw_client()
+    if not client:
+        return None, None
+    try:
+        rw = provisioning.lookup(client, user_id=int(user["id"]) if user.get("id") else None,
+                                 telegram_id=int(user["telegram_id"]) if user.get("telegram_id") else None,
+                                 email=user.get("email"))
+    except Exception:  # noqa: BLE001
+        rw = None
+    return client, rw
+
+
+def unwrap_rw(data: Any) -> Any:
+    if isinstance(data, dict) and "response" in data:
+        return data["response"]
+    return data
+
+
+def _rw_uid(rw: dict[str, Any]) -> Optional[str]:
+    val = rw.get("uuid") or rw.get("id") or rw.get("userId")
+    return str(val) if val is not None else None
+
+
+def _rw_num_id(rw: dict[str, Any]) -> Optional[int]:
+    """числовой id юзера remnawave (ручки 3.x не принимают uuid)."""
+    if not isinstance(rw, dict):
+        return None
+    val = rw.get("id")
+    if val is None:
+        val = rw.get("userId")
+    try:
+        if val is None or (isinstance(val, str) and not val.isdigit()):
+            return None
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _rw_sync_expiry(user: dict[str, Any]) -> None:
+    """пушим дату окончания основной подписки в remnawave."""
+    client, rw = _rw_find_user(user)
+    if not client or not rw:
+        return
+    row = db.fetchone(
+        "SELECT expires_at FROM subscriptions WHERE user_id = ? AND status != 'Deleted' AND type != 'trial' "
+        "ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END, expires_at DESC, id DESC LIMIT 1",
+        (user["id"],),
+    ) or db.fetchone(
+        "SELECT expires_at FROM subscriptions WHERE user_id = ? AND status != 'Deleted' ORDER BY id DESC LIMIT 1",
+        (user["id"],),
+    )
+    if not row or not row.get("expires_at"):
+        return
+    exp = parse_iso(row["expires_at"])
+    if not exp:
+        return
+    try:
+        client.update_user(id=_rw_num_id(rw), expire_at=exp, status="ACTIVE")
+    except Exception:  # noqa: BLE001
+        pass
+    # ручное продление во время grace: вернуть сквады и трафик
+    try:
+        grace.end_for_user(int(user["id"]))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _rw_sync_traffic(user: dict[str, Any], gb: int) -> None:
+    """лимит трафика в remnawave (гб->байты, 0=безлимит)."""
+    # grace по трафику снимаем; grace по сроку лимит не трогаем
+    grace.end_for_user(int(user["id"]), traffic=True)
+    if grace.active_for_user(int(user["id"])):
+        return
+    client, rw = _rw_find_user(user)
+    if not client or not rw:
+        return
+    try:
+        client.update_user(id=_rw_num_id(rw), traffic_limit_bytes=int(max(0, gb)) * GB)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _rw_sync_devices(user: dict[str, Any], devices: int) -> None:
+    """лимит устройств (hwid) в remnawave."""
+    client, rw = _rw_find_user(user)
+    if not client or not rw:
+        return
+    try:
+        client.update_user(id=_rw_num_id(rw), hwid_device_limit=int(max(1, devices)))
+    except Exception as exc:  # noqa: BLE001
+        # в БД лимит уже новый; мини-апп берёт лимит из Remnawave, поэтому без этого изменение потеряется
+        forum.report_error("Лимит устройств не применился в Remnawave — повторите в панели",
+                           f"user id{user.get('id')}, {devices} устр.: {type(exc).__name__}: {exc}")
+
+
+def _rw_set_enabled(user: dict[str, Any], enabled: bool) -> None:
+    """включить/выключить юзера в remnawave."""
+    client, rw = _rw_find_user(user)
+    if not client or not rw:
+        return
+    try:
+        if enabled:
+            client.enable_user(_rw_num_id(rw))
+        else:
+            client.disable_user(_rw_num_id(rw))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify_user(user: dict[str, Any], text: str, *, email: bool = False,
+                 channel: Optional[str] = None) -> dict[str, Any]:
+    """уведомление: channel=telegram|email; иначе бот, плюс почта если email=true."""
+    result = {"telegram": False, "email": False}
+    if not text:
+        return result
+    send_tg = channel != "email"
+    send_mail = channel == "email" or (channel is None and email)
+    if send_tg and telegram_stars is not None and user.get("telegram_id"):
+        try:
+            telegram_stars.TelegramStars().send_message(int(user["telegram_id"]), _esc_html(text))
+            result["telegram"] = True
+        except Exception:  # noqa: BLE001
+            pass
+    if send_mail and user.get("email") and mailer.is_configured():
+        ok, _ = mailer.send_broadcast(user["email"], P().name, _esc_html(text).replace("\n", "<br>"), body_text=text)
+        result["email"] = ok
+    return result
+
+
+def _mail_async(fn, *args, **kwargs) -> None:
+    """служебное письмо в фоне, не блокируя ответ."""
+    if not mailer.is_configured():
+        return
+
+    def _run() -> None:
+        try:
+            ok, err = fn(*args, **kwargs)
+            if not ok:
+                print(f"[email] {getattr(fn, '__name__', 'mail')}: {err}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[email] {getattr(fn, '__name__', 'mail')}: {exc}", flush=True)
+
+    threading.Thread(target=projects.bind(_run), daemon=True).start()
+
+
+def _email_changed(old: Optional[str], new: Optional[str]) -> None:
+    """письма о привязке/смене/отвязке почты."""
+    old = (old or "").strip().lower() or None
+    new = (new or "").strip().lower() or None
+    if old == new:
+        return
+    if new:
+        _mail_async(mailer.send_email_bound, new)
+    if old:
+        _mail_async(mailer.send_email_unbound, old, new)
+
+
+def _device_from_ua(ua: str) -> str:
+    """короткое имя устройства по user-agent."""
+    ua = ua or ""
+    os_name = next((n for k, n in (
+        ("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Windows", "Windows"),
+        ("Mac OS X", "macOS"), ("Macintosh", "macOS"), ("Linux", "Linux"),
+    ) if k in ua), "")
+    br = next((n for k, n in (
+        ("YaBrowser", "Яндекс Браузер"), ("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"),
+        ("Chrome/", "Chrome"), ("Safari/", "Safari"),
+    ) if k in ua), "")
+    return ", ".join(x for x in (br, os_name) if x)
+
+
+def _notify_login(user: dict[str, Any], method: str, request: Optional[Request]) -> None:
+    """письмо о входе на сайт (мини-приложение не считается)."""
+    email = (user.get("email") or "").strip()
+    if not email:
+        return
+    ua = ""
+    try:
+        ua = (request.headers.get("user-agent") or "") if request is not None else ""
+    except Exception:  # noqa: BLE001
+        ua = ""
+    when = _msk_datetime(datetime.now(timezone.utc))
+    _mail_async(mailer.send_login_notice, email, when, method, _client_ip(request), _device_from_ua(ua))
+
+
+def _msk_datetime(dt: datetime) -> str:
+    return (dt + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+
+
+def _esc_html(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+_SAFE_TG_URL = re.compile(r"^(https?://|mailto:|tg://)", re.I)
+_MD_LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+_MD_CODE = re.compile(r"`([^`\n]+)`")
+_MD_BOLD = re.compile(r"\*\*([^*\n]+?)\*\*")
+_MD_BOLD2 = re.compile(r"(?<![\w*])\*([^*\s](?:[^*\n]*[^*\s])?)\*(?![\w*])")
+_MD_ITALIC = re.compile(r"(?<![\w_])_([^_\s](?:[^_\n]*[^_\s])?)_(?![\w_])")
+_MD_UNDER = re.compile(r"__([^_\n]+?)__")
+_MD_STRIKE = re.compile(r"~~([^~\n]+?)~~")
+_HTML_A = re.compile(r'<a\s+href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')[^>]*>([\s\S]*?)</a\s*>', re.I)
+_HTML_TAG = re.compile(
+    r"<(b|strong|i|em|u|s|del|strike|code)\s*>([\s\S]*?)</\1\s*>|"
+    r"<(br|hr)\s*/?>",
+    re.I,
+)
+
+
+def _md_html_to_tg(text: str, limit: int = 700) -> str:
+    """markdown/html поддержки → безопасный HTML Telegram (b/i/u/s/code/a)."""
+    s = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not s.strip():
+        return ""
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    s = re.sub(r"</p\s*>", "\n\n", s, flags=re.I)
+    s = re.sub(r"<p\s*>", "", s, flags=re.I)
+    s = re.sub(r"</?(?:ul|ol)\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"<li\s*>", "• ", s, flags=re.I)
+    s = re.sub(r"</li\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"</?blockquote\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"<h([1-3])\s*>([\s\S]*?)</h\1\s*>", lambda m: f"\n<b>{m.group(2).strip()}</b>\n", s, flags=re.I)
+    s = re.sub(r"<hr\s*/?>", "\n—\n", s, flags=re.I)
+
+    held: list[str] = []
+
+    def hold(html: str) -> str:
+        held.append(html)
+        return f"\x00{len(held) - 1}\x00"
+
+    def wrap_inner(tag: str, inner: str) -> str:
+        return hold(f"<{tag}>{_md_html_to_tg_inline(inner, held)}</{tag}>")
+
+    # html-ссылки и теги (до экранирования)
+    def repl_a(m: re.Match) -> str:
+        href = (m.group(1) or m.group(2) or "").strip()
+        if not _SAFE_TG_URL.match(href):
+            return m.group(3)
+        return hold(f'<a href="{_esc_html(href)}">{_md_html_to_tg_inline(m.group(3), held)}</a>')
+
+    s = _HTML_A.sub(repl_a, s)
+
+    def repl_tag(m: re.Match) -> str:
+        if m.group(3):  # br|hr
+            return "\n" if m.group(3).lower() == "br" else "\n—\n"
+        tag = m.group(1).lower()
+        tg = {"b": "b", "strong": "b", "i": "i", "em": "i", "u": "u",
+              "s": "s", "del": "s", "strike": "s", "code": "code"}.get(tag, "b")
+        return wrap_inner(tg, m.group(2))
+
+    s = _HTML_TAG.sub(repl_tag, s)
+
+    # markdown
+    s = _MD_LINK.sub(
+        lambda m: hold(f'<a href="{_esc_html(m.group(2))}">{_esc_html(m.group(1))}</a>')
+        if _SAFE_TG_URL.match(m.group(2).strip()) else _esc_html(m.group(1)), s)
+    s = _MD_CODE.sub(lambda m: hold(f"<code>{_esc_html(m.group(1))}</code>"), s)
+    s = _MD_BOLD.sub(lambda m: wrap_inner("b", m.group(1)), s)
+    s = _MD_UNDER.sub(lambda m: wrap_inner("u", m.group(1)), s)
+    s = _MD_STRIKE.sub(lambda m: wrap_inner("s", m.group(1)), s)
+    s = _MD_BOLD2.sub(lambda m: wrap_inner("b", m.group(1)), s)
+    s = _MD_ITALIC.sub(lambda m: wrap_inner("i", m.group(1)), s)
+
+    # экранировать остаток, вернуть плейсхолдеры
+    parts: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\x00":
+            j = s.find("\x00", i + 1)
+            if j > i:
+                try:
+                    parts.append(held[int(s[i + 1:j])])
+                except (ValueError, IndexError):
+                    parts.append(_esc_html(s[i:j + 1]))
+                i = j + 1
+                continue
+        # обычный текст до следующего плейсхолдера
+        j = s.find("\x00", i)
+        chunk = s[i:] if j < 0 else s[i:j]
+        parts.append(_esc_html(chunk))
+        i = len(s) if j < 0 else j
+
+    out = "".join(parts)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    if len(out) > limit:
+        # обрезать по символам, не разрывая тег посередине
+        cut = out[:limit]
+        if cut.count("<") != cut.count(">"):
+            cut = cut.rsplit("<", 1)[0]
+        out = cut.rstrip() + "…"
+    return out
+
+
+def _md_html_to_tg_inline(inner: str, held: list[str]) -> str:
+    """экранировать внутренность уже выбранного тега (без повторного разбора md)."""
+    # внутри тега плейсхолдеров быть не должно — просто escape
+    return _esc_html(re.sub(r"<[^>]+>", "", inner or ""))
+
+
+def trial_enabled() -> bool:
+    return db.get_setting("trial_enabled", "1") in ("1", "true", "True", "yes")
+
+
+TRIAL_SOURCES = ("miniapp", "web")
+
+
+def trial_source_enabled(source: str) -> bool:
+    """пробный отдельно для мини-приложения (miniapp) и сайта (web); общий выключатель — trial_enabled."""
+    src = source if source in TRIAL_SOURCES else "web"
+    return db.get_setting(f"trial_{src}_enabled", "1") in ("1", "true", "True", "yes")
+
+
+def trial_enabled_for(source: Optional[str]) -> bool:
+    if not trial_enabled():
+        return False
+    return True if source is None else trial_source_enabled(source)
+
+
+def app_source(request: Optional[Request]) -> str:
+    """откуда запрос: miniapp — Telegram Mini App, web — сайт.
+    Определяется при авторизации (_app_user_from_init); подделать нельзя: initData подписан Telegram,
+    а у сессии источник записан при входе."""
+    if request is None:
+        return "web"
+    via = getattr(request.state, "app_via", None)
+    if via in TRIAL_SOURCES:
+        return via
+    if (request.headers.get("X-Telegram-Init-Data") or "").strip():
+        return "miniapp"  # только для отображения; проверка — при авторизации
+    token = _extract_app_token(request.headers.get("Authorization"), request.headers.get("X-App-Session"))
+    sess = get_app_session(token) if token else None
+    return "miniapp" if (sess and sess.get("source") == "miniapp") else "web"
+
+
+MAX_PLAN_DEVICES = 20
+# пакет устройств в цене периода — свой у проекта (project.json → pack_devices; у BatmanVPN — 1, у остальных — 3).
+# при новой покупке меньше нельзя; стартовое число на экране тарифа — тоже пакет, дальше докупка
+def plan_min_devices() -> int:
+    return fulfillment.pack_devices()
+
+
+def plan_default_devices() -> int:
+    return plan_min_devices()
+
+
+def _float_setting(key: str, default: float) -> float:
+    try:
+        return float(db.get_setting(key, str(default)) or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def get_plans_meta() -> dict[str, Any]:
+    return {
+        # цена = base + extra * (devices - 1)
+        "base_price": _float_setting("base_price", 99),
+        "extra_device_price": _float_setting("extra_device_price", 40),
+        "trial_enabled": trial_enabled(),
+        "channel_required": channel_required(),
+        "channel_url": P().channel_url,
+        "trial_miniapp_enabled": trial_source_enabled("miniapp"),
+        "trial_web_enabled": trial_source_enabled("web"),
+        "trial_days": fulfillment.trial_days(),
+        "trial_traffic_gb": fulfillment.trial_traffic_gb(),
+        "trial_devices": fulfillment.trial_devices(),
+        "paid_traffic_gb": fulfillment.paid_traffic_gb(),
+        "traffic_reset_price": _float_setting("traffic_reset_price", 0),
+        "antiabuse_enabled": db.get_setting("antiabuse_enabled", "1") in ("1", "true", "True", "yes"),
+        "antiabuse": antiabuse.limits(),
+        "trial_hwid_enabled": db.get_setting("trial_hwid_enabled", "1") in ("1", "true", "True", "yes"),
+        "trial_hwid_max": fulfillment._int_setting("trial_hwid_max", 2, 1, 10),
+        "tariff_devices": fulfillment.tariff_devices(),
+        "min_devices": plan_min_devices(),
+        "default_devices": plan_default_devices(),
+        "device_prices": {str(k): v for k, v in sorted(fulfillment.device_price_overrides().items())},
+        "extra_device_stars": fulfillment.extra_device_stars(),
+        "device_stars": {str(k): v for k, v in sorted(fulfillment.device_stars_overrides().items())},
+        "period_prices": {str(m): fulfillment.period_price(m) for m in fulfillment.SUB_PERIODS},
+        "period_stars": {str(m): fulfillment.period_stars(m) for m in fulfillment.SUB_PERIODS},
+        "pay_methods": pay_methods(),
+        # у проекта есть сайт: способы для сайта отдельно (null — сайта нет, один набор)
+        "pay_methods_web": pay_methods("web") if site_pay_split() else None,
+    }
+
+
+def price_for_devices(devices: int) -> float:
+    meta = get_plans_meta()
+    n = max(1, int(devices))
+    return round(float(meta["base_price"]) + float(meta["extra_device_price"]) * (n - 1), 2)
+
+
+def get_active_plans() -> list[dict[str, Any]]:
+    """цены для 1..20 устройств из base + extra."""
+    out = []
+    for n in range(1, MAX_PLAN_DEVICES + 1):
+        price = price_for_devices(n)
+        out.append({"devices": n, "price_rub": price, "price_stars": float(round(price))})
+    return out
+
+
+def plan_price_map() -> dict[int, float]:
+    return {int(p["devices"]): float(p["price_rub"]) for p in get_active_plans()}
+
+
+def plan_stars_map() -> dict[int, float]:
+    return {int(p["devices"]): float(p["price_stars"]) for p in get_active_plans()}
+
+
+def min_plan_price() -> Optional[float]:
+    return price_for_devices(1)
+
+
+def _backup_dir() -> str:
+    d = os.path.join(os.path.dirname(os.path.abspath(db.get_db_path())), "backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+BACKUPS_KEEP = 10  # и на диске, и в s3
+
+
+def _s3_backups() -> list[dict[str, Any]]:
+    """бэкапы в s3, новые первыми."""
+    items = db.loads(db.get_setting("s3_backups", "[]"), []) or []
+    return [x for x in items if isinstance(x, dict) and x.get("key") and x.get("name")]
+
+
+def list_backups() -> list[dict[str, Any]]:
+    d = _backup_dir()
+    out: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(d), reverse=True):
+        if not name.endswith(".db"):
+            continue
+        path = os.path.join(d, name)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        out.append({
+            "name": name,
+            "size": st.st_size,
+            "created_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+            "s3": False,
+        })
+    local = {x["name"] for x in out}
+    for x in _s3_backups():
+        if x["name"] in local:
+            for y in out:
+                if y["name"] == x["name"]:
+                    y["s3"] = True
+        else:
+            out.append({"name": x["name"], "size": x.get("size") or 0, "created_at": x.get("created_at"), "s3": True, "only_s3": True})
+    out.sort(key=lambda x: x["name"], reverse=True)
+    return out
+
+
+# таблицы вне бэкапа (сессии/коды/временное)
+_BACKUP_SCRUB_TABLES = ("app_sessions", "panel_sessions", "temp_2fa", "email_codes", "rate_limits",
+                        # history мониторинга объёмная, ноды/инциденты оставляем
+                        "mon_metrics", "mon_pings", "mon_speed", "mon_vless")
+
+
+def create_backup() -> dict[str, Any]:
+    """онлайн-копия sqlite (wal). возвращает сведения о файле."""
+    import sqlite3
+
+    ts = utcnow().strftime("%Y%m%d-%H%M%S")
+    name = f"backup-{ts}.db"
+    path = os.path.join(_backup_dir(), name)
+    # одна база или по проектам — копия всегда одним файлом прежнего формата
+    db.backup_to(path)
+    try:
+        dst = sqlite3.connect(path)
+        try:
+            # из копии убираем сессии, коды входа/2fa, счётчики
+            for table in _BACKUP_SCRUB_TABLES:
+                try:
+                    dst.execute(f"DELETE FROM {table}")
+                except sqlite3.Error:
+                    pass
+            dst.commit()
+            dst.execute("VACUUM")
+        finally:
+            dst.close()
+    finally:
+        pass
+    try:
+        os.chmod(path, 0o640)
+    except OSError:
+        pass
+    last = db.utcnow_iso()
+    db.set_setting("backup_last", last)
+    # на диске последние BACKUPS_KEEP копий
+    local = sorted((n for n in os.listdir(_backup_dir()) if n.endswith(".db")), reverse=True)
+    for old in local[BACKUPS_KEEP:]:
+        try:
+            os.remove(os.path.join(_backup_dir(), old))
+        except OSError:
+            pass
+    st = os.stat(path)
+    _backup_to_s3(path, name)
+    # в telegram сжатую копию (лимит бота 50 мб)
+    try:
+        import gzip
+        import shutil
+        gz_path = path + ".gz"
+        with open(path, "rb") as f_in, gzip.open(gz_path, "wb", compresslevel=9) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        gz_size = os.path.getsize(gz_path)
+        try:
+            if gz_size < 49 * 1024 * 1024:
+                forum.send_document("backups", gz_path,
+                                    caption=f"🗄 Бэкап БД · {name}.gz · {gz_size // 1024} КБ")
+            else:
+                forum.send("backups", f"🗄 Бэкап <b>{forum._esc(name)}</b> создан на сервере, но слишком "
+                                      f"большой для Telegram ({gz_size // (1024 * 1024)} МБ сжатым). "
+                                      "Скачайте его из панели → Настройки → Резервные копии.")
+        finally:
+            os.remove(gz_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[backup] не удалось отправить в Telegram: {exc}", flush=True)
+    return {"name": name, "size": st.st_size, "created_at": last, "last_backup": last}
+
+
+def _backup_to_s3(path: str, name: str) -> None:
+    """если есть s3: кладём сжатую копию, держим BACKUPS_KEEP."""
+    try:
+        if not s3store.enabled():
+            return
+        import gzip
+        import hashlib
+        import shutil
+        cfg = s3store.get_config()
+        gz = path + ".s3.gz"
+        with open(path, "rb") as f_in, gzip.open(gz, "wb", compresslevel=9) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        try:
+            h = hashlib.sha256()
+            with open(gz, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            key = f"{cfg['prefix']}backups/{name}.gz"
+            s3store.put_file(key, gz, h.hexdigest(), "application/gzip", f'attachment; filename="{name}.gz"')
+            size = os.path.getsize(gz)
+        finally:
+            os.remove(gz)
+        items = [x for x in _s3_backups() if x["name"] != name]
+        items.insert(0, {"key": key, "name": name, "size": size, "created_at": db.utcnow_iso()})
+        for old in items[BACKUPS_KEEP:]:
+            try:
+                s3store.delete(old["key"])
+            except Exception as exc:  # noqa: BLE001
+                print(f"[backup] S3: не удалось удалить {old['key']}: {exc}", flush=True)
+        db.set_setting("s3_backups", db.dumps(items[:BACKUPS_KEEP]))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[backup] S3: не удалось загрузить: {exc}", flush=True)
+        try:
+            forum.report_error("Бэкап не загрузился в S3", f"{type(exc).__name__}: {exc}")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def get_backup_settings() -> dict[str, Any]:
+    last = db.get_setting("backup_last", "") or None
+    return {
+        "enabled": db.get_setting("backup_enabled", "0") in ("1", "true", "True"),
+        "interval_hours": int(float(db.get_setting("backup_interval_hours", "12") or 12)),
+        "last_backup": last or None,
+        "backups": list_backups(),
+    }
+
+
+def get_squad_mapping() -> dict[str, Any]:
+    """сквады открытого в панели проекта; own_* — заданы ли свои (иначе действуют общие сети)."""
+    own_vpn = db.loads(db.get_setting("squad_mapping_vpn", "[]"), []) or []
+    own_trial = db.loads(db.get_setting("squad_mapping_trial", "[]"), []) or []
+    return {
+        "vpn": fulfillment.squad_setting("squad_mapping_vpn"),
+        "trial": fulfillment.squad_setting("squad_mapping_trial"),
+        "own_vpn": bool(own_vpn), "own_trial": bool(own_trial),
+        "project": db.pid(),
+    }
+
+
+def set_squad_mapping(vpn: list[str], trial: list[str]) -> None:
+    db.set_setting("squad_mapping_vpn", db.dumps(list(vpn)))
+    db.set_setting("squad_mapping_trial", db.dumps(list(trial)))
+
+
+def serialize_promocode(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": p["id"],
+        "code": p["code"],
+        "name": p.get("name"),
+        # discount — скидка % на оплату; days — дни к подписке с кнопкой «Забрать» (features.promo_days)
+        "type": "days" if str(p.get("type") or "") == "days" else "discount",
+        "value": p["value"],  # процент скидки или число дней
+        "uses_limit": p.get("uses_limit"),
+        "uses_count": p.get("uses_count", 0),
+        "expires_at": p.get("expires_at"),  # срок, до которого промокод можно активировать
+        "is_active": bool(p.get("is_active")),
+        "once_per_family": bool(p.get("once_per_family")),
+        "created_at": p.get("created_at"),
+    }
+
+
+PROMO_DISCOUNT_DAYS = 90
+
+
+def _promo_type_value(body: "PromocodeBody") -> tuple[str, float]:
+    """тип и значение промокода с проверкой по фичам проекта."""
+    t = "days" if str(body.type or "").lower() == "days" else "discount"
+    v = float(body.value or 0)
+    if t == "days":
+        if not P().feature("promo_days"):
+            raise HTTPException(400, detail={"message": "Промокоды на дни выключены для этого проекта"})
+        if not (1 <= v <= 365) or int(v) != v:
+            raise HTTPException(400, detail={"message": "Дней: целое число от 1 до 365"})
+    elif not (0 < v <= 100):
+        raise HTTPException(400, detail={"message": "Скидка: от 1 до 100%"})
+    return t, v
+
+
+def active_global_discount() -> Optional[dict[str, Any]]:
+    """активная глобальная скидка или none."""
+    now_iso = db.utcnow_iso()
+    row = db.fetchone(
+        "SELECT name, value, expires_at FROM promotions "
+        "WHERE type = 'global_discount' AND is_active = 1 AND value > 0 "
+        "AND (expires_at IS NULL OR expires_at > ?) "
+        "ORDER BY value DESC LIMIT 1",
+        (now_iso,),
+    )
+    if not row:
+        return None
+    return {
+        "percent": float(row["value"] or 0),
+        "expires_at": row.get("expires_at"),
+        "code": None,
+        "name": row.get("name"),
+        "promocode_id": None,
+        "is_global": True,
+    }
+
+
+def _min_iso(*vals: Any) -> Optional[str]:
+    """раньший из сроков (пустые пропускаем)."""
+    ds = [(parse_iso(str(v)), str(v)) for v in vals if v]
+    ds = [x for x in ds if x[0]]
+    return min(ds, key=lambda x: x[0])[1] if ds else None
+
+
+def active_discount_for_user(user_id: int) -> Optional[dict[str, Any]]:
+    """лучшая неистёкшая скидка юзера (промо или акция)."""
+    now_iso = db.utcnow_iso()
+    row = db.fetchone(
+        "SELECT a.id AS activation_id, a.discount_percent AS percent, a.expires_at AS expires_at, p.code AS code, "
+        "p.name AS name, p.id AS promocode_id, COALESCE(p.once_per_family, 0) AS once, p.expires_at AS promo_expires_at "
+        "FROM promocode_activations a JOIN promocodes p ON p.id = a.promocode_id "
+        "WHERE a.user_id = ? AND a.discount_percent > 0 "
+        "AND (a.expires_at IS NULL OR a.expires_at > ?) "
+        # закончился сам промокод — скидка тоже (и для активированных раньше)
+        "AND (p.expires_at IS NULL OR p.expires_at = '' OR p.expires_at > ?) "
+        # «1 раз на семью» — скидка на одну оплату: после неё не действует
+        "AND NOT (COALESCE(p.once_per_family, 0) = 1 AND a.used_at IS NOT NULL) "
+        "ORDER BY a.discount_percent DESC, a.expires_at DESC LIMIT 1",
+        (user_id, now_iso, now_iso),
+    )
+    personal = None
+    if row:
+        personal = {
+            "percent": float(row["percent"] or 0),
+            "expires_at": _min_iso(row.get("expires_at"), row.get("promo_expires_at")),
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "promocode_id": row.get("promocode_id"),
+        }
+        if row.get("once"):
+            personal["promo_activation_id"] = int(row["activation_id"])
+    global_disc = active_global_discount()
+    # компенсация из панели: разовая скидка на следующую покупку (тратится при оплате, если сработала она)
+    comp_row = services.active_compensation(user_id)
+    comp = {"percent": float(comp_row["discount_percent"]), "expires_at": None, "code": None,
+            "name": "Компенсация", "compensation_id": int(comp_row["id"])} if comp_row else None
+
+    candidates = [d for d in (personal, global_disc, comp) if d and d["percent"] > 0]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: d["percent"])
+
+
+def discounted(amount: float, percent: float) -> float:
+    """цена со скидкой, вниз до целого, не ниже 1."""
+    if percent <= 0:
+        return float(amount)
+    result = float(amount) * (1.0 - percent / 100.0)
+    return float(max(1, round(result)))
+
+
+# потолок суммарной скидки
+MAX_TOTAL_DISCOUNT = 90.0
+
+
+def effective_discount(user_id: int) -> dict[str, Any]:
+    """итоговая скидка: лучший промо/акция."""
+    base_disc = active_discount_for_user(user_id)
+    base = float((base_disc or {}).get("percent") or 0)
+    total = min(MAX_TOTAL_DISCOUNT, base)
+    out: dict[str, Any] = {
+        "active": total > 0,
+        "percent": total,
+        "base": base,
+    }
+    if base_disc:
+        out["code"] = base_disc.get("code")
+        out["name"] = base_disc.get("name")
+        out["expires_at"] = base_disc.get("expires_at")
+        if base_disc.get("compensation_id"):
+            out["compensation_id"] = base_disc["compensation_id"]
+            out["one_time"] = True  # только на одну покупку
+        if base_disc.get("promo_activation_id"):
+            out["promo_activation_id"] = base_disc["promo_activation_id"]
+            out["one_time"] = True  # промокод «1 раз на семью» — на одну оплату
+    return out
+
+
+def apply_promo_to_user(user_id: int, code: str, *, by_admin: bool = False) -> dict[str, Any]:
+    """активирует промокод-скидку на 90 дней (один раз на юзера)."""
+    try:
+        return services.activate_promocode(user_id, code)
+    except services.ServiceError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+
+
+def remove_user_promo(user_id: int, code: Optional[str] = None) -> int:
+    """снимает скидку у юзера (админ); code=только этот промо; @compensation — скидку компенсации."""
+    if code and code.strip().lower() == "@compensation":
+        cur = db.execute("UPDATE compensations SET used_at = ?, used_payment_id = 'removed' "
+                         "WHERE user_id = ? AND used_at IS NULL AND discount_percent > 0", (iso(), user_id))
+        return cur.rowcount if hasattr(cur, "rowcount") else 0
+    if code:
+        promo = db.fetchone("SELECT id FROM promocodes WHERE code = ? AND project_id = "
+                            "(SELECT project_id FROM users WHERE id = ?)", (code.upper().strip(), user_id))
+        if not promo:
+            return 0
+        cur = db.execute(
+            "DELETE FROM promocode_activations WHERE user_id = ? AND promocode_id = ?",
+            (user_id, promo["id"]),
+        )
+    else:
+        cur = db.execute("DELETE FROM promocode_activations WHERE user_id = ?", (user_id,))
+    return cur.rowcount if hasattr(cur, "rowcount") else 0
+
+
+def serialize_promotion(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": p["id"],
+        "name": p["name"],
+        "type": p["type"],
+        "value": p["value"],
+        "min_amount": p.get("min_amount"),
+        "max_amount": p.get("max_amount"),
+        "uses_limit": p.get("uses_limit"),
+        "uses_count": p.get("uses_count", 0),
+        "expires_at": p.get("expires_at"),
+        "is_active": bool(p.get("is_active")),
+        "created_at": p.get("created_at"),
+    }
+
+
+def serialize_mailing(m: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": m["id"],
+        "title": m.get("title"),
+        "date": m.get("created_at"),
+        "created_at": m.get("created_at"),
+        "status": m.get("status"),
+        "sent_count": m.get("sent_count", 0),
+        "message_text": m.get("message_text"),
+        "target_users": m.get("target_users"),
+        "button_type": m.get("button_type"),
+        "button_value": m.get("button_value"),
+        "image_url": m.get("image_url"),
+        "channel": m.get("channel") or "telegram",
+        "subject": m.get("subject"),
+    }
+
+
+def serialize_tracking(link: dict[str, Any], include_users: bool = False) -> dict[str, Any]:
+    out = {
+        "id": link["id"],
+        "name": link["name"],
+        "code": link["code"],
+        "promocode": link.get("promocode"),
+        "welcome_message": link.get("welcome_message"),
+        "url": link.get("url") or _tracking_url(link["code"]),
+        "clicks": link.get("clicks", 0),
+        "is_active": bool(link.get("is_active")),
+        "created_at": link.get("created_at"),
+        "unique_users": link.get("unique_users", 0),
+        "new_users": link.get("new_users", 0),
+        "total_revenue": link.get("total_revenue", 0),
+        "paid_users": link.get("paid_users", 0),
+        "active_subscriptions": link.get("active_subscriptions", 0),
+        "total_keys": link.get("total_keys", 0),
+        "conversion_rate": link.get("conversion_rate", 0),
+    }
+    if include_users:
+        users = db.fetchall(
+            "SELECT * FROM tracking_link_users WHERE link_id = ? ORDER BY id DESC",
+            (link["id"],),
+        )
+        out["users"] = users
+    return out
+
+
+def serialize_squad(s: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": s.get("priority", 0),
+        "squad_uuid": s["squad_uuid"],
+        "squad_name": s["squad_name"],
+        "squad_type": s.get("squad_type", "vpn"),
+        "max_users": s.get("max_users", 0),
+        "current_users": s.get("current_users", 0),
+        "inbounds_count": s.get("inbounds_count", 0),
+        "is_active": bool(s.get("is_active")),
+        "priority": s.get("priority", 0),
+    }
+
+
+OWNER_NAME = "Администратор"
+
+
+def _owner_principal(username: str) -> dict[str, Any]:
+    return {"kind": "owner", "role": "owner", "actor": "owner", "staff_id": None, "username": username, "name": OWNER_NAME}
+
+
+def _staff_principal(st: dict[str, Any]) -> dict[str, Any]:
+    p = {"kind": "staff", "role": staffmod.role_of(st), "actor": f"staff:{int(st['id'])}", "staff_id": int(st["id"]),
+         "username": st["username"], "name": staffmod.display_name(st)}
+    if p["role"] == "admin":
+        acc = staffmod.admin_access(st)
+        p["perms"] = staffmod.effective_perms(acc["perms"])
+        p["projects"] = acc["projects"]
+    return p
+
+
+def is_admin(p: dict[str, Any]) -> bool:
+    return p.get("role") == "admin"
+
+
+def admin_has(p: dict[str, Any], perm: str) -> bool:
+    return is_admin(p) and perm in (p.get("perms") or set())
+
+
+def admin_project_ok(p: dict[str, Any], pid: Optional[str]) -> bool:
+    """администратору открыт этот проект (владельцу и сотрудникам поддержки — все)."""
+    if not is_admin(p):
+        return True
+    allowed = p.get("projects") or []
+    return "*" in allowed or (pid or "") in allowed
+
+
+def is_full(p: dict[str, Any]) -> bool:
+    """полный доступ к поддержке: владелец, кураторы и администраторы с правом «Поддержка»."""
+    return p.get("role") in ("owner", "curator") or admin_has(p, "support")
+
+
+def _require_operator_shift(p: dict[str, Any]) -> None:
+    """оператор берёт тикеты только в смену."""
+    if p.get("role") != "operator" or not p.get("staff_id"):
+        return
+    sid = int(p["staff_id"])
+    if not staffpay.has_schedule(sid):
+        return
+    if staffpay.on_shift(sid):
+        return
+    raise HTTPException(403, detail={"message": "Смена закончилась — брать обращения можно только в рабочее время"})
+
+
+def _staff_has_ticket_with(actor: str, user_id: int) -> bool:
+    """сотрудник сейчас ведёт обращение этого юзера."""
+    return bool(db.fetchone(
+        "SELECT 1 FROM support_chats c JOIN support_tickets t ON t.id = c.open_ticket_id "
+        "WHERE c.user_id = ? AND t.status = 'open' AND t.assigned_admin = ? LIMIT 1", (int(user_id), actor)))
+
+
+def can_manage_user(p: dict[str, Any], user_id: int) -> bool:
+    if is_full(p) or is_admin(p):  # администратора ограничивают права на действия, а не тикеты
+        return True
+    return 0 < int(user_id) < 10 ** 18 and _staff_has_ticket_with(p["actor"], int(user_id))
+
+
+def _authorize_admin(p: dict[str, Any], request: Request, path: str) -> None:
+    """администратор: путь открыт его правами, проект запроса — из разрешённых."""
+    deny = HTTPException(403, detail={"message": "Недостаточно прав"})
+    scope = staffmod.admin_route(request.method, path[len("/api/panel"):], p.get("perms") or set())
+    if scope is None:
+        raise deny
+    if scope == "project":
+        if not admin_project_ok(p, db.pid()):
+            raise HTTPException(403, detail={"message": "Нет доступа к этому проекту"})
+        # сводка «вся сеть» — только с доступом ко всем проектам
+        if str(request.query_params.get("scope") or "") == "all" and "*" not in (p.get("projects") or []):
+            raise HTTPException(403, detail={"message": "Сводка по всей сети доступна только с доступом ко всем проектам"})
+    p["authorized"] = True
+
+
+def _authorize_staff(p: dict[str, Any], method: str, path: str) -> None:
+    """путь открыт сотруднику только через staff.ROUTES + роль."""
+    deny = HTTPException(403, detail={"message": "Недостаточно прав"})
+    if not path.startswith("/api/panel/"):
+        raise deny
+    hit = staffmod.match_route(method, path[len("/api/panel"):])
+    if hit is None:
+        raise deny
+    rule, groups = hit
+    if rule == "any":
+        return
+    if rule == "curator" and p["role"] == "curator":
+        return
+    if rule == "manage":
+        uid = groups.get("uid") or ""
+        if uid and len(uid) <= 18 and can_manage_user(p, int(uid)):
+            return
+    raise deny
+
+
+def require_panel(request: Request, authorization: Optional[str] = Header(None)) -> dict[str, Any]:
+    """сессия панели -> кто это + права на запрос."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, detail="Unauthorized")
+    token = authorization.split(" ", 1)[1].strip()
+    session = get_panel_session(token)
+    if not session:
+        raise HTTPException(401, detail="Unauthorized")
+    sid = session.get("staff_id")
+    if sid is None:
+        admin = get_admin()
+        if not admin or not hmac.compare_digest(str(session.get("username") or "").encode(), str(admin["username"]).encode()):
+            delete_panel_session(token)
+            raise HTTPException(401, detail="Unauthorized")
+        p = _owner_principal(admin["username"])
+    else:
+        st = staffmod.get(int(sid))
+        if not st or not st.get("is_active"):
+            delete_panel_session(token)
+            raise HTTPException(401, detail="Unauthorized")
+        p = _staff_principal(st)
+    try:
+        request.state.panel_actor = p["actor"]
+        request.state.panel_actor_name = p["name"]
+    except Exception:  # noqa: BLE001
+        pass
+    if p["kind"] != "owner":
+        path = request.scope.get("path") or ""
+        if not path.startswith("/api/panel/"):
+            raise HTTPException(403, detail={"message": "Недостаточно прав"})
+        if is_admin(p):
+            _authorize_admin(p, request, path)
+        else:
+            _authorize_staff(p, request.method, path)
+    return p
+
+
+def require_owner(p: dict[str, Any] = Depends(require_panel)) -> dict[str, Any]:
+    """владелец панели — или администратор, которому этот путь открыт его правами (проверено в require_panel)."""
+    if p.get("kind") == "owner" or (is_admin(p) and p.get("authorized")):
+        return p
+    raise HTTPException(403, detail={"message": "Недостаточно прав"})
+
+
+def require_real_owner(p: dict[str, Any] = Depends(require_panel)) -> dict[str, Any]:
+    """только сам владелец: сотрудники и администраторы, их права, проекты и серверы."""
+    if p.get("kind") != "owner":
+        raise HTTPException(403, detail={"message": "Недостаточно прав"})
+    return p
+
+
+def audit(actor: str, name: Optional[str], action: str, status: Optional[int] = None, ip: str = "") -> None:
+    try:
+        db.execute("INSERT INTO panel_audit (ts, actor, actor_name, action, status, ip) VALUES (?, ?, ?, ?, ?, ?)",
+                   (iso(), actor, (name or "")[:60], action[:200], status, (ip or "")[:64]))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _setup_token_ok(setup_token: Optional[str], header_token: Optional[str]) -> bool:
+    if not PANEL_SETUP_TOKEN:
+        return ENV != "production"
+    candidate = (setup_token or header_token or "").strip()
+    return bool(candidate) and hmac.compare_digest(candidate, PANEL_SETUP_TOKEN)
+
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+class VerifyCodeBody(BaseModel):
+    temp_token: str
+    code: str
+
+
+class UserActionBody(BaseModel):
+    action: str
+    value: Any = None
+    notify: bool = False
+    channel: Optional[str] = None  # telegram | email — для NOTIFY
+    subscription_id: Optional[int] = None
+    confirm: bool = False  # подтверждено объединение аккаунтов
+
+
+class MassActionBody(BaseModel):
+    action: str
+    value: Any = None
+    notify: bool = False
+
+
+class CreateKeyBody(BaseModel):
+    user_id: int
+    days: int = 30
+    traffic: int = 0
+    devices: int = 1
+    is_trial: bool = False
+    is_forever: bool = False
+    squads: list[str] = Field(default_factory=list)
+    custom_name: Optional[str] = None
+
+
+class BlockKeyBody(BaseModel):
+    blocked: bool
+
+
+class MailingBody(BaseModel):
+    message: str
+    target_users: str = "all"
+    title: Optional[str] = None
+    button_type: Optional[str] = None
+    button_value: Optional[str] = None
+    image_url: Optional[str] = None
+    channels: list[str] = Field(default_factory=lambda: ["telegram"])  # telegram | email
+    subject: Optional[str] = None  # тема письма (email-канал)
+
+
+class PromocodeBody(BaseModel):
+    code: str
+    name: Optional[str] = None
+    type: str = "discount"  # discount — скидка %, days — дни к подписке (если у проекта features.promo_days)
+    value: float = 0        # процент скидки или число дней
+    uses_limit: Optional[int] = None
+    expires_at: Optional[str] = None  # срок активации промокода
+    is_active: Any = 1
+    once_per_family: Any = None       # «1 раз на семью»; None при правке — не менять
+
+
+class PromotionBody(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    value: Optional[float] = None
+    min_amount: Optional[float] = None
+    max_amount: Optional[float] = None
+    uses_limit: Optional[int] = None
+    expires_at: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class TrackingBody(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    promocode: Optional[str] = None
+    welcome_message: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class SquadUpdateBody(BaseModel):
+    squad_name: Optional[str] = None
+    squad_type: Optional[str] = None
+    max_users: Optional[int] = None
+    priority: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class SquadMappingBody(BaseModel):
+    vpn: list[str] = Field(default_factory=list)
+    trial: list[str] = Field(default_factory=list)
+
+
+class GraceSettingsBody(BaseModel):
+    enabled: bool = False
+    squads: list[str] = Field(default_factory=list, max_length=20)
+    traffic_gb: int = Field(1, ge=0, le=1000)
+    trial: bool = False
+
+
+class BackupSettingsBody(BaseModel):
+    enabled: bool = False
+    interval_hours: int = 12
+
+
+class ForumConfigBody(BaseModel):
+    forum_chat_id: Optional[str] = None
+    panel_url: Optional[str] = None
+    admin_ids: Optional[str] = Field(None, max_length=500)  # Telegram ID админов через запятую
+    topics: dict[str, Any] = Field(default_factory=dict)
+
+
+class WithdrawCompleteBody(BaseModel):
+    tx_hash: str
+
+
+class WithdrawRejectBody(BaseModel):
+    reason: str = ""
+    refund: bool = True
+
+
+class OauthBody(BaseModel):
+    id: Any
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    photo_url: Optional[str] = None
+    auth_date: Any = None
+    hash: str
+    captcha_token: Optional[str] = None
+
+
+class RedeemPromoBody(BaseModel):
+    code: str
+
+
+class WithdrawBody(BaseModel):
+    amount: float
+    address: str = Field("", max_length=128)        # кошелёк TON или телефон для СБП
+    method: str = Field("usdt_ton", max_length=16)  # usdt_ton | sbp
+    bank: str = Field("", max_length=80)           # банк для СБП
+
+
+class CreatePaymentBody(BaseModel):
+    plan_devices: int = 1
+    months: int = 1
+    method: str = "sbp"
+    extra_devices: int = 0
+    purpose: str = "subscription"  # subscription | extend | devices
+    subscription_id: Optional[int] = None
+    use_referral_balance: bool = False  # частично оплатить реф. балансом
+    return_to: Optional[str] = None  # экран мини-приложения после оплаты
+
+
+# минимум суммы, которую отправляем в ЮKassa (руб); остальное можно покрыть реф. балансом
+PROVIDER_MIN_RUB: dict[str, float] = {
+    "card": 10.0,
+    "sberpay": 10.0,
+    "sbp": 10.0,
+}
+
+
+def provider_min_rub(method: str) -> float:
+    return float(PROVIDER_MIN_RUB.get(str(method or "").lower(), 10.0))
+
+
+# способы оплаты в мини-приложении (без комиссии); вкл/выкл — из панели
+PAY_METHODS: list[tuple[str, str]] = [
+    ("sbp", "СБП"),
+    ("card", "Банковские карты"),
+    ("tg_stars", "Telegram Stars"),
+]
+
+
+# сайт проекта (features.site, у FGN): свои вкл/выкл способов, отдельно от бота (мини-приложения в Telegram).
+# Звёзды Telegram на сайте не принимаем — только в Telegram.
+WEB_PAY_METHODS = ("sbp", "card")
+
+
+def site_pay_split() -> bool:
+    """у проекта есть сайт — способы оплаты для сайта настраиваются отдельно от бота."""
+    return bool(P().feature("site"))
+
+
+def _pay_list(setting: str, keys: Optional[tuple[str, ...]] = None,
+              fallback: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    saved = db.loads(db.get_setting(setting, ""), None)
+    if not isinstance(saved, dict):
+        saved = fallback or {}
+    return [
+        {"id": key, "title": title, "enabled": bool((saved.get(key) or {}).get("enabled", True))}
+        for key, title in PAY_METHODS if keys is None or key in keys
+    ]
+
+
+def pay_methods(source: Optional[str] = None) -> list[dict[str, Any]]:
+    """способы оплаты проекта. source: "miniapp" — бот (Telegram), "web" — сайт.
+    Отдельный набор для сайта — только у проектов с сайтом; пока его не сохраняли — как у бота."""
+    if source == "web" and site_pay_split():
+        bot = {m["id"]: {"enabled": m["enabled"]} for m in _pay_list("pay_methods")}
+        return _pay_list("pay_methods_web", WEB_PAY_METHODS, bot)
+    return _pay_list("pay_methods")
+
+
+def pay_method(key: str, source: Optional[str] = None) -> Optional[dict[str, Any]]:
+    return next((m for m in pay_methods(source) if m["id"] == key), None)
+
+
+def _save_pay_methods(setting: str, current: list[dict[str, Any]], changes: dict[str, Any]) -> None:
+    cur = {m["id"]: {"enabled": m["enabled"]} for m in current}
+    for key, v in (changes or {}).items():
+        if key in cur and isinstance(v, dict) and "enabled" in v:
+            cur[key]["enabled"] = bool(v["enabled"])
+    db.set_setting(setting, db.dumps(cur))
+
+
+class UpdateEmailBody(BaseModel):
+    email: str
+
+
+class EmailRequestBody(BaseModel):
+    email: str
+    captcha_token: Optional[str] = None
+
+
+class EmailVerifyBody(BaseModel):
+    email: str
+    code: str
+    ref: Optional[str] = None  # ref с сайта только при регистрации
+    merge: bool = False       # подтверждено объединение с аккаунтом этого email
+    captcha_token: Optional[str] = None
+
+
+class OauthLoginBody(OauthBody):
+    ref: Optional[str] = None
+
+
+class ContentTextBody(BaseModel):
+    text: str = ""
+
+
+class PlansUpdateBody(BaseModel):
+    base_price: Optional[float] = None
+    extra_device_price: Optional[float] = None
+    trial_enabled: Optional[bool] = None
+    # пробный отдельно: в мини-приложении (Telegram) и на сайте
+    trial_miniapp_enabled: Optional[bool] = None
+    trial_web_enabled: Optional[bool] = None
+    # подписка на канал: обязательна (без неё нельзя) или можно пропустить
+    channel_required: Optional[bool] = None
+    trial_days: Optional[int] = None
+    trial_traffic_gb: Optional[int] = None
+    trial_devices: Optional[int] = None
+    paid_traffic_gb: Optional[int] = None
+    traffic_reset_price: Optional[float] = None
+    antiabuse_enabled: Optional[bool] = None
+    aa_hwid_multiplier: Optional[int] = Field(None, ge=2, le=10)
+    aa_ip_extra: Optional[int] = Field(None, ge=1, le=20)
+    aa_grace_hours: Optional[int] = Field(None, ge=1, le=168)
+    aa_warn_days: Optional[int] = Field(None, ge=1, le=60)
+    trial_hwid_enabled: Optional[bool] = None
+    trial_hwid_max: Optional[int] = Field(None, ge=1, le=10)
+    # тарифы по периодам: {"1": 180, "3": 470, ...}
+    period_prices: Optional[dict[str, float]] = None
+    period_stars: Optional[dict[str, float]] = None
+    tariff_devices: Optional[int] = Field(None, ge=1, le=20)
+    # цены доп. устройств по номеру, ₽/мес: {"4": 40, "5": 35}; пусто/null — как у предыдущего
+    device_prices: Optional[dict[str, Optional[float]]] = None
+    # то же в звёздах: ⭐/мес по умолчанию и по номеру устройства
+    extra_device_stars: Optional[float] = None
+    device_stars: Optional[dict[str, Optional[float]]] = None
+    whitelist_squad_uuid: Optional[str] = None  # устарело, игнорируется
+    # {"sbp": {"enabled": true}, ...} — бот (мини-приложение в Telegram)
+    pay_methods: Optional[dict[str, dict[str, Any]]] = None
+    # то же для сайта проекта (только у проектов с сайтом, features.site)
+    pay_methods_web: Optional[dict[str, dict[str, Any]]] = None
+
+
+@app.get("/api/health")
+@app.get("/health")
+def health() -> dict[str, Any]:
+    # не светим внутренние пути наружу
+    return {"ok": True, "service": "blinvpn-api"}
+
+
+@app.get("/api/panel/auth/init")
+def panel_auth_init(
+    setup_token: Optional[str] = Query(None),
+    reset: Optional[int] = Query(0),
+    x_panel_setup_token: Optional[str] = Header(None, alias="X-Panel-Setup-Token"),
+) -> dict[str, Any]:
+    # нужен PANEL_SETUP_TOKEN из .env
+    if not _setup_token_ok(setup_token, x_panel_setup_token):
+        return {"show_credentials": False}
+
+    admin = get_admin()
+
+    if admin is None:
+        admin, password = create_admin()
+        return {
+            "show_credentials": True,
+            "username": admin["username"],
+            "password": password,
+            "new_admin": True,
+            "message": "Сохраните логин и пароль — повторно они не показываются.",
+        }
+
+    # пароль в бд только хэш, старый не показать
+    # &reset=1: новый пароль, один раз
+    if reset:
+        admin, password = create_admin(username=admin["username"])
+        return {
+            "show_credentials": True,
+            "username": admin["username"],
+            "password": password,
+            "new_admin": False,
+            "reset": True,
+            "message": "Пароль сброшен. Сохраните новый — повторно он не показывается.",
+        }
+
+    return {
+        "show_credentials": False,
+        "message": "Пароль не хранится на сервере. Для сброса откройте панель по ссылке #setup_token=…&reset=1.",
+    }
+
+
+def _is_public_ip(ip: str) -> bool:
+    try:
+        import ipaddress
+        obj = ipaddress.ip_address((ip or "").strip())
+        return not (obj.is_private or obj.is_loopback or obj.is_link_local or obj.is_reserved or obj.is_multicast)
+    except ValueError:
+        return False
+
+
+def _client_ip(request: Optional[Request]) -> str:
+    """реальный ip клиента: CF / X-Real-IP / первый публичный в XFF.
+
+    Заголовкам верим, только если запрос пришёл от прокси из внутренней сети (Caddy/nginx
+    в docker) или явно включён TRUST_PROXY_HEADERS=1. Иначе клиент мог бы подставить любой
+    CF-Connecting-IP и обходить лимиты по IP.
+    """
+    if not request:
+        return ""
+    peer = ""
+    try:
+        peer = request.client.host if request.client else ""
+    except Exception:  # noqa: BLE001
+        peer = ""
+    trust = (os.getenv("TRUST_PROXY_HEADERS") or "").strip().lower() in ("1", "true", "yes")
+    if peer and _is_public_ip(peer) and not trust:
+        return peer
+    h = request.headers
+    for key in ("cf-connecting-ip", "CF-Connecting-IP", "true-client-ip", "True-Client-IP",
+                "x-real-ip", "X-Real-IP"):
+        raw = (h.get(key) or "").strip()
+        if not raw:
+            continue
+        cand = raw.split(",")[0].strip()
+        if cand:
+            return cand
+    fwd = h.get("x-forwarded-for") or h.get("X-Forwarded-For") or ""
+    parts = [p.strip() for p in fwd.split(",") if p.strip()]
+    for p in parts:
+        if _is_public_ip(p):
+            return p
+    # за прокси во внутренней сети — берём первый (клиент), не последний (сам прокси)
+    if parts:
+        return parts[0]
+    return request.client.host if request.client else ""
+
+
+LOGIN_FAIL_LIMIT = 10          # неудач в логин с одного ip…
+LOGIN_FAIL_WINDOW = 15 * 60    # …за 15 мин -> вход с этого ip закрыт
+LOGIN_FAIL_GLOBAL = 100        # со всех ip за час: защита от разнесённого брутфорса
+LOGIN_FAIL_GLOBAL_WINDOW = 3600
+_DUMMY_SALT = secrets.token_hex(16)
+_DUMMY_HASH = hash_password(secrets.token_hex(16), _DUMMY_SALT)[0]
+
+
+def _trusted_ip(login: str, ip: str) -> bool:
+    """с этого ip в этот логин уже входили (90 дней)."""
+    admin = get_admin() or {}
+    if admin and hmac.compare_digest(login.encode(), str(admin.get("username") or "").encode()):
+        actor = "owner"
+    else:
+        st = staffmod.by_username(login)
+        if not st:
+            return False
+        actor = f"staff:{int(st['id'])}"
+    since = iso(utcnow() - timedelta(days=90))
+    return bool(db.fetchone("SELECT 1 FROM panel_audit WHERE actor = ? AND action = 'login_ok' AND ip = ? AND ts >= ? LIMIT 1",
+                            (actor, ip, since)))
+
+
+def _send_staff_code(st: dict[str, Any], code: str, ip: str, ua: str) -> bool:
+    """код 2fa сотруднику в лс от бота."""
+    if not projects.get(projects.DEFAULT).bot_token:
+        return False
+    text = (f"🔒 <b>Код входа в панель</b>: <code>{code}</code>\n"
+            f"<b>Логин</b>: {_esc_html(st['username'])}\n<b>IP</b>: {_esc_html(ip or '—')}"
+            f"{(' (' + _esc_html(ua[:150]) + ')') if ua else ''}\n\n"
+            "Никому не сообщайте код. Если входили не вы — сообщите администратору.")
+    try:
+        r = notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "text": text, "parse_mode": "HTML"}, timeout=10.0)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(r)  # none: telegram не принял
+
+
+@app.post("/api/panel/auth/login")
+def panel_login(body: LoginBody, request: Request = None) -> Any:  # type: ignore[assignment]
+    # 5 попыток с одного ip за 60 сек
+    ip = _client_ip(request) or "unknown"
+    ua = ((request.headers.get("user-agent") if request else "") or "")[:300]
+    allowed, retry = ratelimit.rate_limit(f"login:{ip}", 5, 60)
+    if not allowed:
+        return JSONResponse(
+            {"error": f"Слишком много попыток. Повторите через {retry} сек."},
+            status_code=429,
+            headers={"Retry-After": str(retry)},
+        )
+
+    login = str(body.username or "").strip()[:64]
+    password = str(body.password or "")[:256]
+    fail_key = f"loginfail:{login.lower()}:{ip}"
+    fail_all = f"loginfail:{login.lower()}"
+    # 10 ошибок логин+ip / 15 мин -> блок с этого ip
+    # со всех ip: не больше 100 ошибок в час
+    if (ratelimit.peek(fail_key, LOGIN_FAIL_WINDOW) >= LOGIN_FAIL_LIMIT
+            or (ratelimit.peek(fail_all, LOGIN_FAIL_GLOBAL_WINDOW) >= LOGIN_FAIL_GLOBAL and not _trusted_ip(login, ip))):
+        return JSONResponse({"error": "Слишком много неудачных попыток. Повторите через 15 минут."},
+                            status_code=429, headers={"Retry-After": str(LOGIN_FAIL_WINDOW)})
+
+    def fail(actor: str = "anon", name: Optional[str] = None) -> JSONResponse:
+        ratelimit.rate_limit(fail_key, LOGIN_FAIL_LIMIT, LOGIN_FAIL_WINDOW)
+        ratelimit.rate_limit(fail_all, LOGIN_FAIL_GLOBAL, LOGIN_FAIL_GLOBAL_WINDOW)
+        audit(actor, name or login[:40], "login_fail", 401, ip)
+        return JSONResponse({"error": "Неверные учётные данные"}, status_code=401)
+
+    admin = get_admin()
+    if not admin:
+        if ENV != "production" and not PANEL_SETUP_TOKEN:
+            admin, _ = create_admin()
+        else:
+            return JSONResponse({"error": "Админ не инициализирован. Вызовите /api/panel/auth/init"}, status_code=401)
+
+    if hmac.compare_digest(login.encode(), str(admin["username"]).encode()):
+        if not verify_password(password, admin["password_hash"], admin["password_salt"]):
+            return fail("owner", OWNER_NAME)
+        # 2fa если есть куда слать код (форум или лс)
+        can_deliver = bool(projects.get(projects.DEFAULT).bot_token and (forum.chat_id() or forum.admin_chat_ids()))
+        if can_deliver:
+            temp, code = set_temp_2fa(admin["username"])
+            forum.send_code(code, ip=ip, user_agent=ua)
+            if ENV != "production":
+                print(f"[BatmanVPN] 2FA code for panel: {code}")
+            return {"requires_2fa": True, "temp_token": temp}
+        token = create_panel_session(admin["username"])
+        clear_admin_plaintext()
+        audit("owner", OWNER_NAME, "login_ok", 200, ip)
+        print("[panel] вход без 2FA: не настроены ни бот, ни форум / ID админов", flush=True)
+        return {
+            "session_token": token,
+            "warning": "Двухфакторная защита выключена: коды входа некуда отправлять. "
+                       "Подключите бота (Настройки → Проект) и укажите ID админов или форум (Настройки → Уведомления).",
+        }
+
+    st = staffmod.by_username(login)
+    if not st:
+        verify_password(password, _DUMMY_HASH, _DUMMY_SALT)  # одинаковое время ответа, чтобы не перебирать логины
+        return fail()
+    if not verify_password(password, st["password_hash"], st["password_salt"]):
+        return fail(f"staff:{st['id']}", staffmod.display_name(st))
+    if not st.get("is_active"):
+        audit(f"staff:{st['id']}", staffmod.display_name(st), "login_disabled", 403, ip)
+        return JSONResponse({"error": "Доступ отключён администратором"}, status_code=403)
+    temp, code = set_temp_2fa(st["username"], staff_id=int(st["id"]))
+    if not _send_staff_code(st, code, ip, ua):
+        db.execute("DELETE FROM temp_2fa WHERE token = ?", (_token_hash(temp),))
+        return JSONResponse({"error": "Не удалось отправить код в Telegram. Откройте бота и нажмите «Запустить» (/start), "
+                                      "затем войдите снова."}, status_code=502)
+    if ENV != "production":
+        print(f"[BatmanVPN] 2FA code for staff {st['username']}: {code}")
+    return {"requires_2fa": True, "temp_token": temp}
+
+
+@app.post("/api/panel/auth/logout")
+def panel_logout(authorization: Optional[str] = Header(None)) -> dict[str, Any]:
+    """завершает сессию панели на сервере."""
+    if authorization and authorization.lower().startswith("bearer "):
+        delete_panel_session(authorization.split(" ", 1)[1].strip())
+    return {"ok": True}
+
+
+@app.post("/api/panel/auth/verify-code")
+def panel_verify_code(body: VerifyCodeBody, request: Request = None) -> Any:  # type: ignore[assignment]
+    ip = _client_ip(request) or "unknown"
+    entry = pop_temp_2fa(body.temp_token)  # одна попытка на код: ошибка -> вход заново
+    if not entry:
+        return JSONResponse({"error": "Код истёк"}, status_code=401)
+    sid = entry.get("staff_id")
+    actor = "owner" if sid is None else f"staff:{int(sid)}"
+    if not hmac.compare_digest(str(body.code).strip().encode(), str(entry["code"]).encode()):
+        ratelimit.rate_limit(f"loginfail:{str(entry['username']).lower()}:{ip}", LOGIN_FAIL_LIMIT, LOGIN_FAIL_WINDOW)
+        ratelimit.rate_limit(f"loginfail:{str(entry['username']).lower()}", LOGIN_FAIL_GLOBAL, LOGIN_FAIL_GLOBAL_WINDOW)
+        audit(actor, entry["username"], "2fa_fail", 401, ip)
+        return JSONResponse({"error": "Неверный код"}, status_code=401)
+    if sid is None:
+        admin = get_admin()
+        if not admin or not hmac.compare_digest(str(entry["username"]).encode(), str(admin["username"]).encode()):
+            return JSONResponse({"error": "Код истёк"}, status_code=401)
+        token = create_panel_session(entry["username"])
+        clear_admin_plaintext()
+        ratelimit.reset(f"loginfail:{str(entry['username']).lower()}:{ip}")
+        audit("owner", OWNER_NAME, "login_ok", 200, ip)
+        return {"session_token": token}
+    st = staffmod.get(int(sid))
+    if not st or not st.get("is_active"):
+        return JSONResponse({"error": "Доступ отключён администратором"}, status_code=403)
+    token = create_panel_session(st["username"], staff_id=int(st["id"]))
+    db.execute("UPDATE panel_staff SET last_login_at = ?, last_login_ip = ? WHERE id = ?", (iso(), ip[:64], int(st["id"])))
+    ratelimit.reset(f"loginfail:{st['username']}:{ip}")
+    audit(actor, staffmod.display_name(st), "login_ok", 200, ip)
+    return {"session_token": token}
+
+
+@app.get("/api/panel/auth/me")
+def panel_me(p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """кто вошёл: owner/curator/operator."""
+    out = {"kind": p["kind"], "role": p["role"], "username": p["username"], "name": p["name"]}
+    if p["kind"] == "staff":
+        out["staff_id"] = int(p["staff_id"])
+        out["shift"] = staffpay.shift_now(int(p["staff_id"]))
+    if is_admin(p):
+        out["perms"] = sorted(p.get("perms") or [])
+        out["projects"] = list(p.get("projects") or [])
+    return out
+
+
+class StaffCreateBody(BaseModel):
+    username: str
+    name: Optional[str] = ""
+    password: str
+    telegram_id: Any
+    role: str = "operator"
+    default_pay: Any = 0
+    default_intervals: Optional[list[Any]] = None
+    permissions: Optional[dict[str, Any]] = None   # администратор: {"perms": [...], "projects": ["*"] | [...]}
+
+
+class StaffUpdateBody(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
+    telegram_id: Any = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    default_pay: Any = None
+    default_intervals: Optional[list[Any]] = None
+    permissions: Optional[dict[str, Any]] = None
+
+
+class StaffDayBody(BaseModel):
+    intervals: Optional[list[Any]] = None   # none: выходной
+    pay: Any = 0
+
+
+class StaffBulkBody(BaseModel):
+    date_from: str
+    date_to: str
+    weekdays: list[int] = Field(default_factory=list)
+    intervals: list[Any] = Field(default_factory=list)
+    pay: Any = 0
+    overwrite: bool = True
+    clear_other: bool = False
+
+
+class FineBody(BaseModel):
+    amount: Any
+    reason: str = ""
+
+
+class PayoutBody(BaseModel):
+    amount: Any
+    note: Optional[str] = ""
+    paid_on: Optional[str] = None
+
+
+def _staff_call(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except staffmod.StaffError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+    except staffpay.PayError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+
+
+def _staff_or_404(staff_id: int) -> dict[str, Any]:
+    st = staffmod.get(staff_id)
+    if not st:
+        raise HTTPException(404, detail={"message": "Сотрудник не найден"})
+    return st
+
+
+def _curator_target(p: dict[str, Any], staff_id: int) -> dict[str, Any]:
+    """куратор работает только с операторами."""
+    st = _staff_or_404(staff_id)
+    if p["kind"] != "owner" and (staffmod.role_of(st) != "operator" or int(st["id"]) == int(p.get("staff_id") or 0)):
+        raise HTTPException(403, detail={"message": "Куратор работает только с операторами"})
+    return st
+
+
+def _release_staff_tickets(staff_id: int) -> None:
+    """обращения сотрудника снова в пуле."""
+    actor = f"staff:{int(staff_id)}"
+    db.execute("UPDATE support_tickets SET assigned_admin = NULL, assigned_name = NULL WHERE status = 'open' AND assigned_admin = ?", (actor,))
+    db.execute("UPDATE support_chats SET assigned_admin = NULL, assigned_name = NULL WHERE assigned_admin = ?", (actor,))
+
+
+def _staff_card(st: dict[str, Any], owner: bool) -> dict[str, Any]:
+    card = staffmod.public(st) if owner else {"id": st["id"], "name": st.get("name") or "", "username": st["username"],
+                                               "role": staffmod.role_of(st), "is_active": bool(st.get("is_active"))}
+    card["shift"] = staffpay.shift_now(int(st["id"]))
+    if owner:
+        card["balance"] = staffpay.ledger(int(st["id"]))["balance"]
+    t = db.fetchone("SELECT COUNT(*) AS c FROM support_tickets WHERE status = 'open' AND assigned_admin = ?", (f"staff:{int(st['id'])}",))
+    card["tickets_in_work"] = int(t["c"]) if t else 0
+    return card
+
+
+@app.get("/api/panel/staff")
+def panel_staff_list(p: dict = Depends(require_panel)) -> dict[str, Any]:
+    owner = p["kind"] == "owner"
+    rows = db.fetchall("SELECT * FROM panel_staff ORDER BY role, id")
+    if not owner:
+        # куратору только активные операторы
+        rows = [r for r in rows if r.get("is_active") and staffmod.role_of(r) == "operator"]
+    out = {"staff": [_staff_card(r, owner) for r in rows], "roles": staffmod.ROLES, "bot_ready": bool(projects.get(projects.DEFAULT).bot_token),
+           "today": staffpay.today_msk().isoformat()}
+    if owner:
+        out["admin_perms"] = staffmod.perms_catalog()
+        out["projects"] = [{"id": pr.id, "name": pr.public().get("name") or pr.id} for pr in projects.all_projects()]
+    return out
+
+
+def _known_project_ids() -> set[str]:
+    return {pr.id for pr in projects.all_projects()}
+
+
+@app.post("/api/panel/staff")
+def panel_staff_create(body: StaffCreateBody, _: dict = Depends(require_real_owner)) -> dict[str, Any]:
+    admin = get_admin() or {}
+    username = _staff_call(staffmod.validate_username, body.username, admin.get("username") or "")
+    password = _staff_call(staffmod.validate_password, body.password)
+    tg = _staff_call(staffmod.validate_tg, body.telegram_id)
+    name = _staff_call(staffmod.validate_name, body.name)
+    role = _staff_call(staffmod.validate_role, body.role)
+    iv = _staff_call(staffpay.validate_intervals, body.default_intervals if body.default_intervals is not None else [["10:00", "19:00"]])
+    pay = _staff_call(staffpay.validate_money, body.default_pay, "Базовая ставка")
+    perms_json = "{}"
+    if role == "admin":
+        perms_json = _staff_call(staffmod.validate_access, body.permissions, _known_project_ids())
+    if staffmod.by_username(username):
+        raise HTTPException(409, detail={"message": "Сотрудник с таким логином уже есть"})
+    digest, salt = hash_password(password)
+    now = iso()
+    cur = db.execute(
+        "INSERT INTO panel_staff (username, name, password_hash, password_salt, telegram_id, permissions, role, "
+        "is_active, created_at, updated_at, default_pay, default_intervals) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+        (username, name, digest, salt, tg, perms_json, role, now, now, pay, json.dumps(iv)),
+    )
+    return staffmod.public(staffmod.get(int(cur.lastrowid)))
+
+
+@app.put("/api/panel/staff/{staff_id}")
+def panel_staff_update(staff_id: int, body: StaffUpdateBody, _: dict = Depends(require_real_owner)) -> dict[str, Any]:
+    st = _staff_or_404(staff_id)
+    sets: dict[str, Any] = {}
+    kill = False
+    if body.name is not None:
+        sets["name"] = _staff_call(staffmod.validate_name, body.name)
+    if body.telegram_id not in (None, ""):
+        tg = _staff_call(staffmod.validate_tg, body.telegram_id)
+        if tg != int(st["telegram_id"]):
+            sets["telegram_id"] = tg
+            kill = True
+    if body.password:
+        digest, salt = hash_password(_staff_call(staffmod.validate_password, body.password))
+        sets["password_hash"], sets["password_salt"] = digest, salt
+        kill = True
+    if body.role is not None:
+        sets["role"] = _staff_call(staffmod.validate_role, body.role)
+    new_role = sets.get("role") or staffmod.role_of(st)
+    if new_role == "admin":
+        if body.permissions is not None:
+            sets["permissions"] = _staff_call(staffmod.validate_access, body.permissions, _known_project_ids())
+        elif staffmod.role_of(st) != "admin":
+            raise HTTPException(400, detail={"message": "Укажите права администратора"})
+    elif staffmod.role_of(st) == "admin":
+        sets["permissions"] = "{}"   # больше не администратор — права стираем
+    if "role" in sets and sets["role"] != staffmod.role_of(st):
+        kill = True   # роль сменилась — пусть войдёт заново
+    if body.is_active is not None:
+        sets["is_active"] = 1 if body.is_active else 0
+        if not body.is_active:
+            kill = True
+    if body.default_pay is not None:
+        sets["default_pay"] = _staff_call(staffpay.validate_money, body.default_pay, "Базовая ставка")
+    if body.default_intervals is not None:
+        sets["default_intervals"] = json.dumps(_staff_call(staffpay.validate_intervals, body.default_intervals))
+    if sets:
+        sets["updated_at"] = iso()
+        cols = ", ".join(f"{k} = ?" for k in sets)  # ключи только из кода выше
+        db.execute(f"UPDATE panel_staff SET {cols} WHERE id = ?", (*sets.values(), int(staff_id)))
+    if kill:
+        delete_staff_sessions(staff_id)       # смена пароля/tg или отключение -> выход везде
+    if body.is_active is False:
+        _release_staff_tickets(staff_id)
+        webpush.drop_actor(f"staff:{int(staff_id)}")
+        # будущие смены отключённого не начисляются
+        db.execute("DELETE FROM staff_days WHERE staff_id = ? AND day >= ?", (int(staff_id), staffpay.today_msk().isoformat()))
+    return staffmod.public(staffmod.get(staff_id))
+
+
+@app.post("/api/panel/staff/{staff_id}/logout")
+def panel_staff_logout(staff_id: int, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    _staff_or_404(staff_id)
+    delete_staff_sessions(staff_id)
+    return {"ok": True}
+
+
+@app.delete("/api/panel/staff/{staff_id}")
+def panel_staff_delete(staff_id: int, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    _staff_or_404(staff_id)
+    delete_staff_sessions(staff_id)
+    _release_staff_tickets(staff_id)
+    webpush.drop_actor(f"staff:{int(staff_id)}")
+    teamchat.drop_actor(f"staff:{int(staff_id)}")
+    db.execute("DELETE FROM panel_staff WHERE id = ?", (int(staff_id),))
+    return {"ok": True}
+
+
+def _range(date_from: str, date_to: str) -> tuple[Any, Any]:
+    a = _staff_call(staffpay.parse_day, date_from)
+    b = _staff_call(staffpay.parse_day, date_to)
+    if b < a:
+        raise HTTPException(400, detail={"message": "Конец периода раньше начала"})
+    return a, b
+
+
+@app.get("/api/panel/staff/{staff_id}/schedule")
+def panel_staff_schedule(staff_id: int, date_from: str = Query(..., alias="from", max_length=10),
+                         date_to: str = Query(..., alias="to", max_length=10), p: dict = Depends(require_panel)) -> dict[str, Any]:
+    if p["kind"] == "owner":
+        _staff_or_404(staff_id)
+    else:
+        _curator_target(p, staff_id)
+    a, b = _range(date_from, date_to)
+    days = _staff_call(staffpay.schedule, staff_id, a, b)
+    if p["kind"] != "owner":
+        days = [{"day": d["day"], "intervals": d["intervals"]} for d in days]  # оплату видит только владелец
+    return {"days": days, "today": staffpay.today_msk().isoformat()}
+
+
+@app.put("/api/panel/staff/{staff_id}/schedule/{day}")
+def panel_staff_day(staff_id: int, day: str, body: StaffDayBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    if not _staff_or_404(staff_id).get("is_active") and body.intervals is not None:
+        raise HTTPException(400, detail={"message": "Сотрудник отключён — сначала включите доступ"})
+    d = _staff_call(staffpay.parse_day, day)
+    return {"day": _staff_call(staffpay.set_day, staff_id, d, body.intervals, body.pay)}
+
+
+@app.post("/api/panel/staff/{staff_id}/schedule/bulk")
+def panel_staff_bulk(staff_id: int, body: StaffBulkBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    if not _staff_or_404(staff_id).get("is_active"):
+        raise HTTPException(400, detail={"message": "Сотрудник отключён — сначала включите доступ"})
+    a, b = _range(body.date_from, body.date_to)
+    n = _staff_call(staffpay.bulk_fill, staff_id, a, b, body.weekdays, body.intervals, body.pay, body.overwrite, body.clear_other)
+    return {"days": n}
+
+
+@app.get("/api/panel/staff/{staff_id}/ledger")
+def panel_staff_ledger(staff_id: int, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    _staff_or_404(staff_id)
+    return staffpay.ledger(staff_id)
+
+
+@app.post("/api/panel/staff/{staff_id}/payouts")
+def panel_staff_payout(staff_id: int, body: PayoutBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    _staff_or_404(staff_id)
+    return _staff_call(staffpay.add_payout, staff_id, body.amount, body.note, body.paid_on)
+
+
+@app.delete("/api/panel/staff/payouts/{payout_id}")
+def panel_staff_payout_delete(payout_id: int, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    staffpay.delete_payout(payout_id)
+    return {"ok": True}
+
+
+class BonusBody(BaseModel):
+    amount: Any
+    reason: str = Field("", max_length=300)
+
+
+@app.post("/api/panel/staff/{staff_id}/bonuses")
+def panel_staff_bonus(staff_id: int, body: BonusBody, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    """премия сотруднику, только владелец."""
+    st = _staff_or_404(staff_id)
+    r = _staff_call(staffpay.add_bonus, staff_id, body.amount, body.reason, p["actor"], p["name"] or "Администратор")
+    if st.get("telegram_id"):
+        try:
+            notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML",
+                                          "text": f"🎉 <b>Премия {r['amount']:g} ₽</b>\nЗа что: {_esc_html(r['reason'])}"}, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            pass
+    return r
+
+
+@app.delete("/api/panel/staff/bonuses/{bonus_id}")
+def panel_staff_bonus_cancel(bonus_id: int, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    return _staff_call(staffpay.cancel_bonus, bonus_id, p["actor"])
+
+
+@app.get("/api/panel/staff/{staff_id}/fines")
+def panel_staff_fines(staff_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    if p["kind"] != "owner":
+        _curator_target(p, staff_id)
+    else:
+        _staff_or_404(staff_id)
+    return {"fines": staffpay.ledger(staff_id)["fines"]}
+
+
+@app.post("/api/panel/staff/{staff_id}/fines")
+def panel_staff_fine(staff_id: int, body: FineBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    st = _curator_target(p, staff_id) if p["kind"] != "owner" else _staff_or_404(staff_id)
+    r = _staff_call(staffpay.add_fine, staff_id, body.amount, body.reason, p["actor"], p["name"])
+    if st.get("telegram_id"):
+        try:
+            notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML",
+                                          "text": f"⚠️ <b>Штраф {r['amount']:g} ₽</b>\nПричина: {_esc_html(r['reason'])}"}, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            pass
+    return r
+
+
+@app.delete("/api/panel/staff/fines/{fine_id}")
+def panel_staff_fine_cancel(fine_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    return _staff_call(staffpay.cancel_fine, fine_id, p["actor"], None if p["kind"] == "owner" else p["actor"])
+
+
+class AutofineBody(BaseModel):
+    enabled: Optional[bool] = None
+    minutes: Optional[int] = None
+    hours: Optional[float] = None
+    pool: Optional[bool] = None
+    warn: Optional[bool] = None
+
+
+@app.get("/api/panel/staff-autofine")
+def panel_autofine_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    cfg = autofine.get_config()
+    return {**{k: cfg[k] for k in ("enabled", "minutes", "hours", "pool", "warn")}, "recent": autofine.recent(30)}
+
+
+@app.put("/api/panel/staff-autofine")
+def panel_autofine_put(body: AutofineBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        cfg = autofine.save_config(body.model_dump())
+    except autofine.AutofineError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+    return {**{k: cfg[k] for k in ("enabled", "minutes", "hours", "pool", "warn")}, "recent": autofine.recent(30)}
+
+
+@app.get("/api/panel/me/salary")
+def panel_my_salary(date_from: Optional[str] = Query(None, alias="from", max_length=10),
+                    date_to: Optional[str] = Query(None, alias="to", max_length=10), p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """сотрудник: график, начисления, штрафы, выплаты, баланс."""
+    if p["kind"] != "staff":
+        raise HTTPException(404, detail={"message": "Только для сотрудников"})
+    sid = int(p["staff_id"])
+    t = staffpay.today_msk()
+    if date_from and date_to:
+        a, b = _range(date_from, date_to)
+    else:
+        # день до 1-го — чтобы хвост смены через полночь был виден в календаре
+        a, b = t.replace(day=1) - timedelta(days=1), t + timedelta(days=45)
+    return {**staffpay.ledger(sid), "schedule": _staff_call(staffpay.schedule, sid, a, b), "today": t.isoformat(),
+            "shift": staffpay.shift_now(sid)}
+
+
+@app.get("/api/panel/staff/audit")
+def panel_staff_audit(actor: str = Query("", max_length=32), limit: int = Query(200, ge=1, le=500),
+                      _: dict = Depends(require_owner)) -> dict[str, Any]:
+    if actor and not re.fullmatch(r"owner|staff:\d+", actor):
+        raise HTTPException(400, detail={"message": "Неверный фильтр"})
+    if actor:
+        rows = db.fetchall("SELECT * FROM panel_audit WHERE actor = ? ORDER BY id DESC LIMIT ?", (actor, limit))
+    else:
+        rows = db.fetchall("SELECT * FROM panel_audit ORDER BY id DESC LIMIT ?", (limit,))
+    return {"items": rows}
+
+
+class PushSubBody(BaseModel):
+    endpoint: str = Field(..., max_length=1000)
+    keys: dict[str, str] = Field(default_factory=dict)
+
+
+def _push(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except webpush.PushError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+
+
+@app.get("/api/panel/push/key")
+def panel_push_key(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    return {"key": webpush.public_key()}
+
+
+@app.post("/api/panel/push/subscribe")
+def panel_push_subscribe(body: PushSubBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    _push(webpush.subscribe, p["actor"], body.endpoint, str(body.keys.get("p256dh") or "")[:200], str(body.keys.get("auth") or "")[:100])
+    return {"ok": True}
+
+
+@app.post("/api/panel/push/unsubscribe")
+def panel_push_unsubscribe(body: PushSubBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    webpush.unsubscribe(p["actor"], body.endpoint)
+    return {"ok": True}
+
+
+@app.post("/api/panel/push/test")
+def panel_push_test(p: dict = Depends(require_panel)) -> dict[str, Any]:
+    allowed, _r = ratelimit.rate_limit(f"pushtest:{p['actor']}", 5, 300)
+    if not allowed:
+        raise HTTPException(429, detail={"message": "Не чаще 5 раз за 5 минут"})
+    subs = db.fetchall("SELECT * FROM push_subs WHERE actor = ? ORDER BY id DESC LIMIT 3", (p["actor"],))
+    ok = sum(1 for sub in subs if webpush._send_one(sub, {"title": "BatmanVPN", "body": "Уведомления работают", "url": "/"}))
+    return {"sent": ok, "subscriptions": len(subs)}
+
+
+@app.get("/api/panel/projects")
+def panel_projects(me: dict = Depends(require_panel)) -> dict[str, Any]:
+    """проекты сети для переключателя в панели (без секретов); администратору — только его проекты."""
+    items = []
+    any_ready = False
+    for p in projects.all_projects():
+        if not admin_project_ok(me, p.id):
+            continue
+        d = p.public()
+        try:
+            with projects.use(p.id):
+                d["ready"] = miniapps.project_ready(p, pay_methods())[0]
+        except Exception:  # noqa: BLE001
+            d["ready"] = False
+        any_ready = any_ready or d["ready"]
+        items.append(d)
+    # setup_needed: ни один проект не работает → владельцу панель открывает начальное меню «Проекты»
+    return {"items": items, "default": projects.DEFAULT, "current": db.pid(), "setup_needed": not any_ready}
+
+
+class ProjectConfigBody(BaseModel):
+    """настройки проекта в панели; поле не передано — не менять, "" — очистить."""
+    bot_token: Optional[str] = Field(None, max_length=200)
+    channel_id: Optional[str] = Field(None, max_length=100)
+    channel_url: Optional[str] = Field(None, max_length=300)
+    yookassa_shop_id: Optional[str] = Field(None, max_length=50)
+    yookassa_secret_key: Optional[str] = Field(None, max_length=200)
+    support_url: Optional[str] = Field(None, max_length=300)
+    miniapp_link: Optional[str] = Field(None, max_length=300)
+    vpn_sub_domain: Optional[str] = Field(None, max_length=200)
+    # подмена домена подписки: True — ссылки выдаются с vpn_sub_domain, False — как у Remnawave
+    vpn_sub_domain_on: Optional[bool] = None
+    # фишки проекта (features в project.json)
+    notconn_hours: Optional[int] = Field(None, ge=1, le=168)
+    winback_after_days: Optional[int] = Field(None, ge=1, le=365)
+    winback_gift_days: Optional[int] = Field(None, ge=1, le=30)
+    # семейная подписка: сколько человек вместе с владельцем
+    family_max_members: Optional[int] = Field(None, ge=2, le=20)
+    # сайт проекта: установщики для компьютера ("" — очистить)
+    desktop_windows_url: Optional[str] = Field(None, max_length=500)
+    desktop_macos_url: Optional[str] = Field(None, max_length=500)
+    desktop_version: Optional[str] = Field(None, max_length=40)
+
+
+DESKTOP_KEYS = ("desktop_windows_url", "desktop_macos_url", "desktop_version")
+
+
+def _desktop_info(pid: Optional[str] = None) -> dict[str, str]:
+    """ссылки на приложения для компьютера (сайт проекта, Настройки → Проект)."""
+    vals = db.get_settings(list(DESKTOP_KEYS), project=pid)
+    return {"windows_url": vals.get("desktop_windows_url", ""), "macos_url": vals.get("desktop_macos_url", ""),
+            "version": vals.get("desktop_version", "")}
+
+
+# значения по умолчанию для фишек проекта
+GROWTH_DEFAULTS = {"notconn_hours": 3, "winback_after_days": 14, "winback_gift_days": 3}
+
+
+def growth_setting(key: str) -> int:
+    try:
+        return int(float(db.get_setting(key, str(GROWTH_DEFAULTS[key])) or GROWTH_DEFAULTS[key]))
+    except (TypeError, ValueError):
+        return GROWTH_DEFAULTS[key]
+
+
+def _mask(v: str) -> str:
+    return (v[:6] + "…" + v[-4:]) if len(v) > 12 else ("•" * len(v))
+
+
+def _norm_channel_id(raw: str) -> str:
+    s = (raw or "").strip().replace("＠", "@")
+    if not s:
+        return ""
+    m = re.search(r"(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)", s, re.I)
+    if m:
+        return "@" + m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9_]{4,32}", s):
+        return "@" + s
+    return s
+
+
+def _project_config_view(pid: str) -> dict[str, Any]:
+    p = projects.get(pid)
+    src = lambda n: projects.config_source(pid, n)  # noqa: E731
+    tok = p.bot_token
+    shop = p.env("YOOKASSA_SHOP_ID")
+    return {
+        "project": p.public(),
+        "bot": {"token_set": bool(tok), "token_hint": _mask(tok.split(":", 1)[1]) if ":" in tok else "",
+                "id": p.bot_id, "username": p.bot_username, "source": src("TELEGRAM_BOT_TOKEN")},
+        "channel": {"id": p.channel_id, "url": p.channel_url,
+                    "source": "panel" if src("CHANNEL_ID") == "panel" else ("project.json" if p.channel_id else "")},
+        "yookassa": {"shop_id": shop, "secret_set": bool(p.env("YOOKASSA_SECRET_KEY")),
+                     "source": src("YOOKASSA_SHOP_ID"),
+                     "webhook_url": f"{p.miniapp_url}/yookassa" if p.miniapp_url else ""},
+        "support_url": p.env("SUPPORT_URL"),
+        "miniapp_link": p.env("TELEGRAM_MINIAPP_LINK"),
+        "vpn_sub_domain": p.env("VPN_SUB_DOMAIN"),
+        "vpn_sub_domain_on": subdomain.config(pid)[0],
+        # домен ссылок Remnawave (без подмены) — для примера в панели
+        "vpn_sub_origin": subdomain.origin_host(),
+        # домен мини-приложения — инфраструктура (Caddy + сертификат): install.sh
+        "miniapp_url": p.miniapp_url,
+        "features": {k: bool(v) for k, v in (p.cfg.get("features") or {}).items()},
+        "growth": {k: int(float(db.get_setting(k, str(d), project=pid) or d)) for k, d in GROWTH_DEFAULTS.items()},
+        "family_max_members": int(float(db.get_setting("family_max_members", "5", project=pid) or 5)),
+        "desktop": _desktop_info(pid),
+    }
+
+
+def _tg_get_me(token: str) -> Optional[dict[str, Any]]:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getMe", timeout=10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return body.get("result") if body.get("ok") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.get("/api/panel/project/config")
+def panel_project_config(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """бот, канал, ЮKassa открытого в панели проекта (секреты — замаскированы)."""
+    return _project_config_view(db.pid())
+
+
+@app.put("/api/panel/project/config")
+def panel_project_config_put(body: ProjectConfigBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    pid = db.pid()
+    upd: dict[str, Optional[str]] = {}
+    if body.bot_token is not None:
+        tok = body.bot_token.strip()
+        if tok:
+            if not re.fullmatch(r"[0-9]{5,}:[A-Za-z0-9_-]{30,}", tok):
+                raise HTTPException(400, detail={"message": "Токен выглядит так: 1234567890:AAH… (его выдаёт @BotFather)"})
+            for other in projects.all_projects():
+                if other.id != pid and other.bot_token == tok:
+                    raise HTTPException(409, detail={"message": f"Этот бот уже подключён к проекту {other.name}"})
+            me = _tg_get_me(tok)
+            if not me:
+                raise HTTPException(400, detail={"message": "Telegram не принял токен — проверьте его в @BotFather"})
+            upd.update(TELEGRAM_BOT_TOKEN=tok, BOT_USERNAME=str(me.get("username") or ""), BOT_ID=str(me.get("id") or ""))
+        else:
+            upd.update(TELEGRAM_BOT_TOKEN="", BOT_USERNAME="", BOT_ID="")
+    if body.channel_id is not None:
+        cid = _norm_channel_id(body.channel_id)
+        if cid and not re.fullmatch(r"@[A-Za-z0-9_]{4,32}|-100[0-9]{5,15}", cid):
+            raise HTTPException(400, detail={"message": "Канал: @username или числовой ID вида -100…"})
+        upd["CHANNEL_ID"] = cid
+        if body.channel_url is None:
+            upd["CHANNEL_URL"] = f"https://t.me/{cid[1:]}" if cid.startswith("@") else ""
+    if body.channel_url is not None:
+        url = body.channel_url.strip()
+        if url and not re.fullmatch(r"https://t\.me/[A-Za-z0-9_+/-]{3,80}", url):
+            raise HTTPException(400, detail={"message": "Ссылка на канал: https://t.me/…"})
+        upd["CHANNEL_URL"] = url
+    if body.yookassa_shop_id is not None:
+        shop = body.yookassa_shop_id.strip()
+        if shop and not shop.isdigit():
+            raise HTTPException(400, detail={"message": "shopId ЮKassa — число"})
+        upd["YOOKASSA_SHOP_ID"] = shop
+    if body.yookassa_secret_key is not None:
+        upd["YOOKASSA_SECRET_KEY"] = body.yookassa_secret_key.strip()
+    for field, name in (("support_url", "SUPPORT_URL"), ("miniapp_link", "TELEGRAM_MINIAPP_LINK")):
+        v = getattr(body, field)
+        if v is not None:
+            v = v.strip()
+            if v and not v.startswith("https://"):
+                raise HTTPException(400, detail={"message": "Ссылка должна начинаться с https://"})
+            upd[name] = v
+    if body.vpn_sub_domain is not None:
+        raw_dom = body.vpn_sub_domain.strip()
+        v = subdomain.normalize_domain(raw_dom)
+        if raw_dom and (not v or "." not in v):
+            raise HTTPException(400, detail={"message": "Домен подписки — только домен, например sub.vpn.cc"})
+        upd["VPN_SUB_DOMAIN"] = v
+    if body.vpn_sub_domain_on is not None:
+        dom = upd.get("VPN_SUB_DOMAIN", subdomain.normalize_domain(projects.env("VPN_SUB_DOMAIN", project=pid)))
+        if body.vpn_sub_domain_on and not dom:
+            raise HTTPException(400, detail={"message": "Укажите домен, на который менять ссылку подписки"})
+        upd["VPN_SUB_DOMAIN_ON"] = "1" if body.vpn_sub_domain_on else "0"
+    if upd:
+        projects.set_panel_config(pid, upd)
+    for k in GROWTH_DEFAULTS:
+        v = getattr(body, k)
+        if v is not None:
+            db.set_setting(k, str(int(v)), project=pid)
+    if body.family_max_members is not None:
+        db.set_setting("family_max_members", str(int(body.family_max_members)), project=pid)
+    for key in ("desktop_windows_url", "desktop_macos_url"):
+        v = getattr(body, key)
+        if v is not None:
+            v = v.strip()
+            if v and not re.fullmatch(r"https://[^\s\"'<>]+", v):
+                raise HTTPException(400, detail={"message": "Ссылка на установщик должна начинаться с https://"})
+            db.set_setting(key, v, project=pid)
+    if body.desktop_version is not None:
+        db.set_setting("desktop_version", body.desktop_version.strip(), project=pid)
+    return _project_config_view(pid)
+
+
+def _scope(scope: Optional[str]) -> Optional[str]:
+    """scope=all — вся сеть, иначе текущий проект."""
+    return _ALL if str(scope or "") in ("all", "*") else None
+
+
+@app.get("/api/panel/dashboard")
+def panel_dashboard(scope: Optional[str] = Query(None, max_length=24),
+                    _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """главная: деньги, новые юзеры, список дел (scope=all — по всей сети)."""
+    return stats_mod.dashboard(_scope(scope))
+
+
+@app.get("/api/panel/statistics")
+def panel_statistics(period: str = Query("30d", max_length=10),
+                     date_from: Optional[str] = Query(None, alias="from", max_length=10),
+                     date_to: Optional[str] = Query(None, alias="to", max_length=10),
+                     scope: Optional[str] = Query(None, max_length=24),
+                     _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """статистика: пресет или from/to (гггг-мм-дд)."""
+    d1 = d2 = None
+    if date_from and date_to:
+        try:
+            d1, d2 = date.fromisoformat(date_from), date.fromisoformat(date_to)
+        except ValueError:
+            raise HTTPException(400, detail={"message": "Неверная дата"})
+        if d1 > d2:
+            d1, d2 = d2, d1
+        if d1.year < 2000:
+            raise HTTPException(400, detail={"message": "Неверная дата"})
+    sc = _scope(scope)
+    data = stats_mod.statistics(period, d1, d2, scope=sc or db.pid())
+    try:
+        data["subs"]["state_dist"] = _user_distribution(sc)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[stats] state_dist: {type(exc).__name__}: {exc}", flush=True)
+        data.setdefault("subs", {})["state_dist"] = []
+    return data
+
+
+@app.get("/api/panel/stats/summary")
+def panel_stats_summary(scope: Optional[str] = Query(None, max_length=24),
+                        _: dict = Depends(require_panel)) -> dict[str, Any]:
+    pw, pp = _pf("project_id", _scope(scope))
+    total_users = db.fetchone("SELECT COUNT(*) AS c FROM users WHERE 1 = 1" + pw, pp)
+    active_keys = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active'" + pw, pp)
+    month_start = utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    revenue_row = db.fetchone(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions "
+        "WHERE status = 'completed' AND amount > 0 AND created_at >= ?" + pw,
+        (month_start, *pp),
+    )
+    return {
+        "total_users": int(total_users["c"]) if total_users else 0,
+        "active_keys": int(active_keys["c"]) if active_keys else 0,
+        "monthly_revenue": round(float(revenue_row["s"]) if revenue_row else 0, 2),
+    }
+
+
+def _tx_date(tx: dict[str, Any]):
+    try:
+        return datetime.fromisoformat(str(tx["created_at"]).replace("Z", "+00:00")).date()
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+_METHOD_LABELS = {
+    "sbp": "СБП",
+    "card": "Карта",
+    "sberpay": "SberPay",
+    "tg_stars": "Звёзды Telegram",
+    "stars": "Звёзды Telegram",
+    "balance": "Реф. баланс",
+}
+
+
+def _payment_methods_chart(scope: Optional[str] = None) -> list[dict[str, Any]]:
+    """сколько оплат каждым способом (только успешные)."""
+    pw, pp = _pf("project_id", scope)
+    rows = db.fetchall(
+        "SELECT CASE WHEN provider = 'balance' THEN 'balance' ELSE COALESCE(method, provider, 'other') END AS m, "
+        "COUNT(*) AS c FROM payments WHERE status = 'paid'" + pw + " GROUP BY m ORDER BY c DESC", pp
+    )
+    return [{"name": _METHOD_LABELS.get(str(r["m"]).lower(), str(r["m"])), "value": int(r["c"])} for r in rows]
+
+
+def _user_distribution(scope: Optional[str] = None) -> list[dict[str, Any]]:
+    """разбивка статусов по фактическим подпискам — одним SQL, без словаря на каждого юзера."""
+    now_iso = iso()
+    sc = scope or db.pid()
+    pw, pp = _pf("u.project_id", sc)
+    spw, spp = _pf("project_id", sc)
+    row = db.fetchone(
+        """
+        SELECT
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) != 0 THEN 1 ELSE 0 END), 0) AS banned,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.paid_now, 0) != 0 THEN 1 ELSE 0 END), 0) AS active,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.paid_now, 0) = 0
+                            AND COALESCE(s.trial_now, 0) != 0 THEN 1 ELSE 0 END), 0) AS trial,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.total, 0) != 0
+                            AND COALESCE(s.paid_now, 0) = 0 AND COALESCE(s.trial_now, 0) = 0 THEN 1 ELSE 0 END), 0) AS expired,
+          COALESCE(SUM(CASE WHEN COALESCE(u.is_banned, 0) = 0 AND COALESCE(s.total, 0) = 0 THEN 1 ELSE 0 END), 0) AS none
+        FROM users u LEFT JOIN (
+            SELECT user_id, COUNT(*) AS total,
+                   MAX(CASE WHEN status = 'Active' AND type != 'trial'
+                             AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS paid_now,
+                   MAX(CASE WHEN status = 'Active' AND type = 'trial'
+                             AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS trial_now
+            FROM subscriptions WHERE 1 = 1""" + spw + """
+            GROUP BY user_id
+        ) s ON s.user_id = u.id
+        WHERE 1 = 1""" + pw,
+        (now_iso, now_iso, *spp, *pp),
+    ) or {}
+    return [
+        {"name": "Активные", "value": int(row.get("active") or 0)},
+        {"name": "Пробные", "value": int(row.get("trial") or 0)},
+        {"name": "Истекла", "value": int(row.get("expired") or 0)},
+        {"name": "Нет подписки", "value": int(row.get("none") or 0)},
+        {"name": "Забанен", "value": int(row.get("banned") or 0)},
+    ]
+
+
+@app.get("/api/panel/statistics/full")
+def panel_statistics_full(
+    period: str = Query("week"),
+    scope: Optional[str] = Query(None, max_length=24),
+    _: dict = Depends(require_panel),
+) -> dict[str, Any]:
+    days = {"week": 7, "month": 30, "year": 365}.get(period, 7)
+    now = utcnow()
+    scope = _scope(scope)
+    pw, pp = _pf("project_id", scope)
+    txs = db.fetchall("SELECT * FROM transactions WHERE status = 'completed'" + pw, pp)
+    # транзакции по дням один раз, не на каждый день
+    by_day: dict[Any, float] = {}
+    for tx in txs:
+        amt = float(tx.get("amount") or 0)
+        if amt <= 0:
+            continue
+        d = _tx_date(tx)
+        if d is not None:
+            by_day[d] = by_day.get(d, 0.0) + amt
+    revenue_by_day: list[dict[str, Any]] = []
+    for i in range(days - 1, -1, -1):
+        day = (now - timedelta(days=i)).date()
+        label = day.isoformat()
+        total = round(by_day.get(day, 0.0), 2)
+        revenue_by_day.append(
+            {"label": label, "date": label, "value": total, "amount": total, "revenue": total}
+        )
+
+    values = [d["value"] for d in revenue_by_day]
+    best_idx = max(range(len(values)), key=lambda i: values[i]) if values else 0
+
+    users = db.fetchall("SELECT * FROM users WHERE 1 = 1" + pw, pp)
+    active_subs = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active'" + pw, pp)
+    paid_subs = db.fetchone(
+        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'Active' AND type = 'vpn'" + pw, pp
+    )
+    total_subs = db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE 1 = 1" + pw, pp)
+    # приглашающие: кто привёл хотя бы одного
+    partners = int((db.fetchone(
+        "SELECT COUNT(DISTINCT referred_by) AS c FROM users WHERE referred_by IS NOT NULL" + pw, pp) or {}).get("c") or 0)
+    # число приглашённых одним запросом
+    ref_counts = {
+        int(r["rid"]): int(r["c"])
+        for r in db.fetchall(
+            "SELECT referred_by AS rid, COUNT(*) AS c FROM users WHERE referred_by IS NOT NULL" + pw
+            + " GROUP BY referred_by", pp
+        )
+    }
+    total_invited = sum(ref_counts.values())
+    clients_balance = sum(float(u.get("partner_balance") or 0) for u in users)
+
+    today = now.date()
+    payments_today = sum(
+        1
+        for tx in txs
+        if float(tx.get("amount") or 0) > 0 and _tx_date(tx) == today
+    )
+
+    top_referrers = sorted(
+        (
+            {
+                "id": u["id"],
+                "name": u.get("username") or str(u["telegram_id"]),
+                "count": ref_counts.get(int(u["id"]), 0),
+                "earned": float(u.get("partner_balance") or 0),
+            }
+            for u in users
+            if ref_counts.get(int(u["id"]), 0) > 0
+        ),
+        key=lambda x: x["count"],
+        reverse=True,
+    )[:10]
+
+    total_users = len(users)
+    paid_count = int(paid_subs["c"]) if paid_subs else 0
+
+    return {
+        "totalUsers": total_users,
+        "activeSubscriptions": int(active_subs["c"]) if active_subs else 0,
+        "paymentsToday": payments_today,
+        "clientsBalance": round(clients_balance, 2),
+        "revenueByDay": revenue_by_day,
+        "dailyRevenue": revenue_by_day,
+        "avgDaily": round(sum(values) / len(values), 2) if values else 0,
+        "bestDayValue": values[best_idx] if values else 0,
+        "bestDayDate": revenue_by_day[best_idx]["label"] if revenue_by_day else None,
+        "boughtThisWeek": sum(1 for tx in txs if float(tx.get("amount") or 0) > 0),
+        "userDistData": _user_distribution(scope),
+        "paymentMethodsData": _payment_methods_chart(scope),
+        "totalSubscriptions": int(total_subs["c"]) if total_subs else 0,
+        "paidSubscriptions": paid_count,
+        "conversionRate": round((paid_count / total_users * 100) if total_users else 0, 1),
+        "totalInvited": total_invited,
+        "partners": partners,
+        "totalPaid": round(sum(float(tx.get("amount") or 0) for tx in txs if float(tx.get("amount") or 0) > 0), 2),
+        "topReferrers": top_referrers,
+    }
+
+
+@app.get("/api/panel/finance/stats")
+def panel_finance_stats(scope: Optional[str] = Query(None, max_length=24),
+                        _: dict = Depends(require_panel)) -> dict[str, Any]:
+    # считаем по payments, как в «финансах»
+    pw, pp = _pf("project_id", _scope(scope))
+    deposits = db.fetchone(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM payments "
+        "WHERE status IN ('paid', 'completed') AND COALESCE(amount, 0) > 0" + pw, pp
+    )
+    withdrawals = db.fetchone(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM payments "
+        "WHERE status = 'refunded' AND COALESCE(amount, 0) > 0" + pw, pp
+    )
+    successful = db.fetchone(
+        "SELECT COUNT(*) AS c FROM payments WHERE status IN ('paid', 'completed')" + pw, pp
+    )
+    return {
+        "deposits": round(float(deposits["s"]) if deposits else 0, 2),
+        "withdrawals": round(float(withdrawals["s"]) if withdrawals else 0, 2),
+        "successfulOps": int(successful["c"]) if successful else 0,
+    }
+
+
+@app.get("/api/panel/transactions")
+def panel_transactions(
+    limit: int = Query(100),
+    offset: int = Query(0),
+    _: dict = Depends(require_panel),
+) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    rows = db.fetchall(
+        "SELECT * FROM transactions WHERE project_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+        (db.pid(), limit, offset),
+    )
+    return [serialize_transaction(tx) for tx in rows]
+
+
+def _payment_actions(p: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider_payment_id": p.get("provider_payment_id"),
+        "chargeback_at": p.get("chargeback_at"),
+        "chargeback_reported": bool(p.get("chargeback_reported_at")),
+        "can_chargeback": p.get("status") == "paid" and p.get("provider") in CHARGEBACK_PROVIDERS,
+        "refundable": _payment_refundable(p) and not p.get("chargeback_reported_at"),
+    }
+
+
+@app.get("/api/panel/payments")
+def panel_payments(
+    limit: int = Query(100),
+    offset: int = Query(0),
+    q: str = Query("", max_length=120),
+    _: dict = Depends(require_panel),
+) -> list[dict[str, Any]]:
+    """оплаченные/возвраты/чарджбеки; поиск по id и юзеру."""
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    where = "p.status IN ('paid', 'completed', 'refunding', 'refunded', 'chargeback') AND p.project_id = ?"
+    params: list[Any] = [db.pid()]
+    q = q.strip().lstrip("@#")
+    if q:
+        esc = q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        where += (" AND (lower(p.payment_id) LIKE ? ESCAPE '\\' OR lower(COALESCE(p.provider_payment_id, '')) LIKE ? ESCAPE '\\' "
+                  "OR lower(COALESCE(u.username, '')) LIKE ? ESCAPE '\\' OR CAST(p.user_id AS TEXT) = ? OR CAST(u.telegram_id AS TEXT) = ?)")
+        params += [like, like, like, q, q]
+    rows = db.fetchall(
+        "SELECT p.*, u.username AS u_username, u.telegram_id AS u_tg "
+        f"FROM payments p LEFT JOIN users u ON u.id = p.user_id WHERE {where} "
+        "ORDER BY p.id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    )
+    return [
+        {
+            "id": p["id"],
+            "payment_id": p.get("payment_id"),
+            "user_id": p.get("user_id"),
+            "username": p.get("u_username"),
+            "telegram_id": p.get("u_tg"),
+            "provider": p.get("provider"),
+            "method": p.get("method"),
+            "amount": p.get("amount"),
+            "currency": p.get("currency"),
+            "stars": p.get("stars"),
+            "status": p.get("status"),
+            "purpose": p.get("purpose"),
+            "description": _payment_description(p.get("purpose"), p.get("user_id")),
+            "created_at": p.get("created_at"),
+            "paid_at": p.get("paid_at"),
+            "referral_applied": p.get("referral_applied") or 0,
+            "refunded_at": p.get("refunded_at"),
+            **_payment_actions(p),
+        }
+        for p in rows
+    ]
+
+
+_STATE_SQL = (
+    "CASE WHEN COALESCE(u.is_banned, 0) THEN 'Banned' WHEN COALESCE(s.total, 0) = 0 THEN 'None' "
+    "WHEN s.paid_now THEN 'Active' WHEN s.trial_now THEN 'Trial' ELSE 'Expired' END"
+)
+
+
+def _users_page(search: Optional[str], status: Optional[str], limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+    """страница пользователей проекта: фильтр, поиск и выборка — в базе (раньше в память грузились все).
+    Статус — как user_states_map (та же формула)."""
+    now_iso = iso()
+    where, params = ["u.project_id = ?"], [db.pid()]
+    if status and status != "all":
+        where.append(f"lower({_STATE_SQL}) = ?")
+        params.append(status.lower())
+    if search:
+        q = search.lower().lstrip("@")
+        like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append("(lower(COALESCE(u.username, '')) LIKE ? ESCAPE '\\' OR CAST(COALESCE(u.telegram_id, '') AS TEXT) LIKE ? ESCAPE '\\' "
+                     "OR CAST(u.id AS TEXT) LIKE ? ESCAPE '\\' OR lower(COALESCE(u.referral_code, '')) LIKE ? ESCAPE '\\')")
+        params += [like, like, like, like]
+    sub = ("LEFT JOIN (SELECT user_id, COUNT(*) AS total, "
+           "MAX(CASE WHEN status = 'Active' AND type != 'trial' AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS paid_now, "
+           "MAX(CASE WHEN status = 'Active' AND type = 'trial' AND (expires_at IS NULL OR expires_at > ?) THEN 1 ELSE 0 END) AS trial_now "
+           "FROM subscriptions WHERE user_id IN (SELECT id FROM users WHERE project_id = ?) GROUP BY user_id) s ON s.user_id = u.id")
+    w = " AND ".join(where)
+    if not (status and status != "all"):
+        # без фильтра по статусу: считаем и статус только для строк страницы (а не по подпискам всех)
+        total = int((db.fetchone(f"SELECT COUNT(*) AS c FROM users u WHERE {w}", tuple(params)) or {}).get("c") or 0)
+        page = db.fetchall(f"SELECT u.id FROM users u WHERE {w} ORDER BY u.id DESC LIMIT ? OFFSET ?", (*params, limit, offset))
+        ids = [int(r["id"]) for r in page]
+        if not ids:
+            return [], total
+        marks = ",".join("?" * len(ids))
+        sub1 = sub.replace("WHERE user_id IN (SELECT id FROM users WHERE project_id = ?)", f"WHERE user_id IN ({marks})")
+        rows = db.fetchall(f"SELECT u.*, {_STATE_SQL} AS _state FROM users u {sub1} WHERE u.id IN ({marks}) ORDER BY u.id DESC",
+                           (now_iso, now_iso, *ids, *ids))
+        return rows, total
+    base = [now_iso, now_iso, db.pid()]
+    total = int((db.fetchone(f"SELECT COUNT(*) AS c FROM users u {sub} WHERE {w}", (*base, *params)) or {}).get("c") or 0)
+    rows = db.fetchall(f"SELECT u.*, {_STATE_SQL} AS _state FROM users u {sub} WHERE {w} ORDER BY u.id DESC LIMIT ? OFFSET ?",
+                       (*base, *params, limit, offset))
+    return rows, total
+
+
+def _filter_users(search: Optional[str], status: Optional[str]) -> list[dict[str, Any]]:
+    rows, _total = _users_page(search, status, 10 ** 9, 0)
+    return rows
+
+
+@app.get("/api/panel/users")
+def panel_users(
+    limit: int = Query(100),
+    offset: int = Query(0),
+    page: int = Query(1),
+    search: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    p: dict = Depends(require_panel),
+) -> dict[str, Any]:
+    limit = max(1, min(int(limit), 500))
+    off = max(0, int(offset if offset else (page - 1) * limit))
+    page_items, total = _users_page(search or q, status, limit, off)
+    page_data = {"items": page_items, "total": total}
+    # сумма успешных платежей пачкой (не n+1)
+    revenue_map: dict[int, float] = {}
+    manage_ids: Optional[set[int]] = None  # None = полный доступ (owner/curator)
+    if page_items:
+        ids = [int(u["id"]) for u in page_items]
+        placeholders = ",".join("?" * len(ids))
+        rows = db.fetchall(
+            f"SELECT user_id, COALESCE(SUM(amount), 0) AS s FROM payments "
+            f"WHERE user_id IN ({placeholders}) AND status IN ('paid', 'completed') "
+            f"AND COALESCE(amount, 0) > 0 GROUP BY user_id",
+            tuple(ids),
+        )
+        for r in rows:
+            revenue_map[int(r["user_id"])] = float(r["s"] or 0)
+        if not is_full(p):
+            manage_ids = {
+                int(r["user_id"]) for r in db.fetchall(
+                    f"SELECT c.user_id FROM support_chats c "
+                    f"JOIN support_tickets t ON t.id = c.open_ticket_id "
+                    f"WHERE c.user_id IN ({placeholders}) AND t.status = 'open' AND t.assigned_admin = ?",
+                    (*ids, p["actor"]),
+                )
+            }
+    return {
+        "items": [
+            {
+                **serialize_user(u, revenue=revenue_map.get(int(u["id"]), 0.0)),
+                "can_manage": manage_ids is None or int(u["id"]) in manage_ids,
+            }
+            for u in page_items
+        ],
+        "total": page_data["total"],
+    }
+
+
+@app.get("/api/panel/users/{user_id}")
+def panel_user_get(user_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    return serialize_user(user)
+
+
+@app.get("/api/panel/users/{user_id}/subscriptions")
+def panel_user_subs(user_id: int, _: dict = Depends(require_panel)) -> list[dict[str, Any]]:
+    if not get_user(user_id):
+        raise HTTPException(404, detail="User not found")
+    keys = db.fetchall(
+        "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC", (user_id,)
+    )
+    user = get_user(user_id)
+    return [serialize_key(k, user) for k in keys]
+
+
+@app.get("/api/panel/users/{user_id}/referrals")
+def panel_user_referrals(user_id: int, _: dict = Depends(require_panel)) -> list[dict[str, Any]]:
+    if not get_user(user_id):
+        raise HTTPException(404, detail="User not found")
+    refs = db.fetchall("SELECT * FROM users WHERE referred_by = ?", (user_id,))
+    return [
+        {
+            "id": u["id"],
+            "telegram_id": u["telegram_id"],
+            "username": u.get("username"),
+            "full_name": " ".join(filter(None, [u.get("first_name"), u.get("last_name")])) or None,
+            "is_partner": bool(u.get("is_partner")),
+            "partner_rate": u.get("partner_rate", 25),
+        }
+        for u in refs
+    ]
+
+
+@app.post("/api/panel/users/{user_id}/referrals/{ref_id}/unlink")
+def panel_unlink_referral(user_id: int, ref_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    parent = get_user(user_id)
+    child = get_user(ref_id)
+    if not parent or not child:
+        raise HTTPException(404, detail="User not found")
+    if child.get("referred_by") == user_id:
+        db.execute("UPDATE users SET referred_by = NULL WHERE id = ?", (ref_id,))
+    return {"success": True}
+
+
+@app.get("/api/panel/users/{user_id}/payments")
+def panel_user_payments(user_id: int, _: dict = Depends(require_panel)) -> list[dict[str, Any]]:
+    if not get_user(user_id):
+        raise HTTPException(404, detail="User not found")
+    rows = db.fetchall(
+        "SELECT * FROM payments WHERE user_id = ? AND status IN ('paid', 'completed', 'refunding', 'refunded', 'chargeback') "
+        "ORDER BY id DESC LIMIT 100",
+        (user_id,),
+    )
+    txs = db.fetchall(
+        "SELECT * FROM transactions WHERE user_id = ? AND status = 'completed' "
+        "ORDER BY id DESC LIMIT 100",
+        (user_id,),
+    )
+    paid_ids = {p.get("payment_id") for p in rows}
+    result = [
+        {
+            "id": p["id"],
+            "payment_id": p.get("payment_id"),
+            "provider": p.get("provider"),
+            "method": p.get("method"),
+            "amount": p.get("amount"),
+            "currency": p.get("currency"),
+            "stars": p.get("stars"),
+            "status": p.get("status"),
+            "purpose": p.get("purpose"),
+            "description": _payment_description(p.get("purpose"), user_id),
+            "created_at": p.get("created_at"),
+            "paid_at": p.get("paid_at"),
+            "referral_applied": p.get("referral_applied") or 0,
+            "refunded_at": p.get("refunded_at"),
+            **_payment_actions(p),
+        }
+        for p in rows
+    ]
+    # транзакции без платежа (ручные, рефералка)
+    for t in txs:
+        if t.get("payment_id") and t.get("payment_id") in paid_ids:
+            continue
+        result.append({
+            "id": f"tx-{t['id']}",
+            "payment_id": t.get("payment_id"),
+            "provider": {"referral": "рефералка", "referral_reversal": "рефералка", "panel": "панель"}.get(
+                str(t.get("payment_method") or ""), t.get("payment_method")),
+            "method": t.get("payment_method"),
+            "amount": t.get("amount"),
+            "currency": "RUB",
+            "stars": None,
+            "status": t.get("status"),
+            "purpose": _panel_tx_label(t),
+            "description": _panel_tx_label(t),
+            "created_at": t.get("created_at"),
+            "paid_at": t.get("created_at") if t.get("status") == "completed" else None,
+        })
+    result.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return result
+
+
+def _panel_tx_label(t: dict[str, Any]) -> str:
+    """подпись операции без платежа для панели."""
+    m = str(t.get("payment_method") or "")
+    desc = str(t.get("description") or "")
+    ref = re.search(r"user (\d+)", desc)
+    who = f" от #{ref.group(1)}" if ref else ""
+    if m == "referral":
+        return f"Бонус за приглашённого{who}"
+    if m == "referral_reversal":
+        return f"Бонус снят: возврат{who}"
+    if m == "panel":
+        return "Начислено вручную" if float(t.get("amount") or 0) >= 0 else "Списано вручную"
+    return desc or "Операция"
+
+
+def _payment_refundable(p: dict[str, Any]) -> bool:
+    return bool(
+        p.get("provider") in ("yookassa", "tg_stars")
+        and p.get("status") == "paid"
+        and p.get("provider_payment_id")
+    )
+
+
+def _payment_description(purpose: Optional[str], user_id: Any) -> str:
+    """описание платежа для панели (в скобках внутренний id)."""
+    uid = user_id if user_id is not None else "—"
+    label = {
+        "subscription": "Покупка подписки",
+        "extend": "Покупка подписки",
+        "devices": "Изменение лимита устройств",
+        "traffic_reset": "Сброс трафика",
+        "gift": "Подарок подписки",
+    }.get(str(purpose or "").lower(), "Платёж")
+    return f"{label} ({uid})"
+
+
+def _reverse_referral_bonus(payment: dict[str, Any]) -> None:
+    """снять реф. бонус пригласившему за этот платёж."""
+    try:
+        pid = payment.get("payment_id")
+        if db.fetchone("SELECT 1 FROM transactions WHERE payment_id = ? AND payment_method = 'referral_reversal' LIMIT 1",
+                       (pid,)):
+            return  # уже снят
+        # снимаем ровно тот бонус и тому, кому начислили
+        credited = db.fetchone("SELECT user_id, amount FROM transactions WHERE hash = ? AND payment_method = 'referral' "
+                               "AND amount > 0 ORDER BY id LIMIT 1", (f"pay:{pid}",))
+        if credited:
+            referrer = get_user(int(credited["user_id"]))
+            bonus = round(float(credited["amount"]), 2)
+        else:
+            # нет бонуса с пометкой платежа: либо новый учёт, либо старый по ставке
+            since = (db.fetchone("SELECT value FROM settings WHERE key = 'ref_hash_since'") or {}).get("value")
+            paid = payment.get("paid_at") or payment.get("created_at") or ""
+            if not since or paid >= since:
+                return
+            user = get_user(int(payment["user_id"]))
+            if not user or not user.get("referred_by") or (payment.get("currency") or "RUB") != "RUB":
+                return
+            amount = float(payment.get("amount") or 0)
+            if amount <= 0:
+                return
+            referrer = get_user(int(user["referred_by"]))
+            bonus = round(amount * float((referrer or {}).get("partner_rate") or 25) / 100.0, 2)
+        if not referrer or bonus <= 0:
+            return
+        db.execute(
+            "UPDATE users SET partner_balance = MAX(0, partner_balance - ?) WHERE id = ?",
+            (bonus, referrer["id"]),
+        )
+        db.execute(
+            "INSERT INTO transactions (user_id, amount, status, payment_method, hash, payment_id, description, created_at) "
+            "VALUES (?, ?, 'completed', 'referral_reversal', ?, ?, ?, ?)",
+            (referrer["id"], -bonus, secrets.token_hex(8), pid,
+             f"referral reversal user {payment.get('user_id')}", db.utcnow_iso()),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _refund_undo_plan(payment: dict[str, Any]) -> dict[str, Any]:
+    """что откатить: из grant_info или полей старого платежа."""
+    info = db.loads(payment.get("grant_info"), None) if payment.get("grant_info") else None
+    if isinstance(info, dict) and info.get("kind"):
+        return info
+    purpose = payment.get("purpose") or "subscription"
+    if purpose == "traffic_reset":
+        return {"kind": "traffic_reset"}
+    if purpose == "devices":
+        return {"kind": "devices", "sub_id": payment.get("subscription_id"),
+                "added_devices": max(1, int(payment.get("extra_devices") or 1))}
+    return {"kind": "extend", "sub_id": payment.get("subscription_id"),
+            "added_seconds": int(fulfillment.DAYS_PER_MONTH * max(1, int(payment.get("months") or 1)) * 86400),
+            "added_devices": 0, "upgraded_trial": False, "legacy": True}
+
+
+def _later_paid_extends(payment: dict[str, Any], sub_id: int) -> list[dict[str, Any]]:
+    """оплаченные после этого продления той же подписки."""
+    rows = db.fetchall(
+        "SELECT payment_id, grant_info, paid_at, id FROM payments WHERE user_id = ? AND status = 'paid' AND payment_id != ?",
+        (int(payment["user_id"]), payment.get("payment_id")))
+    mine = (payment.get("paid_at") or "", int(payment.get("id") or 0))
+    out = []
+    for r in rows:
+        info = db.loads(r.get("grant_info"), None) if r.get("grant_info") else None
+        if not isinstance(info, dict) or info.get("kind") != "extend" or int(info.get("sub_id") or 0) != int(sub_id):
+            continue
+        if (r.get("paid_at") or "", int(r.get("id") or 0)) > mine:
+            out.append(r)
+    return out
+
+
+def _segment_left_seconds(payment: dict[str, Any], plan: dict[str, Any], sub_id: int, now: datetime) -> int:
+    """сколько оплаченных этим платежом дней ещё не прошло."""
+    months = max(1, int(payment.get("months") or 1))
+    added = int(plan.get("added_seconds") or fulfillment.DAYS_PER_MONTH * months * 86400)
+    # позднее продление истёкшей: дни этого платежа уже истрачены
+    for r in _later_paid_extends(payment, sub_id):
+        info = db.loads(r.get("grant_info"), None) or {}
+        prev = parse_iso(info.get("prev_expires_at"))
+        at = parse_iso(r.get("paid_at"))
+        if prev and at and prev <= at:
+            return 0
+    if plan.get("legacy"):
+        return added  # старый платёж без отрезка: как раньше
+    end = parse_iso(plan.get("end_at"))
+    if not end:
+        paid = parse_iso(payment.get("paid_at")) or parse_iso(payment.get("created_at")) or now
+        if plan.get("kind") == "extend":
+            prev = parse_iso(plan.get("prev_expires_at"))
+            base = max(prev, paid) if prev else paid
+        else:
+            base = paid
+        end = base + timedelta(seconds=added)
+    # ранние откаты сдвинули наш отрезок назад
+    shift = 0
+    for r in db.fetchall("SELECT grant_info FROM payments WHERE user_id = ? AND status IN ('refunded', 'chargeback') "
+                         "AND payment_id != ?", (int(payment["user_id"]), payment.get("payment_id"))):
+        info = db.loads(r.get("grant_info"), None) if r.get("grant_info") else None
+        if not isinstance(info, dict) or int(info.get("sub_id") or 0) != int(sub_id):
+            continue
+        r_end = parse_iso(info.get("end_at"))
+        if r_end and r_end <= end:
+            shift += int(info.get("rolled_back_seconds") or 0)
+    end = end - timedelta(seconds=shift)
+    left = max(0.0, min(float(added), (end - now).total_seconds()))
+    return int(math.ceil(left))
+
+
+def _revoke_subscription_for_payment(payment: dict[str, Any]) -> None:
+    """откатить ровно то, что дал этот платёж, не трогая поздние."""
+    try:
+        plan = _refund_undo_plan(payment)
+        kind = plan.get("kind")
+        if kind == "traffic_reset":
+            return
+        if kind == "gift":
+            st = reflevels.revoke_bought_gift(str(payment.get("payment_id")))
+            if st == "redeemed":
+                forum.report_error("Возврат за подарок, который уже активировали",
+                                   f"payment_id={payment.get('payment_id')}, код {plan.get('code')} — подписку получателя не трогали")
+            return
+        sub_id = plan.get("sub_id") or payment.get("subscription_id")
+        sub = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sub_id,)) if sub_id else None
+        # докупку устройств мог оплатить гость семьи — в Remnawave меняем подписку её владельца
+        user = get_user(int(sub["user_id"] if sub and sub.get("user_id") else payment["user_id"]))
+        if not sub or not user:
+            return
+        client, rw = _rw_find_user(user)
+        now = utcnow()
+        later = bool(_later_paid_extends(payment, int(sub["id"])))
+        cur_dev = int(sub.get("devices_limit") or 1)
+
+        def _remember(seconds: int) -> None:
+            plan2 = dict(plan)
+            plan2["rolled_back_seconds"] = int(seconds)
+            db.execute("UPDATE payments SET grant_info = ? WHERE payment_id = ?",
+                       (db.dumps(plan2), payment.get("payment_id")))
+
+        def _revoke_fully() -> None:
+            db.execute("UPDATE subscriptions SET status = 'Refunded', expires_at = ? WHERE id = ?",
+                       (iso(now), sub["id"]))
+            if client and rw:
+                try:
+                    client.disable_user(_rw_num_id(rw))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if kind == "devices":
+            addon = db.fetchone("SELECT id, status FROM device_addons WHERE payment_id = ?", (payment.get("payment_id"),))
+            if addon:
+                db.execute("UPDATE device_addons SET status = 'refunded', ended_at = ? WHERE id = ? AND status = 'active'",
+                           (iso(now), addon["id"]))
+            already_gone = bool(addon and addon.get("status") == "expired")
+            new_dev = cur_dev if (later or already_gone) else max(1, cur_dev - int(plan.get("added_devices") or 0))
+            db.execute("UPDATE subscriptions SET devices_limit = ? WHERE id = ?", (new_dev, sub["id"]))
+            if client and rw:
+                try:
+                    client.update_user(id=_rw_num_id(rw), hwid_device_limit=new_dev)
+                except Exception:  # noqa: BLE001
+                    pass
+        else:  # new / extend
+            left = _segment_left_seconds(payment, plan, int(sub["id"]), now)
+            _remember(left)
+            cur_exp = parse_iso(sub.get("expires_at")) or now
+            new_exp = cur_exp - timedelta(seconds=left)
+            if new_exp <= now + timedelta(minutes=1):
+                new_exp = now  # остались секунды: считаем, что оплаченного времени нет
+            if kind == "new":
+                given = int(plan.get("devices") or 0) or max(1, int(payment.get("plan_devices") or 1) + int(payment.get("extra_devices") or 0))
+                new_dev = cur_dev if later else max(1, cur_dev - (given - 1))
+            else:
+                new_dev = cur_dev if later else max(1, cur_dev - max(0, int(plan.get("added_devices") or 0)))
+            if new_exp <= now:
+                _revoke_fully()
+            else:
+                to_trial = bool(plan.get("upgraded_trial")) and not later
+                if to_trial:
+                    new_dev = max(1, int(plan.get("prev_devices") or 1))
+                    tr_limit = plan.get("prev_traffic_limit")
+                    tr_limit = int(tr_limit) if tr_limit is not None else fulfillment.trial_traffic_gb()
+                    squads = plan.get("prev_squads_json") or db.dumps(fulfillment.trial_squads())
+                    db.execute(
+                        "UPDATE subscriptions SET expires_at = ?, devices_limit = ?, type = 'trial', "
+                        "traffic_limit = ?, squads_json = ?, status = 'Active' WHERE id = ?",
+                        (iso(new_exp), new_dev, tr_limit, squads, sub["id"]),
+                    )
+                else:
+                    db.execute("UPDATE subscriptions SET expires_at = ?, devices_limit = ? WHERE id = ?",
+                               (iso(new_exp), new_dev, sub["id"]))
+                if client and rw:
+                    patch: dict[str, Any] = {"id": _rw_num_id(rw), "expire_at": new_exp, "hwid_device_limit": new_dev}
+                    if to_trial:
+                        patch["active_internal_squads"] = db.loads(squads, []) or fulfillment.trial_squads()
+                        patch["traffic_limit_bytes"] = int(tr_limit) * fulfillment.GB
+                    try:
+                        client.update_user(**patch)
+                    except Exception as exc:  # noqa: BLE001
+                        try:
+                            forum.report_error("Откат платежа: Remnawave не обновлён",
+                                               f"{payment.get('payment_id')}: {exc}")
+                        except Exception:  # noqa: BLE001
+                            pass
+        try:
+            sync_user_status_from_subs(int(user["id"]))
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _finalize_refund(payment_id: str, p: dict[str, Any], admin: dict[str, Any],
+                     message: str, manual: bool = False) -> dict[str, Any]:
+    """финализация возврата: refunded, бонус, подписка, уведомление."""
+    info = db.dumps({"message": message, "manual": manual, "by": admin.get("username")})
+    cur = db.execute(
+        "UPDATE payments SET status = 'refunded', refunded_at = ?, refund_info = ? "
+        "WHERE payment_id = ? AND status = 'refunding'",
+        (db.utcnow_iso(), info, payment_id),
+    )
+    if cur.rowcount == 0:
+        fresh = fulfillment.get_payment(payment_id) or {}
+        try:
+            forum.report_error("Возврат: платёж сменил статус во время возврата",
+                               f"{payment_id}: {fresh.get('status')}")
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": False, "message": f"Платёж в статусе «{fresh.get('status')}» — проверьте вручную"}
+    db.execute("UPDATE transactions SET status = 'refunded' WHERE payment_id = ?", (payment_id,))
+    _reverse_referral_bonus(p)  # для xtr no-op: реф. бонус там не начислялся
+    _revoke_subscription_for_payment(p)
+    try:
+        services.reverse_tracking_payment(int(p["user_id"]), float(p.get("amount") or 0))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        is_stars = p.get("provider") == "tg_stars"
+        amt = p.get("stars") if is_stars else p.get("amount")
+        cur_sym = " ⭐" if is_stars else "₽"
+        forum.send(
+            "purchases",
+            f"↩️ <b>Возврат</b> по платежу <code>{forum._esc(payment_id)}</code> — "
+            f"{forum._fmt_amount(amt)}{cur_sym} · {forum.user_link(int(p['user_id']))}",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "message": message or "Возврат выполнен", "manual": bool(manual)}
+
+
+# platega — старые платежи до перехода на ЮKassa
+CHARGEBACK_PROVIDERS = ("yookassa", "platega", "tg_stars")
+
+CHARGEBACK_REFUND_BLOCK = ("По этому платежу пришёл чарджбек — возвращать деньги нельзя. "
+                           "Нажмите «Чарджбек»: он откатит подписку без возврата денег.")
+
+
+def _rollback_payment(payment_id: str, p: dict[str, Any], admin: dict[str, Any], note: str,
+                      ban: bool = False) -> dict[str, Any]:
+    """чарджбек: банк уже вернул деньги, откатываем последствия у нас."""
+    if p.get("provider") not in CHARGEBACK_PROVIDERS:
+        raise HTTPException(400, detail={"message": "Чарджбек бывает только по оплате картой/СБП или звёздами"})
+    info = db.dumps({"note": note, "by": admin.get("name") or admin.get("username")})
+    cur = db.execute("UPDATE payments SET status = 'chargeback', chargeback_at = ?, chargeback_info = ? "
+                     "WHERE payment_id = ? AND status = 'paid'", (db.utcnow_iso(), info, payment_id))
+    if cur.rowcount == 0:
+        fresh = fulfillment.get_payment(payment_id) or {}
+        if fresh.get("status") == "chargeback":
+            banned_now = _chargeback_ban(p, payment_id, note, admin) if ban else False
+            return {"ok": True, "already": True, "banned": banned_now,
+                    "message": "Чарджбек по этому платежу уже проведён" + (", аккаунт заблокирован" if banned_now else "")}
+        raise HTTPException(400, detail={"message": "Чарджбек можно провести только по оплаченному платежу"})
+    db.execute("UPDATE transactions SET status = 'chargeback' WHERE payment_id = ?", (payment_id,))
+    _reverse_referral_bonus(p)
+    _revoke_subscription_for_payment(p)
+    try:
+        services.reverse_tracking_payment(int(p["user_id"]), float(p.get("amount") or 0))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        is_stars = p.get("provider") == "tg_stars"
+        amt = p.get("stars") if is_stars else p.get("amount")
+        forum.send("purchases", f"⚠️ <b>Чарджбек</b> по платежу <code>{forum._esc(payment_id)}</code> — "
+                                f"{forum._fmt_amount(amt)}{' ⭐' if is_stars else '₽'} · {forum.user_link(int(p['user_id']))}. "
+                                "Подписка откатана, деньги не возвращались.")
+    except Exception:  # noqa: BLE001
+        pass
+    banned_now = _chargeback_ban(p, payment_id, note, admin) if ban else False
+    return {"ok": True, "banned": banned_now,
+            "message": "Чарджбек проведён: последствия платежа откатаны, деньги не возвращались"
+                       + (", аккаунт заблокирован" if banned_now else "")}
+
+
+def _chargeback_ban(p: dict[str, Any], payment_id: str, note: str, admin: dict[str, Any]) -> bool:
+    """бан за чарджбек. true если забанили сейчас."""
+    user = get_user(int(p["user_id"]))
+    if not user or user.get("is_banned"):
+        return False
+    reason = f"Чарджбек по платежу {payment_id}" + (f" — {note}" if note and note != "Чарджбек" else "")
+    _ban_account(user, reason[:200], admin)
+    try:
+        forum.send("purchases", f"🚫 Аккаунт {forum.user_link(int(user['id']))} заблокирован за чарджбек "
+                                f"<code>{forum._esc(payment_id)}</code>.")
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+class ChargebackBody(BaseModel):
+    note: str = Field("", max_length=300)
+    ban: bool = False  # заодно заблокировать аккаунт
+
+
+@app.post("/api/panel/payments/{payment_id}/chargeback")
+def panel_payment_chargeback(payment_id: str, body: Optional[ChargebackBody] = None, admin: dict = Depends(require_owner)) -> dict[str, Any]:
+    p = fulfillment.get_payment(payment_id)
+    if not p:
+        raise HTTPException(404, detail={"message": "Платёж не найден"})
+    return _rollback_payment(payment_id, p, admin, (body.note if body else "") or "Чарджбек", bool(body and body.ban))
+
+
+@app.get("/api/panel/payments/{payment_id}/refund-check")
+def panel_payment_refund_check(payment_id: str, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """можно ли вернуть: ЮKassa — поле refundable платежа; stars всегда."""
+    p = fulfillment.get_payment(payment_id)
+    if not p:
+        raise HTTPException(404, detail={"message": "Платёж не найден"})
+    if p.get("chargeback_reported_at"):
+        return {"supported": False, "blockReason": CHARGEBACK_REFUND_BLOCK}
+    if p.get("provider") == "platega":
+        return {"supported": False, "blockReason": "Платёж прошёл через Platega до перехода на ЮKassa — верните деньги вручную в кабинете Platega."}
+    if not _payment_refundable(p):
+        return {"supported": False, "blockReason": "Платёж нельзя вернуть (не оплачен или уже возвращён)"}
+    if p.get("provider") == "tg_stars":
+        return {"supported": True, "kind": "stars"}
+    if yookassa is None:
+        raise HTTPException(503, detail={"message": "Платёжный модуль недоступен"})
+    client = yookassa.get_client()
+    if not client.is_configured():
+        raise HTTPException(503, detail={"message": "ЮKassa не настроена"})
+    try:
+        yp = client.get_payment(str(p["provider_payment_id"]))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, detail={"message": f"ЮKassa: {exc}"})
+    if not yp.get("refundable"):
+        return {"supported": False, "blockReason": "ЮKassa не разрешает возврат по этому платежу"}
+    return {"supported": True, "kind": "yookassa"}
+
+
+@app.post("/api/panel/payments/{payment_id}/refund")
+def panel_payment_refund(payment_id: str, admin: dict = Depends(require_panel)) -> dict[str, Any]:
+    """возврат: ЮKassa /refunds или stars refundStarPayment."""
+    p = fulfillment.get_payment(payment_id)
+    if not p:
+        raise HTTPException(404, detail={"message": "Платёж не найден"})
+    if p.get("chargeback_reported_at"):
+        raise HTTPException(409, detail={"message": CHARGEBACK_REFUND_BLOCK})
+    if not _payment_refundable(p):
+        raise HTTPException(400, detail={"message": "Этот платёж нельзя вернуть"})
+    # сначала paid->refunding, потом к провайдеру
+    claim = db.execute("UPDATE payments SET status = 'refunding' WHERE payment_id = ? AND status = 'paid' "
+                       "AND chargeback_reported_at IS NULL", (payment_id,))
+    if claim.rowcount == 0:
+        fresh = fulfillment.get_payment(payment_id) or {}
+        if fresh.get("chargeback_reported_at") or fresh.get("status") == "chargeback":
+            raise HTTPException(409, detail={"message": CHARGEBACK_REFUND_BLOCK})
+        raise HTTPException(409, detail={"message": "Платёж уже возвращается или возвращён"})
+
+    def _unclaim() -> None:
+        db.execute("UPDATE payments SET status = 'paid' WHERE payment_id = ? AND status = 'refunding'", (payment_id,))
+
+    if p.get("provider") == "tg_stars":
+        if telegram_stars is None or not telegram_stars.TelegramStars().is_configured():
+            _unclaim()
+            raise HTTPException(503, detail={"message": "Оплата звёздами не настроена"})
+        user = get_user(int(p["user_id"]))
+        tgid = (user or {}).get("telegram_id")
+        if not tgid:
+            _unclaim()
+            raise HTTPException(400, detail={"message": "У пользователя нет Telegram id для возврата звёзд"})
+        try:
+            telegram_stars.TelegramStars().refund_star_payment(int(tgid), str(p["provider_payment_id"]))
+        except Exception as exc:  # noqa: BLE001
+            _unclaim()
+            raise HTTPException(502, detail={"message": f"Telegram: {exc}"})
+        return _finalize_refund(payment_id, p, admin, "Звёзды возвращены пользователю")
+
+    if yookassa is None:
+        _unclaim()
+        raise HTTPException(503, detail={"message": "Платёжный модуль недоступен"})
+    client = yookassa.get_client()
+    if not client.is_configured():
+        _unclaim()
+        raise HTTPException(503, detail={"message": "ЮKassa не настроена"})
+    owner = get_user(int(p["user_id"])) or {}
+    try:
+        res = client.create_refund(
+            str(p["provider_payment_id"]), float(p.get("amount") or 0),
+            key=f"refund-{payment_id}",
+            receipt_email=owner.get("email"),
+            receipt_item=_payment_description(p.get("purpose"), p.get("user_id")),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _unclaim()
+        raise HTTPException(502, detail={"message": f"ЮKassa: {exc}"})
+    status = str(res.get("status") or "")
+    if status == "canceled":
+        _unclaim()
+        reason = (res.get("cancellation_details") or {}).get("reason") if isinstance(res.get("cancellation_details"), dict) else None
+        return {"ok": False, "message": f"ЮKassa отклонила возврат{f' ({reason})' if reason else ''}", "raw": res}
+    return _finalize_refund(payment_id, p, admin,
+                            "Деньги возвращены" if status == "succeeded" else "Возврат в обработке у ЮKassa")
+
+
+@app.get("/api/panel/users/{user_id}/remnawave")
+def panel_user_remnawave(user_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """данные remnawave: онлайн, подключения, hwid."""
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    out: dict[str, Any] = {
+        "configured": provisioning.is_configured(),
+        "found": False,
+        "online_at": None,
+        "first_connected_at": None,
+        "last_user_agent": None,
+        "status": None,
+        "used_traffic_bytes": None,
+        "traffic_limit_bytes": None,
+        "expire_at": None,
+        "hwid_device_limit": None,
+        "subscription_url": None,
+        "devices": [],
+        "error": None,
+    }
+    client, rw = _rw_find_user(user)
+    if not client:
+        out["error"] = "remnawave_not_configured"
+        return out
+    if not rw:
+        out["error"] = "user_not_found_in_remnawave"
+        return out
+    out["found"] = True
+    rw = grace.mask_rw(int(user_id), rw)
+    # в новых версиях remnawave onlineAt/firstConnectedAt лежат в userTraffic, а не на верхнем уровне
+    ut = rw.get("userTraffic") if isinstance(rw.get("userTraffic"), dict) else {}
+    out["online_at"] = (rw.get("onlineAt") or rw.get("online_at") or ut.get("onlineAt")
+                        or ut.get("online_at") or rw.get("lastConnectedAt"))
+    out["first_connected_at"] = (rw.get("firstConnectedAt") or rw.get("first_connected_at")
+                                 or ut.get("firstConnectedAt") or ut.get("first_connected_at"))
+    out["last_user_agent"] = rw.get("subLastUserAgent") or rw.get("sub_last_user_agent")
+    out["status"] = rw.get("status")
+    _tr = _rw_traffic(rw)
+    out["used_traffic_bytes"] = _tr["used_bytes"]
+    out["traffic_limit_bytes"] = _tr["limit_bytes"]
+    out["expire_at"] = rw.get("expireAt") or rw.get("expire_at")
+    out["hwid_device_limit"] = rw.get("hwidDeviceLimit") or rw.get("hwid_device_limit")
+    try:
+        out["subscription_url"] = subdomain.vpn(client.subscription_url_for(rw), project=projects.of(user))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        # ручка hwid в одних версиях ждёт числовой id, в других — uuid
+        rw_key: Any = _rw_num_id(rw)
+        if rw_key is None:
+            rw_key = rw.get("uuid")
+        if rw_key is None:
+            raise ValueError("no remnawave user id")
+        raw = unwrap_rw(client.get_user_hwid_devices(rw_key))
+        devices = raw.get("devices") if isinstance(raw, dict) else raw
+        out["devices"] = [
+            {
+                "hwid": d.get("hwid"),
+                "platform": d.get("platform"),
+                "os_version": d.get("osVersion") or d.get("os_version"),
+                "device_model": d.get("deviceModel") or d.get("device_model"),
+                "user_agent": d.get("userAgent") or d.get("user_agent"),
+                "created_at": d.get("createdAt") or d.get("created_at"),
+                "updated_at": d.get("updatedAt") or d.get("updated_at"),
+            }
+            for d in (devices or [])
+        ]
+        # devices_used в базе никто не обновлял — синхронизируем с remnawave, чтобы списки не показывали 0
+        try:
+            db.execute("UPDATE subscriptions SET devices_used = ? WHERE user_id = ? AND status != 'Deleted'",
+                       (len(out["devices"]), int(user_id)))
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"hwid_error: {type(exc).__name__}"
+    return out
+
+
+class HwidUnlinkBody(BaseModel):
+    hwid: str
+
+
+@app.post("/api/panel/users/{user_id}/hwid/unlink")
+def panel_user_hwid_unlink(user_id: int, body: HwidUnlinkBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    client, rw = _rw_find_user(user)
+    if not client or not rw:
+        raise HTTPException(400, detail="Пользователь не найден в Remnawave")
+    try:
+        client.delete_hwid_device({"userId": _rw_num_id(rw), "hwid": body.hwid})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, detail=f"Не удалось отвязать устройство: {exc}")
+    return {"success": True}
+
+
+def _panel_family_info(user: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """семья в карточке панели: чей участник / кто в его семье."""
+    uid = int(user["id"])
+    owner_id = family.active_owner_id(uid)
+    if owner_id:
+        owner = get_user(owner_id)
+        return {"role": "member", "owner_id": owner_id, "owner_name": _user_label(owner) if owner else f"#{owner_id}",
+                "active": family_owner_for(user) is not None}
+    members = family.members(uid)
+    if members:
+        rows = db.fetchall("SELECT id, member_id FROM family_members WHERE owner_id = ?", (uid,))
+        uid_by_row = {int(r["id"]): r.get("member_id") for r in rows}
+        return {"role": "owner", "max_members": family.max_members(projects.of(user)),
+                "members": [{**m, "user_id": uid_by_row.get(int(m["id"]))} for m in members]}
+    return None
+
+
+@app.delete("/api/panel/users/{user_id}/family")
+def panel_user_family_remove(user_id: int, row: Optional[int] = None,
+                             _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """убрать из семьи: участника (row не указан — сам user_id выходит) или строку семьи владельца."""
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    if row is None:
+        owner_id = family.leave(user_id)
+        if owner_id is None:
+            raise HTTPException(400, detail={"message": "Пользователь не в семье"})
+        _family_revoke_owner_key(get_user(owner_id), _user_label(user))
+        return {"success": True}
+    try:
+        removed = family.remove_member(user_id, row)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    if removed and removed.get("family_was_active"):
+        _family_revoke_owner_key(user, _user_label(removed))
+    return {"success": True}
+
+
+@app.get("/api/panel/users/{user_id}/detail")
+def panel_user_detail(user_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """полная карточка юзера для панели."""
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="User not found")
+
+    subs = db.fetchall("SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC", (user_id,))
+    primary = db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND status != 'Deleted' AND type != 'trial' "
+        "ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END, expires_at DESC, id DESC LIMIT 1",
+        (user_id,),
+    ) or next((x for x in subs if x.get("status") != "Deleted"), None)
+
+    refs = db.fetchall("SELECT * FROM users WHERE referred_by = ?", (user_id,))
+    has_trial = bool(db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND type = 'trial' LIMIT 1", (user_id,)
+    ))
+
+    return {
+        "family": _panel_family_info(user),
+        "id": user["id"],
+        "project": projects.of(user),
+        "telegram_id": user.get("telegram_id"),
+        "username": user.get("username"),
+        "first_name": user.get("first_name"),
+        "last_name": user.get("last_name"),
+        "email": user.get("email"),
+        "registration_date": user.get("created_at"),
+        "status": subscription_status_for_user(user),  # trial|active|expired|lapsed|never|banned
+        "is_banned": bool(user.get("is_banned")),
+        "balance": user.get("balance", 0),
+        "partner_rate": user.get("partner_rate", 25),
+        "partner_balance": user.get("partner_balance", 0),
+        "is_partner": bool(user.get("is_partner")),
+        "ambassador": _ambassador_panel(user),
+        "ban_reason": user.get("ban_reason") if user.get("is_banned") else None,
+        "blacklist_reason": blacklist.reason_for(user.get("telegram_id")) if user.get("telegram_id") else None,
+        "blacklist_ignored": bool(user.get("blacklist_ignored")),
+        "has_trial": has_trial,
+        # кнопка «Сбросить триал»: активна, если пробный сейчас взять нельзя (брал, платил, удаляли аккаунт)
+        "trial_resettable": _trial_blocks(user_id) is not None,
+        # почему пробный недоступен — отдельно в мини-приложении и на сайте (None — доступен)
+        "trial_status": {src: (lambda r: {"available": r is None, "reason": r, "text": _TRIAL_REASON_TEXT.get(r or "", "")})(
+            trial_reason(user_id, src)) for src in TRIAL_SOURCES},
+        "referrals": [
+            {
+                "id": u["id"],
+                "telegram_id": u.get("telegram_id"),
+                "username": u.get("username"),
+                "email": u.get("email"),
+                "full_name": " ".join(filter(None, [u.get("first_name"), u.get("last_name")])) or None,
+            }
+            for u in refs
+        ],
+        "subscription": serialize_key(primary, user) if primary else None,
+        # все подписки, включая удалённые
+        "subscriptions_history": [
+            {**serialize_key(x, user), "deleted_at": x.get("deleted_at"), "type": x.get("type")}
+            for x in subs
+        ],
+        "key_blocked": bool(db.fetchone(
+            "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Banned' LIMIT 1", (user_id,)
+        )),
+        "banned_at": user.get("banned_at") if user.get("is_banned") else None,
+        # блокировки, баны, предупреждения анти-абуза
+        "moderation": moderation.for_user(user_id),
+        "aa_warning": _aa_warning(user_id),
+        "discount": active_discount_for_user(user_id),
+        "compensations": services.compensations_for_user(user_id),
+        "promo_activations": [
+            {
+                "id": a["id"],
+                "code": a.get("code"),
+                "name": a.get("name"),
+                "discount_percent": a.get("discount_percent"),
+                "expires_at": _min_iso(a.get("expires_at"), a.get("promo_expires_at")),
+                "created_at": a.get("created_at"),
+                "active": bool(
+                    float(a.get("discount_percent") or 0) > 0
+                    and (not _min_iso(a.get("expires_at"), a.get("promo_expires_at"))
+                         or parse_iso(_min_iso(a.get("expires_at"), a.get("promo_expires_at"))) > utcnow())
+                ),
+            }
+            for a in db.fetchall(
+                "SELECT a.*, p.code AS code, p.name AS name, p.expires_at AS promo_expires_at FROM promocode_activations a "
+                "JOIN promocodes p ON p.id = a.promocode_id WHERE a.user_id = ? ORDER BY a.id DESC",
+                (user_id,),
+            )
+        ],
+    }
+
+
+def _ban_account(user: dict[str, Any], reason: Optional[str], p: dict[str, Any]) -> None:
+    """блокировка аккаунта: причина, журнал, remnawave."""
+    uid = int(user["id"])
+    db.execute(
+        "UPDATE users SET is_banned = 1, status = 'Banned', ban_reason = ?, banned_at = ? WHERE id = ?",
+        (reason or "Заблокирован вручную", db.utcnow_iso(), uid),
+    )
+    moderation.log(uid, "ban", reason or "Заблокирован вручную", actor=p.get("actor") or "owner", actor_name=p.get("name"))
+    _reject_withdrawals_on_ban(uid)
+    client, rw = _rw_find_user(user)
+    if client and rw:
+        try:
+            client.disable_user(_rw_num_id(rw))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ambassador_panel(user: dict[str, Any]) -> dict[str, Any]:
+    with projects.use(projects.of(user)):
+        out = ambassadors.info(user)
+        out["default_tg_link"] = f"https://t.me/{P().bot_username}?start=ref_{int(user['id'])}" if P().bot_username else None
+        out["default_site_link"] = _site_ref_link(int(user["id"]))
+        out["has_site"] = bool(P().feature("site"))
+        out["bot_username"] = P().bot_username
+    return out
+
+
+class AmbassadorBody(BaseModel):
+    tg: Optional[str] = Field(None, max_length=400)
+    site: Optional[str] = Field(None, max_length=400)
+    rate: Optional[float] = Field(None, ge=0, le=100)  # None — не менять; 0 — ставка по уровню
+
+
+@app.put("/api/panel/users/{user_id}/ambassador")
+def panel_user_ambassador(user_id: int, body: AmbassadorBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """амбассадор: свои ссылки на бота и сайт + свой процент (вывод — обычный вывод реф. баланса)."""
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    if p["role"] == "operator":
+        raise HTTPException(403, detail={"message": "Оператору это действие недоступно"})
+    if is_admin(p) and not admin_has(p, "users.action.SET_PARTNER_RATE"):
+        raise HTTPException(403, detail={"message": "Нет права на это действие"})
+    with projects.use(projects.of(user)):
+        try:
+            ambassadors.update(user, body.tg, body.site)
+        except ambassadors.AmbassadorError as exc:
+            raise HTTPException(400, detail={"message": str(exc)})
+        if body.rate is not None:
+            reflevels._ensure_schema()
+            rate = float(body.rate)
+            db.execute("UPDATE users SET partner_rate = ?, partner_rate_custom = ? WHERE id = ?",
+                       (rate if rate > 0 else 25, 1 if rate > 0 else 0, user_id))
+    fresh = get_user(user_id) or user
+    return {"ambassador": _ambassador_panel(fresh), "partner_rate": fresh.get("partner_rate", 25)}
+
+
+@app.get("/api/panel/ambassadors")
+def panel_ambassadors(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    """амбассадоры проекта: ссылки, процент, приглашённые, заработано."""
+    out = []
+    for u in ambassadors.list_for(db.pid()):
+        with projects.use(projects.of(u)):
+            info = _ambassador_panel(u)
+        invited = db.fetchone("SELECT COUNT(*) AS c FROM users WHERE referred_by = ?", (u["id"],))["c"]
+        earned = reflevels.earnings(int(u["id"])).get("total", 0)
+        out.append({"id": u["id"], "username": u.get("username"), "telegram_id": u.get("telegram_id"),
+                    "email": u.get("email"), "partner_balance": u.get("partner_balance", 0),
+                    "invited": invited, "earned_total": earned, **info})
+    return {"items": out}
+
+
+@app.post("/api/panel/users/{user_id}/action")
+def panel_user_action(user_id: int, body: UserActionBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    action = str(body.action or "").upper()
+    if p["role"] == "operator" and action in staffmod.OPERATOR_FORBIDDEN_ACTIONS:
+        raise HTTPException(403, detail={"message": "Оператору это действие недоступно — передайте обращение админу"})
+    if is_admin(p) and not admin_has(p, f"users.action.{action}"):
+        raise HTTPException(403, detail={"message": "Нет права на это действие"})
+    value = body.value
+
+    if action in ("ADD_BALANCE", "SUB_BALANCE"):
+        # внутреннего баланса нет, старые действия отключены
+        raise HTTPException(400, detail={"message": "Внутреннего баланса нет — используйте реферальный баланс"})
+    if action == "EXTEND_ALL":
+        # одной кнопкой: +дни ко всей подписке (VPN + Remnawave)
+        try:
+            all_days = int(float(value or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail={"message": "Укажите число дней"})
+        if not 1 <= all_days <= 1095:
+            raise HTTPException(400, detail={"message": "Дней: от 1 до 1095"})
+        grant_days_all(user_id, all_days, "panel")
+    elif action == "EXTEND_SUB":
+        days_sub = int(float(value or 0))
+        extend_user_sub(user_id, days_sub, body.subscription_id)
+        _rw_sync_expiry(user)
+    elif action == "REDUCE_SUB":
+        extend_user_sub(user_id, -int(float(value or 0)), body.subscription_id)
+        _rw_sync_expiry(user)
+    elif action == "SET_TRAFFIC":
+        gb = int(float(value or 0))
+        if body.subscription_id:
+            db.execute(
+                "UPDATE subscriptions SET traffic_limit = ? WHERE user_id = ? AND id = ?",
+                (gb, user_id, body.subscription_id),
+            )
+        else:
+            db.execute(
+                "UPDATE subscriptions SET traffic_limit = ? WHERE user_id = ?",
+                (gb, user_id),
+            )
+        _rw_sync_traffic(user, gb)
+    elif action in ("ADD_TRAFFIC", "SUB_TRAFFIC"):
+        delta = int(float(value or 0)) * (1 if action == "ADD_TRAFFIC" else -1)
+        row = db.fetchone(
+            "SELECT id, traffic_limit FROM subscriptions WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT 1", (user_id,)
+        )
+        if row:
+            new_gb = max(0, int(row.get("traffic_limit") or 0) + delta)
+            db.execute("UPDATE subscriptions SET traffic_limit = ? WHERE id = ?", (new_gb, row["id"]))
+            _rw_sync_traffic(user, new_gb)
+    elif action == "SET_DEVICES":
+        try:
+            n_dev = int(float(value))
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail={"message": "Укажите число устройств"})
+        if not 1 <= n_dev <= MAX_PLAN_DEVICES:
+            raise HTTPException(400, detail={"message": f"Устройств: от 1 до {MAX_PLAN_DEVICES}"})
+        if body.subscription_id:
+            db.execute(
+                "UPDATE subscriptions SET devices_limit = ? WHERE user_id = ? AND id = ? AND status != 'Deleted'",
+                (n_dev, user_id, body.subscription_id),
+            )
+        else:
+            db.execute(
+                "UPDATE subscriptions SET devices_limit = ? WHERE user_id = ? AND status != 'Deleted'",
+                (n_dev, user_id),
+            )
+        _rw_sync_devices(user, n_dev)
+    elif action == "BAN":
+        _ban_account(user, (str(value).strip()[:200] or None) if value else None, p)
+    elif action == "UNBAN":
+        # разбан снимает и чёрный список
+        db.execute("UPDATE users SET is_banned = 0, ban_reason = NULL, banned_at = NULL, blacklist_ignored = 1 WHERE id = ?", (user_id,))
+        moderation.log(user_id, "unban", (str(value).strip()[:200] or None) if value else None,
+                       actor=p.get("actor") or "owner", actor_name=p.get("name"))
+        sync_user_status_from_subs(user_id)
+        client, rw = _rw_find_user(user)
+        if client and rw:
+            try:
+                client.enable_user(_rw_num_id(rw))
+            except Exception:  # noqa: BLE001
+                pass
+    elif action == "BLOCK_KEY":
+        # блокируем ключ, не аккаунт
+        kreason = (str(value).strip()[:200] or None) if value else None
+        for ks in db.fetchall("SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('Active', 'Expired')", (user_id,)):
+            moderation.log(user_id, "key_block", kreason, sub_id=int(ks["id"]), actor=p.get("actor") or "owner", actor_name=p.get("name"))
+        db.execute("UPDATE subscriptions SET status = 'Banned', ban_reason = ?, banned_at = ? "
+                   "WHERE user_id = ? AND status IN ('Active', 'Expired')",
+                   (kreason or "Заблокирована вручную", db.utcnow_iso(), user_id))
+        client, rw = _rw_find_user(user)
+        if client and rw:
+            try:
+                client.disable_user(_rw_num_id(rw))
+            except Exception:  # noqa: BLE001
+                pass
+    elif action == "UNBLOCK_KEY":
+        # активные снова active; истёкшие станут expired при обращении
+        # сбрасываем предупреждение анти-абуза
+        for ks in db.fetchall("SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Banned'", (user_id,)):
+            moderation.log(user_id, "key_unblock", None, sub_id=int(ks["id"]), actor=p.get("actor") or "owner", actor_name=p.get("name"))
+        db.execute(
+            "UPDATE subscriptions SET status = 'Active', aa_warned_at = NULL, ban_reason = NULL, banned_at = NULL "
+            "WHERE user_id = ? AND status = 'Banned'",
+            (user_id,),
+        )
+        sync_user_status_from_subs(user_id)
+        client, rw = _rw_find_user(user)
+        if client and rw:
+            try:
+                client.enable_user(_rw_num_id(rw))
+            except Exception:  # noqa: BLE001
+                pass
+    elif action == "SET_NO_RENEW":
+        # запрет продления для текущих подписок
+        try:
+            flag = 1 if float(value or 0) > 0 else 0
+        except (TypeError, ValueError):
+            flag = 1 if str(value).lower() in ("true", "yes", "on") else 0
+        db.execute(
+            "UPDATE subscriptions SET no_renew = ? WHERE user_id = ? AND status IN ('Active', 'Expired', 'Banned')",
+            (flag, user_id),
+        )
+    elif action == "RESET_SUB":
+        info = reset_user_subscription(user)
+        if body.notify:
+            _notify_user(get_user(user_id) or user, _action_notify_text(action, value))
+        return {"success": True, "subscription_url": info.get("subscription_url"),
+                "user": serialize_user(get_user(user_id) or user)}
+    elif action == "NOTIFY":
+        text = str(value or "").strip()
+        if not text:
+            raise HTTPException(400, detail={"message": "Введите сообщение"})
+        ch = str(body.channel or "telegram").strip().lower()
+        if ch not in ("telegram", "email"):
+            raise HTTPException(400, detail={"message": "Куда отправить: Telegram или почта"})
+        if ch == "telegram":
+            if not user.get("telegram_id"):
+                raise HTTPException(400, detail={"message": "У пользователя нет Telegram"})
+        else:
+            if not user.get("email"):
+                raise HTTPException(400, detail={"message": "У пользователя нет почты"})
+            if not mailer.is_configured():
+                raise HTTPException(400, detail={"message": "Почта не настроена"})
+        delivery = _notify_user(user, text, channel=ch)
+        if not delivery.get("telegram") and not delivery.get("email"):
+            raise HTTPException(400, detail={"message": "Не удалось отправить"})
+        return {"success": True, "delivery": delivery, "user": serialize_user(user)}
+    elif action == "SET_PARTNER_RATE":
+        # индивидуальная ставка вместо уровня; пусто/0 — вернуть ставку по уровню
+        reflevels._ensure_schema()
+        rate = float(value or 0)
+        db.execute(
+            "UPDATE users SET partner_rate = ?, partner_rate_custom = ? WHERE id = ?",
+            (rate if rate > 0 else 25, 1 if rate > 0 else 0, user_id),
+        )
+    elif action == "SET_PARTNER_BALANCE":
+        db.execute("UPDATE users SET partner_balance = ? WHERE id = ?", (float(value or 0), user_id))
+    elif action == "ADD_PARTNER_BALANCE":
+        db.execute("UPDATE users SET partner_balance = partner_balance + ? WHERE id = ?", (float(value or 0), user_id))
+    elif action == "SUB_PARTNER_BALANCE":
+        db.execute("UPDATE users SET partner_balance = MAX(0, partner_balance - ?) WHERE id = ?", (float(value or 0), user_id))
+    elif action == "SET_TELEGRAM_ID":
+        new_tg = int(float(value))
+        clash = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND id != ? AND project_id = ?",
+                            (new_tg, user_id, projects.of(user)))
+        if clash:
+            other = get_user(int(clash["id"]))
+            assert other is not None
+            if not body.confirm:
+                raise HTTPException(409, detail={"message": "Этот Telegram ID уже есть у другого аккаунта — аккаунты будут объединены",
+                                                 "merge": merge_preview(user, other)})
+            merge_accounts(user_id, int(other["id"]))
+        db.execute("UPDATE users SET telegram_id = ? WHERE id = ?", (new_tg, user_id))
+    elif action == "UNBIND_TELEGRAM":
+        if not user.get("email"):
+            raise HTTPException(400, detail="Нельзя отвязать Telegram: не привязан email")
+        db.execute("UPDATE users SET telegram_id = NULL WHERE id = ?", (user_id,))
+    elif action == "SET_EMAIL":
+        new_email = str(value or "").strip().lower()
+        if not _valid_email(new_email):
+            raise HTTPException(400, detail="Некорректный email")
+        clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ? AND project_id = ?",
+                            (new_email, user_id, projects.of(user)))
+        if clash:
+            other = get_user(int(clash["id"]))
+            assert other is not None
+            if not body.confirm:
+                raise HTTPException(409, detail={"message": "Этот email уже есть у другого аккаунта — аккаунты будут объединены",
+                                                 "merge": merge_preview(user, other)})
+            merge_accounts(user_id, int(other["id"]))
+        db.execute("UPDATE users SET email = ? WHERE id = ?", (new_email, user_id))
+        _email_changed(user.get("email"), new_email)
+    elif action == "UNBIND_EMAIL":
+        if not user.get("telegram_id"):
+            raise HTTPException(400, detail="Нельзя отвязать email: не привязан Telegram")
+        db.execute("UPDATE users SET email = NULL WHERE id = ?", (user_id,))
+        _email_changed(user.get("email"), None)
+    elif action == "RESET_TRIAL":
+        if db.fetchone(
+            "SELECT id FROM subscriptions WHERE user_id = ? AND type = 'trial' AND status = 'Active' "
+            "AND (expires_at IS NULL OR expires_at > ?)", (user_id, iso()),
+        ):
+            raise HTTPException(400, detail={"message": "Пробная подписка ещё действует — сбросить можно после её окончания"})
+        db.execute("DELETE FROM subscriptions WHERE user_id = ? AND type = 'trial'", (user_id,))
+        _clear_trial_claim(user_id, user.get("telegram_id"))
+        db.execute("UPDATE users SET trial_reset = 1 WHERE id = ?", (user_id,))
+        sync_user_status_from_subs(user_id)
+    elif action == "APPLY_PROMO":
+        code = str(value or "").strip()
+        if not code:
+            raise HTTPException(400, detail="Не указан промокод")
+        info = apply_promo_to_user(user_id, code, by_admin=True)
+        return {"success": True, "discount": info, "user": serialize_user(get_user(user_id) or user)}
+    elif action == "REMOVE_PROMO":
+        code = str(value or "").strip() or None
+        removed = remove_user_promo(user_id, code)
+        return {"success": True, "removed": removed, "user": serialize_user(get_user(user_id) or user)}
+    elif action == "DELETE_USER":
+        if db.fetchone(
+            "SELECT id FROM withdrawals WHERE user_id = ? AND status IN ('pending', 'approved') LIMIT 1",
+            (user_id,),
+        ):
+            raise HTTPException(400, detail={"message": "У пользователя есть незавершённые выводы — сначала обработайте их"})
+        client, rw = _rw_find_user(user)
+        if client and rw:
+            try:
+                client.delete_user(_rw_num_id(rw))
+            except Exception:  # noqa: BLE001
+                pass
+        _clear_trial_claim(user_id, user.get("telegram_id"))  # удалённый аккаунт — как новый, пробный снова доступен
+        _delete_user_keep_history(user_id)
+        return {"success": True, "deleted": True}
+    else:
+        raise HTTPException(400, detail=f"Unknown action: {action}")
+
+    if body.notify and action not in ("NOTIFY",):
+        _notify_user(get_user(user_id) or user, _action_notify_text(action, value))
+
+    user = get_user(user_id)
+    assert user is not None
+    return {"success": True, "user": serialize_user(user)}
+
+
+def reset_user_subscription(user: dict[str, Any]) -> dict[str, Any]:
+    """revoke в remnawave: новый ключ/shortuuid/ссылка."""
+    client, rw = _rw_find_user(user)
+    if not client:
+        raise HTTPException(400, detail={"message": "Remnawave не настроена"})
+    if not rw:
+        raise HTTPException(404, detail={"message": "Пользователь не найден в Remnawave"})
+    rw_id = _rw_num_id(rw)
+    if rw_id is None:
+        raise HTTPException(400, detail={"message": "Не удалось определить id пользователя в Remnawave"})
+    old_short = rw.get("shortUuid") or rw.get("short_uuid")
+    try:
+        fresh_rw = unwrap_rw(client.revoke_user_subscription(rw_id))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, detail={"message": f"Remnawave: не удалось сбросить подписку ({exc})"})
+    if not isinstance(fresh_rw, dict) or not (fresh_rw.get("shortUuid") or fresh_rw.get("short_uuid")):
+        # некоторые версии отдают неполный объект, перечитываем
+        _, fresh_rw = _rw_find_user(user)
+    if not isinstance(fresh_rw, dict):
+        raise HTTPException(502, detail={"message": "Remnawave не вернула нового пользователя"})
+    new_short = fresh_rw.get("shortUuid") or fresh_rw.get("short_uuid")
+    try:
+        sub_url = client.subscription_url_for(fresh_rw, public_base=_env("REMWAVE_SUB_PUBLIC_URL") or None)
+    except Exception:  # noqa: BLE001
+        sub_url = None
+    if new_short:
+        db.execute(
+            "UPDATE subscriptions SET short_uuid = ?, key_config = COALESCE(?, key_config) WHERE user_id = ?",
+            (str(new_short), sub_url, int(user["id"])),
+        )
+    return {"old_short_uuid": old_short, "short_uuid": new_short,
+            "subscription_url": subdomain.vpn(sub_url, project=projects.of(user))}
+
+
+def _delete_user_keep_history(user_id: int) -> None:
+    """удаляет аккаунт, финансовую историю сохраняет."""
+    conn = db.connect()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        with db.transaction() as tx:
+            tx.execute("UPDATE users SET referred_by = NULL WHERE referred_by = ?", (user_id,))
+            for table in ("subscriptions", "app_sessions", "promocode_activations", "onboarding_reminders",
+                          "trial_checks", "moderation_events", "compensations"):
+                try:
+                    tx.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+                except Exception:  # noqa: BLE001 — таблицы может не быть в старой БД
+                    pass
+            # семья: внешние ключи здесь выключены, каскад не сработает — чистим руками,
+            # иначе останется активная строка, которая считает место в чужой семье
+            for sql in ("DELETE FROM family_members WHERE owner_id = ?",
+                        "DELETE FROM family_members WHERE member_id = ?",
+                        "DELETE FROM family_codes WHERE owner_id = ?"):
+                try:
+                    tx.execute(sql, (user_id,))
+                except Exception:  # noqa: BLE001 — таблиц может не быть в старой БД
+                    pass
+            tx.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _action_notify_text(action: str, value: Any) -> str:
+    a = action.upper()
+    if a in ("EXTEND_SUB", "EXTEND_ALL"):
+        return f"✅ Ваша подписка продлена на {int(float(value or 0))} дн."
+    if a == "REDUCE_SUB":
+        return f"ℹ️ Срок вашей подписки уменьшен на {int(float(value or 0))} дн."
+    if a in ("ADD_TRAFFIC", "SET_TRAFFIC"):
+        return "ℹ️ Лимит трафика по вашей подписке обновлён."
+    if a == "RESET_SUB":
+        return ("🔑 Ваша ссылка на подписку обновлена — старая больше не работает.\n\n"
+                f"Откройте приложение {P().name} → «Подписка» → «Добавить ключ в приложение», чтобы подключиться заново.")
+    if a == "BAN":
+        return "🚫 Ваш аккаунт заблокирован."
+    if a == "UNBAN":
+        return "✅ Ваш аккаунт разблокирован."
+    return "ℹ️ Ваш аккаунт был обновлён администратором."
+
+
+MASS_ACTIONS = ("MASS_ADD_DAYS", "MASS_RESET_TRIAL", "MASS_RESET_TRAFFIC")
+
+
+def _mass_add_days_worker(sub_ids: list[int], days: int) -> None:
+    """продление в фоне: сначала бд, потом remnawave."""
+    done_users: set[int] = set()
+    for sid in sub_ids:
+        sub = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (sid,))
+        if not sub or sub.get("status") != "Active":
+            continue
+        base = parse_iso(sub.get("expires_at")) or utcnow()
+        if base < utcnow():
+            base = utcnow()
+        db.execute("UPDATE subscriptions SET expires_at = ? WHERE id = ?",
+                   (iso(base + timedelta(days=days)), sid))
+        uid = int(sub["user_id"])
+        if uid not in done_users:
+            done_users.add(uid)
+            user = get_user(uid)
+            if user:
+                _rw_sync_expiry(user)
+    print(f"[mass] +{days} дн.: продлено подписок {len(sub_ids)}, пользователей {len(done_users)}", flush=True)
+
+
+def _mass_reset_traffic_worker() -> None:
+    """массовый сброс трафика в фоне — только нашим (batman_<id>) пользователям панели."""
+    client = _rw_client()
+    if not client:
+        return
+    try:
+        own = provisioning.own_panel_users(client, project=db.pid())
+    except Exception as exc:  # noqa: BLE001
+        forum.report_error("Массовый сброс трафика не удался", f"{type(exc).__name__}: {exc}")
+        return
+    failed = 0
+    for u in own:
+        try:
+            client.reset_user_traffic(int(u["id"]))
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            print(f"[mass] сброс трафика {u.get('username')}: {type(exc).__name__}: {exc}", flush=True)
+    if failed:
+        forum.report_error("Массовый сброс трафика", f"не удалось у {failed} из {len(own)} пользователей")
+    db.execute("UPDATE subscriptions SET traffic_used = 0 WHERE status != 'Deleted' AND project_id = ?", (db.pid(),))
+    # трафик снова есть: снимаем grace по трафику
+    grace.end_traffic_all()
+    print(f"[mass] сброс трафика: сброшено {len(own) - failed}, ошибок {failed}", flush=True)
+
+
+class ExchangeBody(BaseModel):
+    devices: int
+    days: Optional[float] = None      # итоговый остаток дней вручную, иначе по расчёту
+    notify: bool = True
+
+
+class TransferBody(BaseModel):
+    target_id: int
+    notify: bool = True
+
+
+def _primary_sub(user_id: int) -> Optional[dict[str, Any]]:
+    return db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND status != 'Deleted' AND type != 'trial' "
+        "ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END, expires_at DESC, id DESC LIMIT 1",
+        (user_id,),
+    )
+
+
+def _live_paid_sub(user_id: int) -> Optional[dict[str, Any]]:
+    """платная подписка с оставшимся сроком."""
+    sub = _primary_sub(user_id)
+    if not sub or sub.get("status") != "Active":
+        return None
+    exp = parse_iso(sub.get("expires_at"))
+    if not exp or exp <= utcnow():
+        return None
+    return sub
+
+
+def _msk_date(dt: datetime) -> str:
+    return (dt.astimezone(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+
+
+def _dev_word(n: int) -> str:
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return "устройство"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "устройства"
+    return "устройств"
+
+
+def _exchange_calc(user_id: int, devices: int, days: Optional[float] = None) -> dict[str, Any]:
+    sub = _live_paid_sub(user_id)
+    if not sub:
+        raise HTTPException(400, detail={"message": "Нет платной подписки с оставшимся сроком — менять нечего"})
+    if not 1 <= int(devices) <= MAX_PLAN_DEVICES:
+        raise HTTPException(400, detail={"message": f"Устройств: от 1 до {MAX_PLAN_DEVICES}"})
+    now = utcnow()
+    exp = parse_iso(sub["expires_at"])
+    assert exp is not None
+    old_dev = int(sub.get("devices_limit") or 1)
+    left = (exp - now).total_seconds() / 86400
+    p_old, p_new = price_for_devices(old_dev), price_for_devices(int(devices))
+    # стоимость срока сохраняется при смене числа устройств
+    fair = left * p_old / p_new if p_new > 0 else left
+    new_left = fair if days is None else max(0.0, float(days))
+    new_exp = now + timedelta(days=new_left)
+    return {
+        "subscription_id": sub["id"],
+        "old_devices": old_dev, "new_devices": int(devices),
+        "days_left": round(left, 1), "fair_days": round(fair, 1), "new_days": round(new_left, 1),
+        "delta_days": round(new_left - left, 1),
+        "expires_at": iso(exp), "new_expires_at": iso(new_exp),
+        "price_old": p_old, "price_new": p_new,
+        "value_left": round(left * p_old / 30, 2),
+    }
+
+
+@app.get("/api/panel/users/{user_id}/exchange")
+def panel_exchange_preview(user_id: int, devices: int = Query(...), days: Optional[float] = Query(None),
+                           _: dict = Depends(require_panel)) -> dict[str, Any]:
+    if not get_user(user_id):
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    return _exchange_calc(user_id, devices, days)
+
+
+@app.post("/api/panel/users/{user_id}/exchange")
+def panel_exchange(user_id: int, body: ExchangeBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    calc = _exchange_calc(user_id, body.devices, body.days)
+    if calc["new_devices"] == calc["old_devices"] and body.days is None:
+        raise HTTPException(400, detail={"message": "Число устройств не изменилось"})
+    new_exp = parse_iso(calc["new_expires_at"])
+    assert new_exp is not None
+    db.execute("UPDATE subscriptions SET devices_limit = ?, expires_at = ?, status = CASE WHEN status = 'Banned' THEN status ELSE 'Active' END WHERE id = ?",
+               (calc["new_devices"], iso(new_exp), calc["subscription_id"]))
+    client, rw = _rw_find_user(user)
+    if client and rw:
+        try:
+            client.update_user(id=_rw_num_id(rw), hwid_device_limit=calc["new_devices"], expire_at=new_exp)
+        except Exception:  # noqa: BLE001
+            pass
+    sync_user_status_from_subs(user_id)
+    if body.notify:
+        _notify_user(user, (
+            "🔄 Подписка изменена\n\n"
+            f"Теперь: {calc['new_devices']} {_dev_word(calc['new_devices'])}\n"
+            f"Действует до: {_msk_date(new_exp)} (МСК)"
+        ))
+    return {"success": True, **calc}
+
+
+def _user_label(u: dict[str, Any]) -> str:
+    if u.get("username"):
+        return f"@{u['username']}"
+    if u.get("telegram_id"):
+        return f"id{u['telegram_id']}"
+    return u.get("email") or f"#{u['id']}"
+
+
+def _transfer_plan(src: dict[str, Any], dst: dict[str, Any]) -> dict[str, Any]:
+    if int(src["id"]) == int(dst["id"]):
+        raise HTTPException(400, detail={"message": "Нельзя перенести подписку самому себе"})
+    if dst.get("is_banned"):
+        raise HTTPException(400, detail={"message": "Получатель заблокирован — сначала разбаньте его"})
+    sub = _live_paid_sub(int(src["id"]))
+    if not sub:
+        raise HTTPException(400, detail={"message": "У пользователя нет платной подписки с оставшимся сроком"})
+    exp = parse_iso(sub["expires_at"])
+    assert exp is not None
+    left_days = (exp - utcnow()).total_seconds() / 86400
+    dst_sub = _live_paid_sub(int(dst["id"]))
+    same_link = dst_sub is None and bool(dst.get("telegram_id")) and _rw_client() is not None
+    if same_link:
+        _, rw_src = _rw_find_user(src)
+        same_link = rw_src is not None
+    if same_link:
+        mode, text = "move", (
+            f"Подписка целиком переходит к {_user_label(dst)}: та же ссылка, {int(sub.get('devices_limit') or 1)} "
+            f"{_dev_word(int(sub.get('devices_limit') or 1))}, до {_msk_date(exp)}. "
+            "Приложения, куда она уже добавлена, продолжат работать. "
+            f"У {_user_label(src)} подписки не останется."
+        )
+    else:
+        dev = max(int(sub.get("devices_limit") or 1), int((dst_sub or {}).get("devices_limit") or 1))
+        base = parse_iso(dst_sub["expires_at"]) if dst_sub else utcnow()
+        mode, text = "merge", (
+            f"{_user_label(dst)} получит оставшиеся {(f'{left_days:.1f}'.rstrip('0').rstrip('.')).replace('.', ',')} дн."
+            + (f" к своей подписке (станет до {_msk_date(base + timedelta(days=left_days))})" if dst_sub else " новой подпиской")
+            + f", устройств: {dev}. Ссылка будет у него своя — подписку нужно добавить в приложение заново. "
+            f"Подписка {_user_label(src)} отключится."
+        )
+    return {"mode": mode, "text": text, "subscription_id": sub["id"], "days_left": round(left_days, 1),
+            "devices": int(sub.get("devices_limit") or 1), "expires_at": sub["expires_at"],
+            "target": {"id": dst["id"], "label": _user_label(dst), "has_sub": bool(dst_sub)}}
+
+
+@app.get("/api/panel/users/{user_id}/transfer")
+def panel_transfer_preview(user_id: int, target_id: int = Query(...), _: dict = Depends(require_panel)) -> dict[str, Any]:
+    src, dst = get_user(user_id), get_user(target_id)
+    if src and dst and projects.of(src) != projects.of(dst):
+        raise HTTPException(400, detail={"message": "Переносить подписку можно только внутри одного проекта"})
+    if not src or not dst:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    return _transfer_plan(src, dst)
+
+
+@app.post("/api/panel/users/{user_id}/transfer")
+def panel_transfer(user_id: int, body: TransferBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    src, dst = get_user(user_id), get_user(body.target_id)
+    if src and dst and projects.of(src) != projects.of(dst):
+        raise HTTPException(400, detail={"message": "Переносить подписку можно только внутри одного проекта"})
+    if not src or not dst:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    plan = _transfer_plan(src, dst)
+    sub = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (plan["subscription_id"],))
+    assert sub is not None
+    now = utcnow()
+    exp = parse_iso(sub["expires_at"]) or now
+    client = _rw_client()
+
+    if plan["mode"] == "move":
+        _, rw_src = _rw_find_user(src)
+        _, rw_dst = _rw_find_user(dst)
+        if client and rw_dst and rw_src and _rw_num_id(rw_dst) != _rw_num_id(rw_src):
+            # старый rw-юзер у получателя мешает, удаляем
+            try:
+                client.delete_user(_rw_num_id(rw_dst))
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(502, detail={"message": f"Remnawave: не удалось удалить старого пользователя получателя ({exc})"})
+        patch: dict[str, Any] = {"id": _rw_num_id(rw_src), "telegram_id": int(dst["telegram_id"]), "description": str(int(dst["id"]))}
+        if dst.get("email"):
+            patch["email"] = dst["email"]
+        try:
+            client.update_user(**patch)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, detail={"message": f"Remnawave: не удалось передать подписку ({exc})"})
+        with db.transaction():
+            db.execute("UPDATE subscriptions SET status = 'Deleted', deleted_at = ? WHERE user_id = ? AND status != 'Deleted'",
+                       (iso(now), dst["id"]))
+            db.execute("UPDATE subscriptions SET user_id = ? WHERE id = ?", (dst["id"], sub["id"]))
+    else:
+        left = max(timedelta(0), exp - now)
+        dst_sub = _live_paid_sub(int(dst["id"]))
+        dev = max(int(sub.get("devices_limit") or 1), int((dst_sub or {}).get("devices_limit") or 1))
+        if dst_sub:
+            new_exp = (parse_iso(dst_sub["expires_at"]) or now) + left
+            db.execute("UPDATE subscriptions SET expires_at = ?, devices_limit = ? WHERE id = ?", (iso(new_exp), dev, dst_sub["id"]))
+        else:
+            extend_user_sub(int(dst["id"]), max(1, math.ceil(left.total_seconds() / 86400)))
+            fresh = _primary_sub(int(dst["id"]))
+            if fresh:
+                new_exp = now + left
+                db.execute("UPDATE subscriptions SET expires_at = ?, devices_limit = ?, status = 'Active' WHERE id = ?",
+                           (iso(new_exp), dev, fresh["id"]))
+        dst_now = get_user(int(dst["id"])) or dst
+        _rw_sync_expiry(dst_now)
+        _rw_sync_devices(dst_now, dev)
+        db.execute("UPDATE subscriptions SET status = 'Deleted', deleted_at = ?, expires_at = ? WHERE id = ?",
+                   (iso(now), iso(now), sub["id"]))
+        _rw_set_enabled(src, False)
+
+    sync_user_status_from_subs(int(src["id"]))
+    sync_user_status_from_subs(int(dst["id"]))
+    if body.notify:
+        _notify_user(get_user(int(dst["id"])) or dst, (
+            "🎁 Вам передали подписку\n\n"
+            + ("Откройте приложение — подписка уже работает." if plan["mode"] == "move"
+               else "Добавьте ключ в приложение заново: в боте нажмите «Подписка» → «Добавить ключ в приложение».")
+        ))
+        _notify_user(src, f"🔁 Ваша подписка передана пользователю {_user_label(dst)}.")
+    return {"success": True, **plan}
+
+
+def _live_any_sub(user_id: int) -> Optional[dict[str, Any]]:
+    """действующая подписка с оставшимся сроком."""
+    now_iso = iso()
+    return db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'Active' AND expires_at > ? "
+        "ORDER BY CASE WHEN type = 'trial' THEN 1 ELSE 0 END, expires_at DESC, id DESC LIMIT 1",
+        (user_id, now_iso),
+    )
+
+
+def _sub_left(sub: Optional[dict[str, Any]]) -> timedelta:
+    if not sub:
+        return timedelta(0)
+    exp = parse_iso(sub.get("expires_at"))
+    return max(timedelta(0), (exp - utcnow())) if exp else timedelta(0)
+
+
+def _days_str(td: timedelta) -> str:
+    d = td.total_seconds() / 86400
+    if d <= 0:
+        return "0 дн."
+    return (f"{d:.1f}".rstrip("0").rstrip(".").replace(".", ",")) + " дн."
+
+
+def _merged_left(ks: Optional[dict[str, Any]], ds: Optional[dict[str, Any]]) -> timedelta:
+    """что останется после объединения (оплата складывается, trial нет)."""
+    subs = [x for x in (ks, ds) if x]
+    if not subs:
+        return timedelta(0)
+    paid = [_sub_left(x) for x in subs if x.get("type") != "trial"]
+    return sum(paid, timedelta(0)) if paid else max(_sub_left(x) for x in subs)
+
+
+def merge_preview(keep: dict[str, Any], drop: dict[str, Any]) -> dict[str, Any]:
+    """превью объединения для панели и мини-приложения."""
+    if int(keep["id"]) == int(drop["id"]):
+        raise HTTPException(400, detail={"message": "Это тот же аккаунт"})
+    # заблокированный аккаунт/ключ объединять нельзя
+    if subscription_status_for_user(drop) in ("banned", "blocked"):
+        raise HTTPException(409, detail={"message": "Второй аккаунт заблокирован — объединить нельзя. Напишите в поддержку."})
+    if subscription_status_for_user(keep) in ("banned", "blocked"):
+        raise HTTPException(409, detail={"message": "Этот аккаунт заблокирован — объединить нельзя. Напишите в поддержку."})
+    ks, ds = _live_any_sub(int(keep["id"])), _live_any_sub(int(drop["id"]))
+    kl, dl = _sub_left(ks), _sub_left(ds)
+    kd = int((ks or {}).get("devices_limit") or 0)
+    dd = int((ds or {}).get("devices_limit") or 0)
+    total = _merged_left(ks, ds)
+    devices = max(kd, dd)
+    fmt_side = lambda s, left, dev: (f"{_days_str(left)}, {dev} {_dev_word(dev)}" if s else "нет подписки")
+    lines = [
+        f"Этот аккаунт: {fmt_side(ks, kl, kd)}",
+        f"Второй аккаунт: {fmt_side(ds, dl, dd)}",
+    ]
+    if ks or ds:
+        lines.append(f"Станет: {_days_str(total)}, {devices} {_dev_word(devices)}")
+    bal = float(drop.get("partner_balance") or 0)
+    if bal > 0:
+        lines.append(f"Реферальный баланс второго аккаунта ({bal:.2f} ₽) перейдёт сюда".replace(".00", ""))
+    # ссылка подписки drop перестанет работать, если keep уже имеет свою
+    link_changes = bool(ks and ds)
+    if link_changes:
+        lines.append("Подписку второго аккаунта нужно будет заново добавить в VPN-приложение")
+    lines.append("Платежи, история и друзья переедут сюда, второй аккаунт удалится")
+    return {
+        "merge": True,
+        "other": {"id": drop["id"], "label": _user_label(drop)},
+        "keep": {"days": round(kl.total_seconds() / 86400, 1), "devices": kd, "has_sub": bool(ks)},
+        "drop": {"days": round(dl.total_seconds() / 86400, 1), "devices": dd, "has_sub": bool(ds)},
+        "result": {"days": round(total.total_seconds() / 86400, 1), "devices": devices},
+        "link_changes": link_changes,
+        "balance": round(bal, 2),
+        "text": "\n".join(lines),
+    }
+
+
+def merge_accounts(keep_id: int, drop_id: int) -> dict[str, Any]:
+    """переносит всё с drop на keep и удаляет drop."""
+    keep, drop = get_user(keep_id), get_user(drop_id)
+    if not keep or not drop:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    if projects.of(keep) != projects.of(drop):
+        raise HTTPException(400, detail={"message": "Объединять можно только аккаунты одного проекта"})
+    preview = merge_preview(keep, drop)
+    now = utcnow()
+    ks, ds = _live_any_sub(keep_id), _live_any_sub(drop_id)
+    client, rw_keep = _rw_find_user(keep)
+    _, rw_drop = _rw_find_user(drop)
+
+    final_sub_id: Optional[int] = None
+    with db.transaction():
+        if ks and ds:
+            # оплаченное время складывается, пробное нет
+            new_exp = now + _merged_left(ks, ds)
+            dev = max(int(ks.get("devices_limit") or 1), int(ds.get("devices_limit") or 1))
+            to_paid = ks.get("type") == "trial" and ds.get("type") != "trial"
+            # запрет продления, если был хотя бы на одной
+            no_renew = 1 if (ks.get("no_renew") or ds.get("no_renew")) else 0
+            db.execute("UPDATE subscriptions SET no_renew = ? WHERE id = ?", (no_renew, ks["id"]))
+            db.execute(
+                "UPDATE subscriptions SET expires_at = ?, devices_limit = ?, status = 'Active'"
+                + (", type = 'vpn', traffic_limit = ?, squads_json = ?" if to_paid else "") + " WHERE id = ?",
+                ((iso(new_exp), dev, ds.get("traffic_limit"), ds.get("squads_json"), ks["id"]) if to_paid
+                 else (iso(new_exp), dev, ks["id"])),
+            )
+            db.execute("UPDATE subscriptions SET status = 'Deleted', deleted_at = ? WHERE id = ?", (iso(now), ds["id"]))
+            final_sub_id = int(ks["id"])
+        elif ds:
+            # подписка только у drop: переезжает целиком
+            db.execute("UPDATE subscriptions SET status = 'Deleted', deleted_at = ? "
+                       "WHERE user_id = ? AND status != 'Deleted'", (iso(now), keep_id))
+            final_sub_id = int(ds["id"])
+        elif ks:
+            final_sub_id = int(ks["id"])
+        # компенсации (и неиспользованная скидка) переходят на keep
+        db.execute("UPDATE compensations SET user_id = ? WHERE user_id = ?", (keep_id, drop_id))
+        # переписку поддержки сливаем в один чат
+        kc = db.fetchone("SELECT id FROM support_chats WHERE user_id = ?", (keep_id,))
+        dc = db.fetchone("SELECT id FROM support_chats WHERE user_id = ?", (drop_id,))
+        if kc and dc:
+            # обращения drop после keep; открытым остаётся одно
+            shift = int(db.fetchone("SELECT COALESCE(MAX(number), 0) AS n FROM support_tickets WHERE chat_id = ?", (kc["id"],))["n"])
+            db.execute("UPDATE support_tickets SET chat_id = ?, number = number + ? WHERE chat_id = ?", (kc["id"], shift, dc["id"]))
+            kopen = db.fetchone("SELECT open_ticket_id FROM support_chats WHERE id = ?", (kc["id"],))["open_ticket_id"]
+            dopen = db.fetchone("SELECT open_ticket_id FROM support_chats WHERE id = ?", (dc["id"],))["open_ticket_id"]
+            if dopen and kopen:
+                db.execute("UPDATE support_tickets SET status = 'closed', closed_at = ?, closed_by = 'объединение' WHERE id = ?",
+                           (iso(), dopen))
+            elif dopen:
+                db.execute("UPDATE support_chats SET open_ticket_id = ? WHERE id = ?", (dopen, kc["id"]))
+            db.execute("UPDATE support_messages SET chat_id = ? WHERE chat_id = ?", (kc["id"], dc["id"]))
+            db.execute("UPDATE support_files SET chat_id = ? WHERE chat_id = ?", (kc["id"], dc["id"]))
+            db.execute("UPDATE support_chats SET unread_admin = unread_admin + (SELECT unread_admin FROM support_chats "
+                       "WHERE id = ?), last_message_at = MAX(COALESCE(last_message_at, ''), COALESCE((SELECT last_message_at "
+                       "FROM support_chats WHERE id = ?), '')) WHERE id = ?", (dc["id"], dc["id"], kc["id"]))
+            db.execute("DELETE FROM support_chats WHERE id = ?", (dc["id"],))
+        # строки drop -> keep
+        # база разделена по проектам: таблицы проекта (subscriptions, payments, support…) в sqlite_master не видны —
+        # это временные представления. Без них строки drop не переезжали и удалялись вместе с ним (ключ пропадал)
+        tables = [r["name"] for r in db.fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        try:
+            tables += [r["name"] for r in db.fetchall("SELECT name FROM sqlite_temp_master WHERE type = 'view'")
+                       if r["name"] not in tables]
+        except Exception:  # noqa: BLE001
+            pass
+        for t in tables:
+            cols = {c["name"] for c in db.fetchall(f"PRAGMA table_info({t})")}
+            if "user_id" in cols and t != "users":
+                db.execute(f"UPDATE OR IGNORE {t} SET user_id = ? WHERE user_id = ?", (keep_id, drop_id))
+                db.execute(f"DELETE FROM {t} WHERE user_id = ?", (drop_id,))
+        db.execute("UPDATE users SET referred_by = ? WHERE referred_by = ? AND id != ?", (keep_id, drop_id, keep_id))
+        db.execute(
+            "UPDATE users SET balance = balance + ?, partner_balance = partner_balance + ?, "
+            "partner_rate = MAX(partner_rate, ?), is_partner = MAX(is_partner, ?), "
+            "terms_accepted_at = COALESCE(terms_accepted_at, ?), "
+            "referred_by = COALESCE(referred_by, CASE WHEN ? = id THEN NULL ELSE ? END), "
+            "tracking_code = COALESCE(tracking_code, ?) WHERE id = ?",
+            (float(drop.get("balance") or 0), float(drop.get("partner_balance") or 0),
+             float(drop.get("partner_rate") or 0), int(drop.get("is_partner") or 0), drop.get("terms_accepted_at"),
+             drop.get("referred_by"), drop.get("referred_by"), drop.get("tracking_code"), keep_id),
+        )
+        drop_tg, drop_email = drop.get("telegram_id"), drop.get("email")
+        # семья: семью drop не переносим (участники не должны получить чужую подписку),
+        # а его участие переходит на keep, если тот ещё ни в чьей семье
+        db.execute("DELETE FROM family_members WHERE owner_id = ?", (drop_id,))
+        db.execute("DELETE FROM family_codes WHERE owner_id = ?", (drop_id,))
+        db.execute("DELETE FROM family_members WHERE member_id = ? AND status != 'active'", (drop_id,))
+        if db.fetchone("SELECT 1 FROM family_members WHERE member_id = ? AND status = 'active'", (keep_id,)):
+            db.execute("DELETE FROM family_members WHERE member_id = ?", (drop_id,))
+        else:
+            db.execute("UPDATE OR IGNORE family_members SET member_id = ? WHERE member_id = ?", (keep_id, drop_id))
+            db.execute("DELETE FROM family_members WHERE member_id = ?", (drop_id,))
+        db.execute("DELETE FROM users WHERE id = ?", (drop_id,))
+        # недостающие способы входа с drop
+        if drop_tg and not keep.get("telegram_id"):
+            db.execute("UPDATE users SET telegram_id = ?, username = COALESCE(username, ?) WHERE id = ?",
+                       (drop_tg, drop.get("username"), keep_id))
+        if drop_email and not keep.get("email"):
+            db.execute("UPDATE users SET email = ? WHERE id = ?", (drop_email, keep_id))
+
+    # remnawave: один юзер на итоговую подписку
+    fresh = get_user(keep_id) or keep
+    if client:
+        try:
+            final = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (final_sub_id,)) if final_sub_id else None
+            keep_rw_id = _rw_num_id(rw_keep) if rw_keep else None
+            drop_rw_id = _rw_num_id(rw_drop) if rw_drop else None
+            if keep_rw_id and drop_rw_id == keep_rw_id:
+                drop_rw_id = None  # нашли одного и того же rw-юзера (по tg/почте) — удалять нечего
+            # какой ключ (rw-юзер) остаётся: тот, чья подписка осталась. Иначе живой ключ удалялся:
+            # подписка была на почтовом аккаунте, а у Telegram-аккаунта завалялся старый rw-юзер (прошлый пробный) —
+            # удаляли рабочий ключ с почты и продлевали старый, ссылка в VPN-приложении переставала работать
+            sub_from_drop = bool(final and ds and not ks)
+            if sub_from_drop and drop_rw_id:
+                survivor, extra_rw = drop_rw_id, keep_rw_id
+            elif keep_rw_id:
+                survivor, extra_rw = keep_rw_id, drop_rw_id
+            else:
+                survivor, extra_rw = drop_rw_id, None  # у keep rw-юзера нет — забираем ключ drop, а не удаляем
+            if extra_rw:
+                client.delete_user(extra_rw)
+            if survivor and survivor != keep_rw_id:
+                # ключ переезжает на keep. Наш ключ ищется ТОЛЬКО по имени <проект>_<id> или по привязке
+                # rw_legacy_users — имя у него остаётся от drop, поэтому пишем привязку на keep,
+                # иначе ключ «терялся» и при следующей выдаче создавался новый (ссылка в VPN-приложении менялась)
+                srw = rw_drop if survivor == drop_rw_id else rw_keep
+                sname = str((srw or {}).get("username") or "")
+                if sname and sname not in provisioning.own_names(int(keep_id)):
+                    db.execute("DELETE FROM rw_legacy_users WHERE user_id = ? OR rw_id = ? OR username = ?",
+                               (keep_id, survivor, sname))
+                    db.execute("INSERT INTO rw_legacy_users (user_id, rw_id, username, short_uuid, source, created_at) "
+                               "VALUES (?, ?, ?, ?, 'merge', ?)",
+                               (keep_id, survivor, sname, (srw or {}).get("shortUuid") or (srw or {}).get("short_uuid"),
+                                db.utcnow_iso()))
+                # описание = id, tg, почта
+                patch: dict[str, Any] = {"id": survivor, "description": str(keep_id)}
+                if fresh.get("telegram_id"):
+                    patch["telegram_id"] = int(fresh["telegram_id"])
+                if fresh.get("email"):
+                    patch["email"] = fresh["email"]
+                client.update_user(**patch)
+            if final and survivor:
+                upd: dict[str, Any] = {}
+                if final.get("type") != "trial":  # стала платной → лимит и сквады платной, а не пробной
+                    upd["traffic_limit_bytes"] = int(final.get("traffic_limit") or 0) * fulfillment.GB
+                    sq = db.loads(final.get("squads_json"), []) or fulfillment.vpn_squads()
+                    if sq:
+                        upd["active_internal_squads"] = sq
+                updated = client.update_user(id=survivor, expire_at=parse_iso(final["expires_at"]),
+                                             hwid_device_limit=int(final.get("devices_limit") or 1), status="ACTIVE",
+                                             email=fresh.get("email") or None, **upd)
+                # подписка в базе показывает ссылку именно оставшегося ключа (тот, что уже стоит у человека)
+                srw2 = updated if isinstance(updated, dict) and updated else (rw_drop if survivor == drop_rw_id else rw_keep)
+                if isinstance(srw2, dict):
+                    f = provisioning._extract(srw2)
+                    url = client.subscription_url_for(srw2, public_base=os.environ.get("REMWAVE_SUB_PUBLIC_URL") or None)
+                    db.execute("UPDATE subscriptions SET rw_id = COALESCE(?, rw_id), short_uuid = COALESCE(?, short_uuid), "
+                               "key_config = COALESCE(?, key_config) WHERE id = ?",
+                               (f.get("rw_id"), f.get("short_uuid"), url, final["id"]))
+            elif final:
+                _rw_sync_expiry(fresh)
+        except Exception as exc:  # noqa: BLE001
+            forum.report_error("Объединение аккаунтов: не удалось обновить Remnawave",
+                               f"keep={keep_id} drop={drop_id}: {type(exc).__name__}: {exc}")
+    sync_user_status_from_subs(keep_id)
+    # мог получить tg drop: ещё раз чёрный список
+    _enforce_blacklist(get_user(keep_id) or fresh)
+    try:
+        forum.send("errors", f"🔗 Аккаунты объединены: #{drop_id} → {forum.user_link(keep_id)}")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"merged": True, **preview}
+
+
+# ── компенсация: +1 день к подписке (если есть, даже истёкшей) и разовая скидка 7% на следующую покупку ──
+# одному пользователю — любой сотрудник (и поддержка), всем — только админ и куратор
+COMPENSATION_COOLDOWN_SEC = 600  # защита от двойного нажатия
+_mass_comp_running: set[str] = set()  # проекты, где сейчас идёт компенсация всем
+_mass_comp_lock = threading.Lock()
+
+
+class CompensateBody(BaseModel):
+    notify: bool = True
+
+
+def _compensation_text(days_applied: bool) -> str:
+    pct = f"{services.COMPENSATION_PERCENT:g}%"
+    gift = (f"+{_days_ru(services.COMPENSATION_DAYS)} к подписке и скидку {pct} на следующую покупку" if days_applied
+            else f"скидку {pct} на следующую покупку")
+    return f"🎁 Компенсация от {P().name}: дарим {gift}. Спасибо, что остаётесь с нами!"
+
+
+def _compensate_user(user: dict[str, Any], p: dict[str, Any], *, mass: bool = False) -> dict[str, Any]:
+    """начислить компенсацию: дни — к последней подписке (истёкшая оживает на день), скидка — на одну покупку."""
+    uid = int(user["id"])
+    days = services.COMPENSATION_DAYS
+    sub = db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND status NOT IN ('Deleted', 'Banned') AND expires_at IS NOT NULL "
+        "ORDER BY expires_at DESC, id DESC LIMIT 1", (uid,))
+    until = None
+    if sub:
+        now = utcnow()
+        base = parse_iso(sub.get("expires_at")) or now
+        new_exp = max(base, now) + timedelta(days=days)
+        db.execute("UPDATE subscriptions SET expires_at = ?, status = 'Active' WHERE id = ?", (iso(new_exp), sub["id"]))
+        until = iso(new_exp)
+        sync_user_status_from_subs(uid)
+        _rw_sync_expiry(get_user(uid) or user)
+    cid = services.record_compensation(uid, days=days, days_applied=bool(sub), percent=services.COMPENSATION_PERCENT,
+                                       mass=mass, actor=p.get("actor"), actor_name=p.get("name"))
+    return {"id": cid, "days_applied": bool(sub), "days": days if sub else 0, "expires_at": until,
+            "discount_percent": services.COMPENSATION_PERCENT}
+
+
+@app.post("/api/panel/users/{user_id}/compensate")
+def panel_user_compensate(user_id: int, body: Optional[CompensateBody] = None,
+                          p: dict = Depends(require_panel)) -> dict[str, Any]:
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(404, detail={"message": "Пользователь не найден"})
+    if user.get("is_banned"):
+        raise HTTPException(400, detail={"message": "Аккаунт заблокирован — компенсация не выдаётся"})
+    if services.recent_compensation(user_id, COMPENSATION_COOLDOWN_SEC):
+        raise HTTPException(409, detail={"message": "Компенсация этому пользователю уже выдана только что"})
+    res = _compensate_user(user, p)
+    delivery = _notify_user(get_user(user_id) or user, _compensation_text(res["days_applied"])) \
+        if (body is None or body.notify) else None
+    msg = (f"+{_days_ru(res['days'])} к подписке и скидка {res['discount_percent']:g}% на следующую покупку"
+           if res["days_applied"] else f"Подписки нет — выдана скидка {res['discount_percent']:g}% на следующую покупку")
+    return {"success": True, **res, "message": msg, "delivery": delivery}
+
+
+def _mass_compensate_worker(user_ids: list[int], p: dict[str, Any], notify: bool) -> None:
+    try:
+        _mass_compensate_run(user_ids, p, notify)
+    finally:
+        with _mass_comp_lock:
+            _mass_comp_running.discard(db.pid())
+
+
+def _mass_compensate_run(user_ids: list[int], p: dict[str, Any], notify: bool) -> None:
+    done = with_days = sent = failed = 0
+    for uid in user_ids:
+        try:
+            user = get_user(uid)
+            if not user or user.get("is_banned"):
+                continue
+            res = _compensate_user(user, p, mass=True)
+            done += 1
+            with_days += 1 if res["days_applied"] else 0
+            if notify and user.get("telegram_id"):
+                if _notify_user(get_user(uid) or user, _compensation_text(res["days_applied"])).get("telegram"):
+                    sent += 1
+                time.sleep(0.05)  # лимит Telegram ~30 сообщений/сек
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            print(f"[compensation] user {uid}: {type(exc).__name__}: {exc}", flush=True)
+    summary = (f"{P().name}: компенсация выдана {done} пользователям (дни — {with_days}), "
+               f"уведомлений {sent}{f', ошибок {failed}' if failed else ''}")
+    print(f"[compensation] {summary}", flush=True)
+    try:
+        forum.send("errors", f"🎁 {_esc_html(summary)} · {_esc_html(p.get('name') or '')}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@app.post("/api/panel/users/mass-compensate")
+def panel_mass_compensate(body: Optional[CompensateBody] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    if p.get("role") not in ("owner", "curator") and not admin_has(p, "users.mass"):
+        raise HTTPException(403, detail={"message": "Компенсацию всем выдают только администратор и куратор"})
+    since = iso(utcnow() - timedelta(seconds=COMPENSATION_COOLDOWN_SEC))
+    busy = HTTPException(409, detail={"message": "Компенсация всем уже выдаётся — подождите несколько минут"})
+    with _mass_comp_lock:
+        if db.pid() in _mass_comp_running or db.fetchone(
+                "SELECT 1 FROM compensations WHERE mass = 1 AND project_id = ? AND created_at > ? LIMIT 1", (db.pid(), since)):
+            raise busy
+        _mass_comp_running.add(db.pid())
+    rows = db.fetchall("SELECT id FROM users WHERE project_id = ? AND COALESCE(is_banned, 0) = 0 ORDER BY id", (db.pid(),))
+    ids = [int(r["id"]) for r in rows]
+    notify = body is None or body.notify
+    threading.Thread(target=projects.bind(_mass_compensate_worker), args=(ids, dict(p), notify),
+                     name="mass-compensate", daemon=True).start()
+    return {"success": True, "affected": len(ids), "background": True,
+            "message": f"Компенсация {len(ids)} пользователям {P().name} — выполняется в фоне"}
+
+
+@app.post("/api/panel/users/mass-action")
+def panel_mass_action(body: MassActionBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    action = body.action.upper()
+    if action not in MASS_ACTIONS:
+        raise HTTPException(400, detail={"message": f"Неизвестное массовое действие: {action}"})
+
+    if action == "MASS_ADD_DAYS":
+        try:
+            days = int(float(body.value))
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail={"message": "Укажите число дней"})
+        if not 1 <= days <= 365:
+            raise HTTPException(400, detail={"message": "Дней: от 1 до 365"})
+        # только действующие подписки; истёкшие не оживляем
+        rows = db.fetchall(
+            "SELECT id FROM subscriptions WHERE status = 'Active' AND (expires_at IS NULL OR expires_at > ?) "
+            "AND project_id = ?",
+            (iso(), db.pid()),
+        )
+        ids = [int(r["id"]) for r in rows]
+        threading.Thread(target=projects.bind(_mass_add_days_worker), args=(ids, days), daemon=True).start()
+        return {"success": True, "affected": len(ids), "background": True,
+                "message": f"Продлеваем {len(ids)} подписок на {days} дн. — выполняется в фоне"}
+
+    if action == "MASS_RESET_TRAFFIC":
+        client = _rw_client()
+        if not client:
+            raise HTTPException(400, detail={"message": "Remnawave не настроена"})
+        # не bulk_all_reset_traffic: он сбросил бы трафик всей панели (user_… и чужим тоже)
+        affected = int((db.fetchone("SELECT COUNT(*) AS c FROM subscriptions WHERE status != 'Deleted' AND project_id = ?",
+                                    (db.pid(),)) or {}).get("c") or 0)
+        threading.Thread(target=projects.bind(_mass_reset_traffic_worker), name="mass-reset-traffic", daemon=True).start()
+        return {"success": True, "affected": affected, "background": True,
+                "message": f"Сбрасываем трафик у пользователей {P().name} — выполняется в фоне"}
+
+    # mass_reset_trial: разрешить пробный снова после окончания
+    # действующие пробные не трогаем
+    now_iso = iso()
+    rows = db.fetchall(
+        "SELECT DISTINCT user_id FROM subscriptions WHERE type = 'trial' "
+        "AND NOT (status = 'Active' AND (expires_at IS NULL OR expires_at > ?)) AND project_id = ?",
+        (now_iso, db.pid()),
+    )
+    db.execute(
+        "DELETE FROM subscriptions WHERE type = 'trial' "
+        "AND NOT (status = 'Active' AND (expires_at IS NULL OR expires_at > ?)) AND project_id = ?",
+        (now_iso, db.pid()),
+    )
+    for r in rows:
+        _clear_trial_claim(int(r["user_id"]))
+        sync_user_status_from_subs(int(r["user_id"]))
+    return {"success": True, "affected": len(rows)}
+
+
+@app.get("/api/panel/keys")
+def panel_keys(
+    limit: int = Query(100),
+    offset: int = Query(0),
+    page: int = Query(1),
+    search: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    _: dict = Depends(require_panel),
+) -> dict[str, Any]:
+    # фильтр и страница — в SQL: раньше сериализовались все подписки проекта (на FGN — сотни тысяч, по запросу на каждую)
+    where = ["s.project_id = ?"]
+    args: list[Any] = [db.pid()]
+    if status and status != "all":
+        where.append("LOWER(s.status) = ?")
+        args.append(status.lower())
+    needle = (search or q or "").lower().lstrip("@")
+    if needle:
+        label = ("CASE WHEN COALESCE(u.username, '') != '' THEN '@' || u.username "
+                 "WHEN COALESCE(u.telegram_id, 0) != 0 THEN 'id' || u.telegram_id "
+                 "WHEN COALESCE(u.email, '') != '' THEN u.email "
+                 "WHEN u.id IS NOT NULL THEN '#' || u.id ELSE '' END")
+        where.append(f"instr(LOWER(COALESCE(s.key_uuid, '') || ' ' || ({label}) || ' ' || COALESCE(s.user_id, '') || ' ' "
+                     f"|| COALESCE(s.short_uuid, '')), ?) > 0")
+        args.append(needle)
+    cond = " AND ".join(where)
+    join = "LEFT JOIN users u ON u.id = s.user_id" if needle else ""
+    total = int((db.fetchone(f"SELECT COUNT(*) AS c FROM subscriptions s {join} WHERE {cond}", tuple(args)) or {}).get("c") or 0)
+    limit = max(1, min(int(limit), 500))
+    off = max(0, int(offset if offset else (page - 1) * limit))
+    rows = db.fetchall(f"SELECT s.* FROM subscriptions s {join} WHERE {cond} ORDER BY s.id DESC LIMIT ? OFFSET ?",
+                       (*args, limit, off))
+    uids = sorted({int(r["user_id"]) for r in rows if r.get("user_id")})
+    owners: dict[int, dict[str, Any]] = {}
+    if uids:
+        owners = {int(u["id"]): u for u in db.fetchall(
+            f"SELECT * FROM users WHERE id IN ({','.join('?' * len(uids))})", tuple(uids))}
+    items = []
+    for k in rows:
+        u = owners.get(int(k["user_id"])) if k.get("user_id") else None
+        items.append(serialize_key(k, u) if u else serialize_key(k))
+    page_data = {"items": items, "total": total}
+    return {"items": page_data["items"], "total": page_data["total"]}
+
+
+@app.post("/api/panel/keys")
+def panel_create_key(body: CreateKeyBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    owner = get_user(body.user_id)
+    # пользователь — только из открытого проекта (иначе ключ выдался бы в чужом проекте)
+    if not owner or projects.of(owner) != db.pid():
+        raise HTTPException(404, detail="User not found")
+    key = create_key(
+        user_id=body.user_id,
+        days=body.days,
+        traffic=body.traffic,
+        devices=body.devices,
+        is_trial=body.is_trial,
+        is_forever=body.is_forever,
+        squads=body.squads,
+        custom_name=body.custom_name,
+    )
+    return serialize_key(key)
+
+
+@app.post("/api/panel/keys/{key_id}/block")
+def panel_block_key(key_id: int, body: BlockKeyBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    key = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (key_id,))
+    if not key:
+        raise HTTPException(404, detail="Key not found")
+    # та же запись, что block_key/unblock_key в карточке
+    if body.blocked:
+        db.execute("UPDATE subscriptions SET status = 'Banned', ban_reason = 'Заблокирована вручную', banned_at = ? WHERE id = ?",
+                   (db.utcnow_iso(), key_id))
+        moderation.log(int(key["user_id"]), "key_block", "Заблокирована вручную", sub_id=int(key_id),
+                       actor=p.get("actor") or "owner", actor_name=p.get("name"))
+    else:
+        db.execute("UPDATE subscriptions SET status = 'Active', ban_reason = NULL, banned_at = NULL, aa_warned_at = NULL WHERE id = ?",
+                   (key_id,))
+        if key.get("status") == "Banned":
+            moderation.log(int(key["user_id"]), "key_unblock", None, sub_id=int(key_id),
+                           actor=p.get("actor") or "owner", actor_name=p.get("name"))
+    owner = get_user(int(key["user_id"]))
+    if owner:
+        _rw_set_enabled(owner, not body.blocked)
+        sync_user_status_from_subs(int(owner["id"]))
+    key = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (key_id,))
+    assert key is not None
+    return serialize_key(key)
+
+
+@app.get("/api/panel/mailing/stats")
+def panel_mailing_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    row = db.fetchone("SELECT COALESCE(SUM(sent_count), 0) AS s FROM mailings WHERE project_id = ?", (db.pid(),))
+    return {"totalSent": int(row["s"]) if row else 0}
+
+
+@app.get("/api/panel/mailing/history")
+def panel_mailing_history(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
+    items = db.fetchall("SELECT * FROM mailings WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    return [serialize_mailing(m) for m in items]
+
+
+MAILING_TARGETS = ("all", "active", "expired", "no_subscription", "not_connected", "no_trial")
+
+
+def _mailing_recipients(target: str) -> list[dict[str, Any]]:
+    """получатели рассылки.
+
+    Участник семьи (своей подписки нет, пользуется подпиской владельца) считается подписчиком семьи:
+    ему уходят только рассылки «Активные» — в «Все», «Истёкшие» и «Без подписки» он не попадает
+    (иначе ему прилетают акции «купи со скидкой», хотя VPN у него работает).
+    not_connected — своя подписка (пробная или купленная) действует, но ни одно устройство не подключалось.
+    """
+    users = db.fetchall("SELECT * FROM users WHERE COALESCE(is_banned, 0) = 0 AND project_id = ?", (db.pid(),))
+    fam_ids = {int(r["member_id"]) for r in db.fetchall(
+        "SELECT f.member_id FROM family_members f JOIN users u ON u.id = f.member_id "
+        "WHERE f.status = 'active' AND u.project_id = ?", (db.pid(),)) if r.get("member_id")}
+
+    def state(u: dict[str, Any]) -> str:
+        st = subscription_status_for_user(u)
+        if st in ("active", "trial"):
+            return "own_" + st
+        if int(u["id"]) in fam_ids and family_owner_for(u):
+            return "family"
+        return st
+
+    marked = [(u, state(u)) for u in users]
+    if target == "active":
+        return [u for u, st in marked if st in ("own_active", "own_trial", "family")]
+    if target == "expired":
+        return [u for u, st in marked if st == "expired"]
+    if target == "no_subscription":
+        return [u for u, st in marked if st in ("never", "lapsed")]
+    if target == "not_connected":
+        own = [u for u, st in marked if st in ("own_active", "own_trial")]
+        connected = provisioning.connected_user_ids(db.pid())
+        if connected is None:
+            raise HTTPException(503, detail={"message": "Remnawave не отвечает — не проверить, кто подключался. Попробуйте позже"})
+        out = []
+        for u in own:
+            if int(u["id"]) in connected:
+                continue
+            # в общем списке нет признаков подключения — уточняем по устройствам (HWID)
+            ever = provisioning.user_ever_connected(int(u.get("telegram_id") or 0), u.get("email"))
+            if ever is False:
+                out.append(u)
+        return out
+    if target == "no_trial":
+        # не брали пробный и ещё могут его взять (как кнопка «Пробный» в мини-приложении): нет подписок,
+        # не было платной, этот Telegram не брал пробный; «сброс пробного» из панели — мешает только живая подписка
+        pid = db.pid()
+        any_sub = {int(r["user_id"]) for r in db.fetchall(
+            "SELECT DISTINCT s.user_id FROM subscriptions s JOIN users u ON u.id = s.user_id "
+            "WHERE u.project_id = ? AND s.status != 'Deleted'", (pid,))}
+        paid = {int(r["user_id"]) for r in db.fetchall(
+            "SELECT DISTINCT s.user_id FROM subscriptions s JOIN users u ON u.id = s.user_id "
+            "WHERE u.project_id = ? AND s.type != 'trial'", (pid,))}
+        live = {int(r["user_id"]) for r in db.fetchall(
+            "SELECT DISTINCT s.user_id FROM subscriptions s JOIN users u ON u.id = s.user_id WHERE u.project_id = ? "
+            "AND s.status IN ('Active', 'Banned') AND (s.expires_at IS NULL OR s.expires_at > ?)", (pid, iso()))}
+        claimed = {int(r["telegram_id"]) for r in db.fetchall(
+            "SELECT telegram_id FROM trial_claims WHERE project_id = ?", (pid,)) if r.get("telegram_id")}
+
+        def can_trial(u: dict[str, Any]) -> bool:
+            uid = int(u["id"])
+            if int(u.get("trial_reset") or 0):
+                return uid not in live
+            if uid in any_sub or uid in paid:
+                return False
+            return not (u.get("telegram_id") and int(u["telegram_id"]) in claimed)
+
+        return [u for u, st in marked if st != "family" and can_trial(u)]
+    # «Все» — без участников семьи
+    return [u for u, st in marked if st != "family"]
+
+
+def _email_html_from_message(msg: str) -> str:
+    """разметка рассылки -> html для письма."""
+    import re
+    text = _esc_html(msg)
+    text = re.sub(r"!\[(\d+)\]", "", text)  # премиум-эмодзи в письме не нужны
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.S)
+    text = re.sub(r"`([^`]+?)`", r"<code>\1</code>", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text, flags=re.S)
+    return text.replace("\n", "<br>")
+
+
+# параллельная рассылка, общий лимитер (~30 msg/s)
+BROADCAST_RATE = max(1, _env_int("BROADCAST_RATE", 25))       # сообщений/сек
+BROADCAST_WORKERS = max(1, _env_int("BROADCAST_WORKERS", 8))  # параллельных отправок
+
+
+class _RateLimiter:
+    """потокобезопасный лимитер с адаптацией под 429."""
+
+    def __init__(self, rate_per_sec: float, min_rate: float = 5.0) -> None:
+        base = 1.0 / max(0.1, float(rate_per_sec))
+        self._min_interval = base                       # самый быстрый темп (база)
+        self._max_interval = 1.0 / max(0.1, float(min_rate))  # самый медленный
+        self._interval = base
+        self._lock = threading.Lock()
+        self._next = time.monotonic()
+        self._ok_since = 0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            start = self._next if self._next > now else now
+            self._next = start + self._interval
+            wait = start - now
+            # плавное восстановление скорости после успехов
+            self._ok_since += 1
+            if self._ok_since >= 300 and self._interval > self._min_interval:
+                self._interval = max(self._min_interval, self._interval * 0.9)
+                self._ok_since = 0
+        if wait > 0:
+            time.sleep(wait)
+
+    def throttle(self, retry_after: Optional[float] = None) -> None:
+        """telegram 429: снижаем скорость, пауза retry_after."""
+        with self._lock:
+            self._interval = min(self._max_interval, self._interval * 1.5)
+            self._ok_since = 0
+            if retry_after:
+                try:
+                    self._next = max(self._next, time.monotonic() + min(float(retry_after), 30))
+                except (TypeError, ValueError):
+                    pass
+
+    def current_rate(self) -> float:
+        return round(1.0 / self._interval, 1)
+
+
+def _mailing_project(mailing_id: int) -> str:
+    return projects.of(db.fetchone("SELECT project_id FROM mailings WHERE id = ?", (int(mailing_id),)))
+
+
+def _deliver_mailing(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str],
+                     start_sent: int = 0) -> None:
+    """фоновая доставка рассылки — ботом проекта рассылки."""
+    with projects.use(_mailing_project(mailing_id)):
+        _deliver_mailing_impl(mailing_id, body, recipients, channels, start_sent)
+
+
+def _deliver_mailing_impl(mailing_id: int, body: MailingBody, recipients: list[dict[str, Any]], channels: list[str],
+                          start_sent: int = 0) -> None:
+    """фоновая доставка рассылки пулом воркеров."""
+    import concurrent.futures as _fut
+
+    do_tg = "telegram" in channels
+    do_email = "email" in channels
+    subject = (body.subject or body.title or P().name).strip() or P().name
+    email_html = _email_html_from_message(body.message) if do_email else ""
+
+    limiter = _RateLimiter(BROADCAST_RATE)
+    counter = {"sent": int(start_sent or 0), "done": 0}  # start_sent — уже отправленные до перезапуска
+    lock = threading.Lock()
+    total = len(recipients)
+
+    def _send_one(u: dict[str, Any]) -> None:
+        if mailing_id in _MAILING_CANCELLED or mailing_id in _MAILING_PAUSED:
+            return  # рассылку удалили / поставили на паузу — остальных не трогаем (не отмечаем обработанными)
+        ok_any = False
+        if do_tg and u.get("telegram_id"):
+            limiter.acquire()  # общий темп только для telegram
+            chat_id = int(u["telegram_id"])
+            msg_id = notifier.send_broadcast_message(
+                chat_id, body.message,
+                image_url=body.image_url, button_type=body.button_type,
+                button_value=body.button_value, miniapp_url=P().miniapp_url, bot_username=P().bot_username,
+                on_throttle=limiter.throttle,  # 429 -> авто-снижение скорости
+            )
+            if msg_id is not None:
+                ok_any = True
+                if msg_id:
+                    # запоминаем msg_id для последующего удаления
+                    try:
+                        db.execute(
+                            "INSERT INTO mailing_messages (mailing_id, chat_id, message_id, sent_at) VALUES (?, ?, ?, ?)",
+                            (mailing_id, chat_id, int(msg_id), db.utcnow_iso()),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+        if do_email and u.get("email"):
+            try:
+                ok, _err = mailer.send_broadcast(str(u["email"]), subject, email_html, body_text=body.message)
+                ok_any = ok or ok_any
+            except Exception:  # noqa: BLE001
+                pass
+        # отметка «этот получатель обработан» — по ней «Продолжить» после перезапуска не шлёт повторно
+        try:
+            if u.get("id") is not None:
+                db.execute("INSERT OR IGNORE INTO mailing_progress (mailing_id, user_id, ok) VALUES (?, ?, ?)",
+                           (mailing_id, int(u["id"]), 1 if ok_any else 0))
+        except Exception:  # noqa: BLE001
+            pass
+        with lock:
+            if ok_any:
+                counter["sent"] += 1
+            counter["done"] += 1
+            done = counter["done"]
+            sent = counter["sent"]
+        # прогресс пишем нечасто
+        if done % 200 == 0 or done == total:
+            try:
+                db.execute("UPDATE mailings SET sent_count = ? WHERE id = ?", (sent, mailing_id))
+            except Exception:  # noqa: BLE001
+                pass
+
+    with _fut.ThreadPoolExecutor(max_workers=BROADCAST_WORKERS) as pool:
+        list(pool.map(projects.bind(_send_one), recipients))
+
+    if mailing_id in _MAILING_CANCELLED:
+        return  # удалением займётся _purge_mailing
+    if mailing_id in _MAILING_PAUSED:
+        # пауза: статус уже 'Paused', сохраняем счётчик; «Продолжить» дошлёт остальным
+        db.execute("UPDATE mailings SET sent_count = ? WHERE id = ?", (counter["sent"], mailing_id))
+        return
+    db.execute("UPDATE mailings SET sent_count = ?, status = 'Completed' WHERE id = ?",
+               (counter["sent"], mailing_id))
+
+
+# удаляемые рассылки: отправку стопаем
+_MAILING_CANCELLED: set[int] = set()
+# рассылки на паузе: воркеры пропускают оставшихся
+_MAILING_PAUSED: set[int] = set()
+
+
+@app.post("/api/panel/mailing/{mailing_id}/pause")
+def panel_mailing_pause(mailing_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """пауза: отправка останавливается; кому уже ушло — отмечено, «Продолжить» шлёт только остальным."""
+    row = db.fetchone("SELECT * FROM mailings WHERE id = ?", (mailing_id,))
+    if not row:
+        raise HTTPException(404, detail={"message": "Рассылка не найдена"})
+    db.execute("UPDATE mailings SET status = 'Paused' WHERE id = ? AND status = 'Sending'", (mailing_id,))
+    if db.changes() < 1:
+        raise HTTPException(409, detail={"message": "Поставить на паузу можно только рассылку, которая отправляется"})
+    _MAILING_PAUSED.add(mailing_id)
+    item = db.fetchone("SELECT * FROM mailings WHERE id = ?", (mailing_id,))
+    return serialize_mailing(item or row)
+_MAILING_THREADS: dict[int, "threading.Thread"] = {}
+
+
+def _purge_mailing(mailing_id: int) -> None:
+    """удаляет сообщения рассылки в telegram (ботом её проекта), потом запись."""
+    with projects.use(_mailing_project(mailing_id)):
+        _purge_mailing_impl(mailing_id)
+
+
+def _purge_mailing_impl(mailing_id: int) -> None:
+    import concurrent.futures as _fut
+
+    # ждём остановку отправки, чтобы не пропустить хвост
+    t = _MAILING_THREADS.get(mailing_id)
+    if t is not None and t.is_alive():
+        t.join(timeout=120)
+
+    rows = db.fetchall(
+        "SELECT chat_id, message_id FROM mailing_messages WHERE mailing_id = ?", (mailing_id,)
+    )
+    limiter = _RateLimiter(BROADCAST_RATE)
+    counter = {"ok": 0, "fail": 0}
+    lock = threading.Lock()
+
+    def _del_one(r: dict[str, Any]) -> None:
+        limiter.acquire()
+        ok = notifier.delete_message(int(r["chat_id"]), int(r["message_id"]), on_throttle=limiter.throttle)
+        with lock:
+            counter["ok" if ok else "fail"] += 1
+
+    if rows:
+        with _fut.ThreadPoolExecutor(max_workers=BROADCAST_WORKERS) as pool:
+            list(pool.map(projects.bind(_del_one), rows))
+
+    db.execute("DELETE FROM mailing_messages WHERE mailing_id = ?", (mailing_id,))
+    try:
+        db.execute("DELETE FROM mailing_progress WHERE mailing_id = ?", (mailing_id,))
+    except Exception:  # noqa: BLE001
+        pass
+    db.execute("DELETE FROM mailings WHERE id = ?", (mailing_id,))
+    _MAILING_CANCELLED.discard(mailing_id)
+    _MAILING_THREADS.pop(mailing_id, None)
+    print(f"[mailing] рассылка #{mailing_id} удалена: сообщений убрано {counter['ok']}, "
+          f"не удалось {counter['fail']} (старше 48 ч или чат удалён)", flush=True)
+
+
+@app.post("/api/panel/mailing")
+def panel_mailing_create(body: MailingBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    if not (body.message or "").strip():
+        raise HTTPException(400, detail={"message": "Пустое сообщение"})
+    if body.target_users not in MAILING_TARGETS:
+        raise HTTPException(400, detail={"message": "Неизвестная группа получателей"})
+    channels = [c for c in (body.channels or ["telegram"]) if c in ("telegram", "email")] or ["telegram"]
+    if "email" in channels and not mailer.is_configured():
+        raise HTTPException(400, detail={"message": "Почта не настроена (Настройки → Почта)"})
+
+    recipients = _mailing_recipients(body.target_users)
+    # кого реально достанем выбранными каналами
+    reach = [
+        u for u in recipients
+        if ("telegram" in channels and u.get("telegram_id")) or ("email" in channels and u.get("email"))
+    ]
+
+    title = body.title or (body.message[:40] + ("…" if len(body.message) > 40 else ""))
+    now = db.utcnow_iso()
+    status = "Sending" if reach else "Completed"
+    db.execute(
+        "INSERT INTO mailings (title, message_text, target_users, status, sent_count, "
+        "button_type, button_value, image_url, channel, subject, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+        (
+            title, body.message, body.target_users, status,
+            body.button_type, body.button_value, body.image_url,
+            "+".join(channels), (body.subject or None), now,
+        ),
+    )
+    mailing_id = db.last_id()
+
+    if reach:
+        t = threading.Thread(
+            target=_deliver_mailing,
+            args=(mailing_id, body, reach, channels),
+            name=f"mailing-{mailing_id}",
+            daemon=True,
+        )
+        _MAILING_THREADS[mailing_id] = t
+        t.start()
+
+    item = db.fetchone("SELECT * FROM mailings WHERE id = ?", (mailing_id,))
+    assert item is not None
+    result = serialize_mailing(item)
+    result["recipients_total"] = len(reach)
+    return result
+
+
+@app.post("/api/panel/mailing/{mailing_id}/resume")
+def panel_mailing_resume(mailing_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """продолжить рассылку — с паузы или прерванную перезапуском: шлём только тем, кому ещё не отправляли."""
+    row = db.fetchone("SELECT * FROM mailings WHERE id = ?", (mailing_id,))
+    if not row:
+        raise HTTPException(404, detail={"message": "Рассылка не найдена"})
+    prev_status = row.get("status")
+    if prev_status not in ("Interrupted", "Paused"):
+        raise HTTPException(409, detail={"message": "Продолжить можно только рассылку на паузе или прерванную"})
+    t = _MAILING_THREADS.get(mailing_id)
+    if t is not None and t.is_alive():
+        raise HTTPException(409, detail={"message": "Рассылка ещё останавливается — подождите пару секунд и нажмите снова"})
+
+    channels = [c for c in str(row.get("channel") or "telegram").split("+") if c in ("telegram", "email")] or ["telegram"]
+    done_ids = {int(r["user_id"]) for r in db.fetchall(
+        "SELECT user_id FROM mailing_progress WHERE mailing_id = ?", (mailing_id,))}
+    note = ""
+    if done_ids or prev_status == "Paused":  # с паузы прогресс точно отмечался (даже если ещё никому не ушло)
+        start_sent = int((db.fetchone(
+            "SELECT COUNT(*) AS n FROM mailing_progress WHERE mailing_id = ? AND ok = 1", (mailing_id,)) or {}).get("n") or 0)
+        skip = lambda u: int(u["id"]) in done_ids  # noqa: E731
+    else:
+        # рассылка запущена до обновления: обработанных не отмечали — пропускаем тех, кому ушло в Telegram
+        start_sent = int(row.get("sent_count") or 0)
+        sent_chats = {int(r["chat_id"]) for r in db.fetchall(
+            "SELECT chat_id FROM mailing_messages WHERE mailing_id = ?", (mailing_id,))}
+        if "email" in channels:
+            # кому ушли письма — неизвестно, повторно слать почту нельзя
+            channels = [c for c in channels if c != "email"]
+            note = "Письма не продолжены: для старой рассылки неизвестно, кому они уже ушли"
+            if not channels:
+                raise HTTPException(409, detail={"message": "Эту email-рассылку продолжить нельзя: "
+                                                           "она запущена до обновления, неизвестно, кому письма уже ушли"})
+        skip = lambda u: bool(u.get("telegram_id")) and int(u["telegram_id"]) in sent_chats  # noqa: E731
+
+    if "email" in channels and not mailer.is_configured():
+        raise HTTPException(400, detail={"message": "Почта не настроена (Настройки → Почта)"})
+
+    recipients = _mailing_recipients(str(row.get("target_users") or "all"))
+    reach = [
+        u for u in recipients
+        if (("telegram" in channels and u.get("telegram_id")) or ("email" in channels and u.get("email")))
+        and not skip(u)
+    ]
+
+    # захват атомарно: двойной клик не запустит две отправки
+    db.execute("UPDATE mailings SET status = 'Sending' WHERE id = ? AND status = ?", (mailing_id, prev_status))
+    if db.changes() < 1:
+        raise HTTPException(409, detail={"message": "Рассылка уже продолжается"})
+    _MAILING_CANCELLED.discard(mailing_id)
+    _MAILING_PAUSED.discard(mailing_id)
+
+    if not reach:
+        db.execute("UPDATE mailings SET status = 'Completed', sent_count = ? WHERE id = ?", (start_sent, mailing_id))
+    else:
+        body = MailingBody(
+            message=str(row.get("message_text") or ""),
+            target_users=str(row.get("target_users") or "all"),
+            title=row.get("title"),
+            button_type=row.get("button_type"),
+            button_value=row.get("button_value"),
+            image_url=row.get("image_url"),
+            channels=channels,
+            subject=row.get("subject"),
+        )
+        t = threading.Thread(
+            target=_deliver_mailing,
+            args=(mailing_id, body, reach, channels, start_sent),
+            name=f"mailing-{mailing_id}",
+            daemon=True,
+        )
+        _MAILING_THREADS[mailing_id] = t
+        t.start()
+
+    item = db.fetchone("SELECT * FROM mailings WHERE id = ?", (mailing_id,))
+    result = serialize_mailing(item or row)
+    result["recipients_left"] = len(reach)
+    if note:
+        result["note"] = note
+    return result
+
+
+@app.delete("/api/panel/mailing/{mailing_id}")
+def panel_mailing_delete(mailing_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    row = db.fetchone("SELECT id, status, channel FROM mailings WHERE id = ?", (mailing_id,))
+    if not row:
+        raise HTTPException(404, detail="Mailing not found")
+    if row.get("status") == "Deleting":
+        return {"success": True, "status": "Deleting"}
+    tg_count = db.fetchone(
+        "SELECT COUNT(*) AS n FROM mailing_messages WHERE mailing_id = ?", (mailing_id,)
+    )
+    _MAILING_CANCELLED.add(mailing_id)
+    db.execute("UPDATE mailings SET status = 'Deleting' WHERE id = ?", (mailing_id,))
+    threading.Thread(target=_purge_mailing, args=(mailing_id,), name=f"mailing-purge-{mailing_id}",
+                     daemon=True).start()
+    return {
+        "success": True,
+        "status": "Deleting",
+        "telegram_messages": int(tg_count["n"]) if tg_count else 0,
+        "had_email": "email" in str(row.get("channel") or ""),
+    }
+
+
+@app.get("/api/panel/promocodes/stats")
+def panel_promo_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    items = db.fetchall("SELECT * FROM promocodes WHERE project_id = ?", (db.pid(),))
+    return {
+        "total": len(items),
+        "totalUses": sum(int(p.get("uses_count") or 0) for p in items),
+        "activeCount": sum(1 for p in items if p.get("is_active")),
+    }
+
+
+@app.get("/api/panel/promocodes")
+def panel_promocodes(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
+    items = db.fetchall("SELECT * FROM promocodes WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    # системные (персональные от бота) в панели не показываем
+    return [serialize_promocode(p) for p in items if str(p.get("code") or "").upper() not in services.SYSTEM_PROMO_CODES]
+
+
+@app.post("/api/panel/promocodes")
+def panel_promo_create(body: PromocodeBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    now = db.utcnow_iso()
+    clash = db.fetchone("SELECT project_id FROM promocodes WHERE code = ?", (body.code.upper().strip(),))
+    if clash:
+        # код уникален во всей сети: промокод проекта живёт в своём проекте, но совпадать коды не могут
+        where = "" if projects.of(clash) == db.pid() else f" в проекте {projects.get(projects.of(clash)).name}"
+        raise HTTPException(409, detail={"message": f"Промокод с таким кодом уже есть{where}"})
+    ptype, pval = _promo_type_value(body)
+    db.execute(
+        "INSERT INTO promocodes (code, name, type, value, uses_limit, uses_count, expires_at, is_active, created_at, "
+        "once_per_family) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+        (
+            body.code.upper().strip(),
+            (body.name or "").strip() or None,
+            ptype,
+            pval,
+            body.uses_limit,
+            body.expires_at,
+            1 if _as_bool(body.is_active, True) else 0,
+            now,
+            1 if _as_bool(body.once_per_family, False) else 0,
+        ),
+    )
+    item = db.fetchone("SELECT * FROM promocodes WHERE id = ?", (db.last_id(),))
+    assert item is not None
+    return serialize_promocode(item)
+
+
+@app.put("/api/panel/promocodes/{promo_id}")
+def panel_promo_update(promo_id: int, body: PromocodeBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    item = db.fetchone("SELECT * FROM promocodes WHERE id = ?", (promo_id,))
+    if not item:
+        raise HTTPException(404, detail="Promocode not found")
+    ptype, pval = _promo_type_value(body)
+    db.execute(
+        "UPDATE promocodes SET code = ?, name = ?, type = ?, value = ?, uses_limit = ?, "
+        "expires_at = ?, is_active = ?, once_per_family = ? WHERE id = ?",
+        (
+            body.code.upper().strip(),
+            (body.name or "").strip() or None,
+            ptype,
+            pval,
+            body.uses_limit,
+            body.expires_at,
+            1 if _as_bool(body.is_active, bool(item.get("is_active"))) else 0,
+            1 if _as_bool(body.once_per_family, bool(item.get("once_per_family"))) else 0,
+            promo_id,
+        ),
+    )
+    item = db.fetchone("SELECT * FROM promocodes WHERE id = ?", (promo_id,))
+    assert item is not None
+    return serialize_promocode(item)
+
+
+@app.delete("/api/panel/promocodes/{promo_id}")
+def panel_promo_delete(promo_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    item = db.fetchone("SELECT id FROM promocodes WHERE id = ?", (promo_id,))
+    if not item:
+        raise HTTPException(404, detail="Promocode not found")
+    db.execute("DELETE FROM promocodes WHERE id = ?", (promo_id,))
+    return {"success": True}
+
+
+@app.get("/api/panel/promotions")
+def panel_promotions(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
+    items = db.fetchall("SELECT * FROM promotions WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    return [serialize_promotion(p) for p in items]
+
+
+@app.post("/api/panel/promotions")
+def panel_promo_campaign_create(body: PromotionBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    # пополнение убрано, только global_discount
+    now = db.utcnow_iso()
+    db.execute(
+        "INSERT INTO promotions (name, type, value, min_amount, max_amount, uses_limit, uses_count, "
+        "expires_at, is_active, created_at) VALUES (?, 'global_discount', ?, NULL, NULL, ?, 0, ?, ?, ?)",
+        (
+            body.name or "Скидка",
+            float(body.value or 0),
+            body.uses_limit,
+            body.expires_at,
+            1 if (True if body.is_active is None else bool(body.is_active)) else 0,
+            now,
+        ),
+    )
+    item = db.fetchone("SELECT * FROM promotions WHERE id = ?", (db.last_id(),))
+    assert item is not None
+    return serialize_promotion(item)
+
+
+@app.put("/api/panel/promotions/{promo_id}")
+def panel_promo_campaign_update(
+    promo_id: int, body: PromotionBody, _: dict = Depends(require_panel)
+) -> dict[str, Any]:
+    item = db.fetchone("SELECT * FROM promotions WHERE id = ?", (promo_id,))
+    if not item:
+        raise HTTPException(404, detail="Promotion not found")
+    data = body.model_dump(exclude_unset=True)
+    fields = []
+    params: list[Any] = []
+    for k, v in data.items():
+        if k == "is_active":
+            fields.append("is_active = ?")
+            params.append(1 if bool(v) else 0)
+        elif k == "type":
+            # тип всегда global_discount
+            fields.append("type = ?")
+            params.append("global_discount")
+        elif k in ("min_amount", "max_amount"):
+            continue  # не применимо к глобальной скидке
+        elif v is not None:
+            fields.append(f"{k} = ?")
+            params.append(v)
+    if fields:
+        params.append(promo_id)
+        db.execute(f"UPDATE promotions SET {', '.join(fields)} WHERE id = ?", params)
+    item = db.fetchone("SELECT * FROM promotions WHERE id = ?", (promo_id,))
+    assert item is not None
+    return serialize_promotion(item)
+
+
+@app.delete("/api/panel/promotions/{promo_id}")
+def panel_promo_campaign_delete(promo_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    item = db.fetchone("SELECT id FROM promotions WHERE id = ?", (promo_id,))
+    if not item:
+        raise HTTPException(404, detail="Promotion not found")
+    db.execute("DELETE FROM promotions WHERE id = ?", (promo_id,))
+    return {"success": True}
+
+
+def _tracking_url(code: str) -> str:
+    return f"https://t.me/{P().bot_username}?start=trk_{code}"
+
+
+@app.get("/api/panel/tracking-links/stats")
+def panel_tracking_stats(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    links = db.fetchall("SELECT * FROM tracking_links WHERE project_id = ?", (db.pid(),))
+    return {
+        "total_links": sum(1 for l in links if l.get("is_active")),
+        "total_clicks": sum(int(l.get("clicks") or 0) for l in links),
+        "total_unique_users": sum(int(l.get("unique_users") or 0) for l in links),
+        "total_revenue": sum(float(l.get("total_revenue") or 0) for l in links),
+        "paid_users": sum(int(l.get("paid_users") or 0) for l in links),
+    }
+
+
+@app.get("/api/panel/tracking-links")
+def panel_tracking_list(_: dict = Depends(require_panel)) -> list[dict[str, Any]]:
+    items = db.fetchall("SELECT * FROM tracking_links WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    return [serialize_tracking(l) for l in items]
+
+
+@app.get("/api/panel/tracking-links/{link_id}")
+def panel_tracking_detail(link_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    link = db.fetchone("SELECT * FROM tracking_links WHERE id = ?", (link_id,))
+    if not link:
+        raise HTTPException(404, detail="Link not found")
+    return serialize_tracking(link, include_users=True)
+
+
+@app.post("/api/panel/tracking-links")
+def panel_tracking_create(body: TrackingBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    if not body.name or not body.name.strip():
+        raise HTTPException(400, detail="name required")
+    code = (body.code or gen_ref_code(6)).strip()
+    code = "".join(c for c in code if c.isalnum() or c in "_-")
+    now = db.utcnow_iso()
+    url = _tracking_url(code)
+    db.execute(
+        "INSERT INTO tracking_links (name, code, promocode, welcome_message, url, clicks, is_active, "
+        "unique_users, new_users, total_revenue, paid_users, active_subscriptions, total_keys, "
+        "conversion_rate, created_at) VALUES (?, ?, ?, ?, ?, 0, 1, 0, 0, 0, 0, 0, 0, 0, ?)",
+        (
+            body.name.strip(),
+            code,
+            (body.promocode or "").upper() or None,
+            body.welcome_message,
+            url,
+            now,
+        ),
+    )
+    item = db.fetchone("SELECT * FROM tracking_links WHERE id = ?", (db.last_id(),))
+    assert item is not None
+    return serialize_tracking(item)
+
+
+@app.put("/api/panel/tracking-links/{link_id}")
+def panel_tracking_update(link_id: int, body: TrackingBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    link = db.fetchone("SELECT * FROM tracking_links WHERE id = ?", (link_id,))
+    if not link:
+        raise HTTPException(404, detail="Link not found")
+    data = body.model_dump(exclude_unset=True)
+    name = data.get("name", link["name"])
+    code = link["code"]
+    if data.get("code"):
+        code = data["code"]
+    promocode = link.get("promocode")
+    if "promocode" in data:
+        promocode = (data["promocode"] or "").upper() or None
+    welcome = data["welcome_message"] if "welcome_message" in data else link.get("welcome_message")
+    is_active = link.get("is_active")
+    if "is_active" in data and data["is_active"] is not None:
+        is_active = 1 if data["is_active"] else 0
+    db.execute(
+        "UPDATE tracking_links SET name = ?, code = ?, promocode = ?, welcome_message = ?, "
+        "url = ?, is_active = ? WHERE id = ?",
+        (name, code, promocode, welcome, _tracking_url(code), is_active, link_id),
+    )
+    item = db.fetchone("SELECT * FROM tracking_links WHERE id = ?", (link_id,))
+    assert item is not None
+    return serialize_tracking(item)
+
+
+@app.delete("/api/panel/tracking-links/{link_id}")
+def panel_tracking_delete(link_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    link = db.fetchone("SELECT id FROM tracking_links WHERE id = ?", (link_id,))
+    if not link:
+        raise HTTPException(404, detail="Link not found")
+    db.execute("DELETE FROM tracking_links WHERE id = ?", (link_id,))
+    return {"success": True}
+
+
+class AdminGiftBody(BaseModel):
+    count: int = Field(1, ge=1, le=500)
+    months: int = 1
+    note: Optional[str] = Field(None, max_length=200)
+    valid_days: Optional[int] = Field(None, ge=1, le=3650)
+    one_per_user: bool = True
+
+
+class AdminGiftRevokeBody(BaseModel):
+    ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+def _gift_link(code: str) -> str:
+    return f"https://t.me/{P().bot_username}?start=gift_{code[len(reflevels.GIFT_PREFIX):]}"
+
+
+class ContestBody(BaseModel):
+    enabled: Optional[bool] = None
+    start_at: Optional[str] = None  # ISO; пусто — сразу
+    title: Optional[str] = None
+
+
+@app.get("/api/panel/contest")
+def panel_contest(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """конкурс: настройки, участники (покупки подписки с момента старта), итоги."""
+    cfg = contest.config()
+    return {**cfg, "running": contest.is_running(), "stats": contest.stats(), "items": contest.entries()}
+
+
+@app.put("/api/panel/contest")
+def panel_contest_update(body: ContestBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        cfg = contest.set_config(enabled=body.enabled, start_at=body.start_at, title=body.title)
+    except ValueError:
+        raise HTTPException(400, detail={"message": "Неверное время старта"})
+    return {**cfg, "running": contest.is_running()}
+
+
+@app.delete("/api/panel/contest/entries")
+def panel_contest_clear(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return {"ok": True, "deleted": contest.clear()}
+
+
+@app.get("/api/panel/gifts")
+def panel_gifts(status: str = Query("", max_length=16), q: str = Query("", max_length=64),
+                limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                source: str = Query("", max_length=16),
+                _: dict = Depends(require_owner)) -> dict[str, Any]:
+    """подарочные подписки: из панели, купленные пользователями и за друзей — коды, статусы, кто активировал."""
+    data = reflevels.list_admin_gifts(status, q, limit, offset, source)
+    for it in data["items"]:
+        it["link"] = _gift_link(it["code"])
+    data["periods"] = list(fulfillment.SUB_PERIODS)
+    return data
+
+
+@app.post("/api/panel/gifts")
+def panel_gifts_create(body: AdminGiftBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        r = reflevels.create_admin_gifts(body.count, body.months, body.note or "", body.valid_days,
+                                         body.one_per_user)
+    except reflevels.RewardError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+    r["items"] = [{"code": c, "link": _gift_link(c)} for c in r.pop("codes")]
+    return r
+
+
+@app.post("/api/panel/gifts/revoke")
+def panel_gifts_revoke(body: AdminGiftRevokeBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    return {"revoked": reflevels.revoke_admin_gifts(body.ids)}
+
+
+# ── Ресейл: клиенты ресейлеров в Remnawave (dnet_, atom_ …) и перенос в FGN (core/resale.py) ──
+
+class ResaleMigrateBody(BaseModel):
+    prefix: str = Field(..., min_length=2, max_length=40)
+    name: str = Field(..., min_length=1, max_length=80)
+    confirm: str = Field(..., max_length=40)  # повтор префикса — последнее подтверждение
+    info_url: str = Field(..., min_length=1, max_length=500)  # ссылка с объяснением — в сообщении бота при /start
+
+
+class ResaleInfoUrlBody(BaseModel):
+    info_url: str = Field(..., min_length=1, max_length=500)
+
+
+class ResaleCancelBody(BaseModel):
+    confirm: str = Field(..., max_length=40)
+
+
+def _resale_http(exc: "resale.ResaleError") -> HTTPException:
+    return HTTPException(exc.status, detail={"message": exc.message})
+
+
+@app.get("/api/panel/resale")
+def panel_resale(p: dict = Depends(require_owner)) -> dict[str, Any]:
+    """группы ресейлеров из последнего чтения Remnawave, идущая задача и переносы."""
+    return resale.overview()
+
+
+@app.post("/api/panel/resale/scan")
+def panel_resale_scan(p: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        resale.start_scan()
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    return {"success": True, "job": resale.job_state()}
+
+
+@app.post("/api/panel/resale/migrate")
+def panel_resale_migrate(body: ResaleMigrateBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        prefix = resale.normalize_prefix(body.prefix)
+        if (body.confirm or "").strip() not in (prefix, prefix[:-1]):
+            raise resale.ResaleError(f"Для подтверждения введите {prefix}")
+        mid = resale.start_migration(prefix, body.name, p.get("username") or p.get("actor") or "owner", body.info_url)
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    audit(p.get("actor") or "owner", p.get("name"), f"resale_migrate {prefix} #{mid}", 200, _client_ip(request))
+    return {"success": True, "migration_id": mid, "job": resale.job_state()}
+
+
+@app.get("/api/panel/resale/migrations/{mid}/users")
+def panel_resale_migration_users(mid: int, status: str = Query("", max_length=16), q: str = Query("", max_length=64),
+                                 limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                                 p: dict = Depends(require_owner)) -> dict[str, Any]:
+    return resale.migration_users(mid, status, q, limit, offset)
+
+
+@app.post("/api/panel/resale/migrations/{mid}/info-url")
+def panel_resale_info_url(mid: int, body: ResaleInfoUrlBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    """поменять ссылку с объяснением у действующего переноса (уже отправленные сообщения не переотправляются)."""
+    try:
+        url = resale.set_info_url(mid, body.info_url)
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    audit(p.get("actor") or "owner", p.get("name"), f"resale_info_url #{mid}", 200, _client_ip(request))
+    return {"success": True, "info_url": url}
+
+
+@app.post("/api/panel/resale/migrations/{mid}/cancel")
+def panel_resale_cancel(mid: int, body: ResaleCancelBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    resale.ensure_schema()
+    m = db.fetchone("SELECT prefix FROM resale_migrations WHERE id = ?", (int(mid),))
+    if not m:
+        raise HTTPException(404, detail={"message": "Перенос не найден"})
+    if (body.confirm or "").strip() not in (m["prefix"], m["prefix"][:-1]):
+        raise HTTPException(400, detail={"message": f"Для подтверждения введите {m['prefix']}"})
+    try:
+        r = resale.cancel_migration(mid, p.get("username") or "owner")
+    except resale.ResaleError as exc:
+        raise _resale_http(exc)
+    audit(p.get("actor") or "owner", p.get("name"), f"resale_cancel #{mid}", 200, _client_ip(request))
+    return {"success": True, **r}
+
+
+# ── «Приложение (API)»: API v1 для мобильного приложения проекта (core/apiv1.py, apiv1_app.py) ──
+
+class AppApiSettingsBody(BaseModel):
+    enabled: Optional[bool] = None
+    key_required: Optional[bool] = None
+    return_url: Optional[str] = Field(None, max_length=320)
+    invite_url: Optional[str] = Field(None, max_length=320)
+    whitelist_included: Optional[bool] = None
+
+
+class AppKeyBody(BaseModel):
+    name: str = Field("", max_length=60)
+
+
+class AppSessionsRevokeBody(BaseModel):
+    confirm: str = Field(..., max_length=40)
+
+
+def _app_api_view() -> dict[str, Any]:
+    apiv1_app.ensure_schema()
+    pid = db.pid()
+    bases: list[str] = []
+    for u in (P().miniapp_url, P().site_url):
+        if u and f"{u}/api/v1" not in bases:
+            bases.append(f"{u}/api/v1")
+    api_domain = (os.getenv("API_DOMAIN") or "").strip().lower()
+    if api_domain and re.fullmatch(r"[a-z0-9.-]{3,253}", api_domain):
+        bases.append(f"https://{api_domain}")
+    hook = (os.getenv("WEBHOOK_DOMAIN") or "").strip().lower()
+    hook_base = f"https://{hook}" if hook and re.fullmatch(r"[a-z0-9.-]{3,253}", hook) else (P().miniapp_url or "")
+    return {
+        "project": {"id": pid, "name": P().name},
+        "settings": apiv1_app.settings_view(pid),
+        "keys": apiv1_app.list_keys(pid),
+        "sessions_active": apiv1_app.sessions_count(pid),
+        "base_urls": bases,
+        "webhook_url": f"{hook_base}/webhooks/payments/yookassa" if hook_base else None,
+    }
+
+
+@app.get("/api/panel/app-api")
+def panel_app_api(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return _app_api_view()
+
+
+@app.put("/api/panel/app-api")
+def panel_app_api_save(body: AppApiSettingsBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    apiv1_app.ensure_schema()
+    pid = db.pid()
+    for name, val in (("Адрес возврата после оплаты", body.return_url), ("Ссылка-приглашение", body.invite_url)):
+        if val is not None and not apiv1_app.valid_url(val):
+            raise HTTPException(400, detail={"message": f"{name}: нужен https://… или ссылка приложения вида fgn://…"})
+    if body.key_required and apiv1_app.active_keys_count(pid) == 0:
+        raise HTTPException(400, detail={"message": "Сначала создайте ключ приложения — иначе приложение не сможет войти"})
+    if body.enabled is not None:
+        db.set_setting(apiv1_app.S_ENABLED, "1" if body.enabled else "0", project=pid)
+    if body.key_required is not None:
+        db.set_setting(apiv1_app.S_KEY_REQUIRED, "1" if body.key_required else "0", project=pid)
+    if body.return_url is not None:
+        db.set_setting(apiv1_app.S_RETURN_URL, body.return_url.strip(), project=pid)
+    if body.invite_url is not None:
+        db.set_setting(apiv1_app.S_INVITE_URL, body.invite_url.strip(), project=pid)
+    if body.whitelist_included is not None:
+        db.set_setting(apiv1_app.S_WHITELIST, "1" if body.whitelist_included else "0", project=pid)
+    audit(p.get("actor") or "owner", p.get("name"), f"app_api_settings {pid}", 200, _client_ip(request))
+    return _app_api_view()
+
+
+@app.post("/api/panel/app-api/keys")
+def panel_app_key_create(body: AppKeyBody, request: Request, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        k = apiv1_app.create_key(body.name, p.get("username") or p.get("actor") or "owner", db.pid())
+    except ValueError as exc:
+        raise HTTPException(400, detail={"message": str(exc)})
+    audit(p.get("actor") or "owner", p.get("name"), f"app_key_create {db.pid()} #{k['id']}", 200, _client_ip(request))
+    # сам ключ — только в этом ответе: в БД лежит хеш
+    return {"key": k, **_app_api_view()}
+
+
+@app.delete("/api/panel/app-api/keys/{key_id}")
+def panel_app_key_revoke(key_id: int, request: Request, revoke_sessions: bool = Query(False),
+                         p: dict = Depends(require_owner)) -> dict[str, Any]:
+    pid = db.pid()
+    apiv1_app.ensure_schema()
+    row = db.fetchone("SELECT revoked_at FROM app_keys WHERE id = ? AND project_id = ?", (int(key_id), pid))
+    if row and not row.get("revoked_at") and apiv1_app.key_required(pid) and apiv1_app.active_keys_count(pid) <= 1:
+        raise HTTPException(400, detail={"message": "Это последний ключ, а ключ обязателен — сначала создайте новый "
+                                                    "или выключите «Требовать ключ»"})
+    try:
+        r = apiv1_app.revoke_key(int(key_id), bool(revoke_sessions), pid)
+    except LookupError as exc:
+        raise HTTPException(404, detail={"message": str(exc)})
+    audit(p.get("actor") or "owner", p.get("name"), f"app_key_revoke {pid} #{key_id} sessions={r['sessions_revoked']}",
+          200, _client_ip(request))
+    return {"result": r, **_app_api_view()}
+
+
+@app.post("/api/panel/app-api/sessions/revoke")
+def panel_app_sessions_revoke(body: AppSessionsRevokeBody, request: Request,
+                              p: dict = Depends(require_owner)) -> dict[str, Any]:
+    pid = db.pid()
+    if body.confirm.strip().lower() != pid:
+        raise HTTPException(400, detail={"message": f"Для подтверждения введите {pid}"})
+    n = apiv1_app.revoke_project_sessions(pid)
+    audit(p.get("actor") or "owner", p.get("name"), f"app_sessions_revoke {pid} n={n}", 200, _client_ip(request))
+    return {"revoked": n, **_app_api_view()}
+
+
+@app.get("/api/panel/remnawave/squads")
+def panel_remnawave_squads(_: dict = Depends(require_owner)) -> list[dict[str, Any]]:
+    rows = db.fetchall("SELECT squad_uuid, squad_name FROM squads WHERE is_active = 1")
+    return [{"uuid": r["squad_uuid"], "name": r["squad_name"]} for r in rows]
+
+
+@app.get("/api/panel/squads")
+def panel_squads(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    rows = db.fetchall("SELECT * FROM squads ORDER BY priority DESC")
+    return {
+        "squads": [serialize_squad(s) for s in rows],
+        "mapping": get_squad_mapping(),
+    }
+
+
+@app.post("/api/panel/squads/sync")
+def panel_squads_sync(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """синхронизация internal-squads из remnawave."""
+    client = _rw_client()
+    if client is None:
+        raise HTTPException(503, detail={"message": "Remnawave не настроена (укажите URL и API-токен)"})
+    try:
+        resp = client.get_internal_squads()
+    except Exception as exc:  # noqa: BLE001
+        forum.report_error("Синхронизация сквадов Remnawave", f"{type(exc).__name__}: {exc}")
+        raise HTTPException(502, detail={"message": f"Ошибка Remnawave: {exc}"})
+
+    squads = resp
+    if isinstance(resp, dict):
+        squads = resp.get("internalSquads") or resp.get("squads") or resp.get("items") or []
+    if not isinstance(squads, list):
+        squads = []
+
+    seen: list[str] = []
+    for s in squads:
+        if not isinstance(s, dict):
+            continue
+        su = s.get("uuid") or s.get("id")
+        if not su:
+            continue
+        su = str(su)
+        name = s.get("name") or "Squad"
+        members = int(s.get("membersCount") or s.get("members_count") or 0)
+        inbounds = s.get("inbounds")
+        inb = len(inbounds) if isinstance(inbounds, list) else int(s.get("inboundsCount") or 0)
+        seen.append(su)
+        if db.fetchone("SELECT squad_uuid FROM squads WHERE squad_uuid = ?", (su,)):
+            db.execute(
+                "UPDATE squads SET squad_name = ?, current_users = ?, inbounds_count = ?, is_active = 1 "
+                "WHERE squad_uuid = ?",
+                (name, members, inb, su),
+            )
+        else:
+            db.execute(
+                "INSERT INTO squads (squad_uuid, squad_name, squad_type, max_users, current_users, "
+                "inbounds_count, is_active, priority) VALUES (?, ?, 'vpn', 0, ?, ?, 1, 0)",
+                (su, name, members, inb),
+            )
+
+    # сквады, которых нет в remnawave, помечаем неактивными
+    if seen:
+        placeholders = ",".join("?" * len(seen))
+        db.execute(f"UPDATE squads SET is_active = 0 WHERE squad_uuid NOT IN ({placeholders})", seen)
+
+    count_row = db.fetchone("SELECT COUNT(*) AS c FROM squads WHERE is_active = 1")
+    return {"success": True, "count": int(count_row["c"]) if count_row else 0, "synced": len(seen)}
+
+
+class ExternalSquadBody(BaseModel):
+    uuid: Optional[str] = Field(None, max_length=64)
+
+
+def _rw_external_squads(client: Any) -> list[dict[str, Any]]:
+    resp = client.get_external_squads()
+    items = resp
+    if isinstance(resp, dict):
+        items = resp.get("externalSquads") or resp.get("squads") or resp.get("items") or []
+    out = []
+    for s in items if isinstance(items, list) else []:
+        if not isinstance(s, dict) or not (s.get("uuid") or s.get("id")):
+            continue
+        info = s.get("info") if isinstance(s.get("info"), dict) else {}
+        members = info.get("membersCount", s.get("membersCount"))
+        out.append({"uuid": str(s.get("uuid") or s.get("id")), "name": str(s.get("name") or "Внешний сквад"),
+                    "members": int(members) if isinstance(members, (int, float)) else None})
+    return out
+
+
+def _external_state(client: Any = None) -> dict[str, Any]:
+    selected = provisioning.external_squad()
+    client = client or _rw_client()
+    if client is None:
+        return {"selected": selected, "squads": [], "error": "Remnawave не настроена"}
+    try:
+        squads = _rw_external_squads(client)
+    except Exception as exc:  # noqa: BLE001
+        return {"selected": selected, "squads": [], "error": f"Remnawave: {exc}"}
+    return {"selected": selected, "squads": squads, "error": None}
+
+
+@app.put("/api/panel/squads/mapping")
+def panel_squad_mapping(body: SquadMappingBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    set_squad_mapping(list(body.vpn), list(body.trial))
+    return {"success": True}
+
+
+@app.get("/api/panel/squads/external")
+def panel_squads_external(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    """внешние сквады из Remnawave (живой список) + выбранный."""
+    return _external_state()
+
+
+@app.put("/api/panel/squads/external")
+def panel_squads_external_set(body: ExternalSquadBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    """внешний сквад проекта (X-Project); пусто — не назначать (в Remnawave ничего не меняется)."""
+    uuid = (body.uuid or "").strip()
+    if uuid:
+        client = _rw_client()
+        if client is None:
+            raise HTTPException(503, detail={"message": "Remnawave не настроена (укажите URL и API-токен)"})
+        try:
+            known = {s["uuid"] for s in _rw_external_squads(client)}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, detail={"message": f"Ошибка Remnawave: {exc}"})
+        if uuid not in known:
+            raise HTTPException(400, detail={"message": "Такого внешнего сквада нет в Remnawave — обновите список"})
+    db.set_setting(provisioning.EXTERNAL_SQUAD_KEY, uuid)
+    return _external_state()
+
+
+@app.put("/api/panel/squads/{squad_uuid}")
+def panel_squad_update(
+    squad_uuid: str, body: SquadUpdateBody, _: dict = Depends(require_owner)
+) -> dict[str, Any]:
+    squad = db.fetchone("SELECT * FROM squads WHERE squad_uuid = ?", (squad_uuid,))
+    if not squad:
+        raise HTTPException(404, detail="Squad not found")
+    data = body.model_dump(exclude_unset=True)
+    fields = []
+    params: list[Any] = []
+    for k, v in data.items():
+        if v is None:
+            continue
+        if k == "is_active":
+            fields.append("is_active = ?")
+            params.append(1 if v else 0)
+        else:
+            fields.append(f"{k} = ?")
+            params.append(v)
+    if fields:
+        params.append(squad_uuid)
+        db.execute(f"UPDATE squads SET {', '.join(fields)} WHERE squad_uuid = ?", params)
+    return {"success": True}
+
+
+@app.get("/api/panel/grace")
+def panel_grace_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return grace.settings()
+
+
+@app.put("/api/panel/grace")
+def panel_grace_save(body: GraceSettingsBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        grace.save_settings(body.enabled, [str(x)[:64] for x in body.squads], body.traffic_gb, body.trial)
+    except ValueError as e:
+        raise HTTPException(400, detail={"message": str(e)})
+    return panel_grace_get(_)
+
+
+@app.get("/api/panel/backups/status")
+def panel_backup_status(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return get_backup_settings()
+
+
+@app.post("/api/panel/backups/create")
+def panel_backup_create(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        info = create_backup()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, detail={"message": f"Не удалось создать бэкап: {exc}"})
+    return {"success": True, **info, "backups": list_backups()}
+
+
+@app.get("/api/panel/backups/download")
+def panel_backup_download(name: str = Query(...), _: dict = Depends(require_owner)):
+    from fastapi.responses import FileResponse
+
+    from fastapi.responses import RedirectResponse
+
+    safe = os.path.basename(name)
+    if not re.fullmatch(r"backup-\d{8}-\d{6}\.db", safe):
+        raise HTTPException(400, detail={"message": "Некорректное имя файла"})
+    path = os.path.join(_backup_dir(), safe)
+    if os.path.isfile(path):
+        return FileResponse(path, media_type="application/octet-stream", filename=safe)
+    item = next((x for x in _s3_backups() if x["name"] == safe), None)
+    if item and s3store.enabled():
+        # нет на диске: временная ссылка на s3
+        return {"url": s3store.presign_get(item["key"], 600)}
+    raise HTTPException(404, detail={"message": "Бэкап не найден"})
+
+
+@app.put("/api/panel/backups/settings")
+def panel_backup_settings(body: BackupSettingsBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    db.set_setting("backup_enabled", "1" if body.enabled else "0")
+    db.set_setting("backup_interval_hours", str(max(1, body.interval_hours)))
+    return get_backup_settings()
+
+
+@app.get("/api/panel/forum")
+def panel_forum_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return forum.get_config()
+
+
+@app.put("/api/panel/forum")
+def panel_forum_put(body: ForumConfigBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    return forum.save_config(body.forum_chat_id or "", body.topics or {}, panel_url_value=body.panel_url,
+                             admin_ids_value=body.admin_ids)
+
+
+class MonNodeCreateBody(BaseModel):
+    name: str
+    ip: str
+    port: Optional[int] = None
+
+
+class MonNodeUpdateBody(BaseModel):
+    name: Optional[str] = None
+    ip: Optional[str] = None
+    port: Optional[int] = None
+    vless: Optional[str] = None       # "": убрать проверку vless
+    pay_date: Optional[str] = None    # "": убрать iso-дату
+    pay_url: Optional[str] = None
+
+
+def _mon(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except monitoring.MonitorError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+
+
+@app.get("/api/panel/monitoring")
+def panel_mon_overview(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    return monitoring.overview()
+
+
+@app.post("/api/panel/monitoring/nodes")
+def panel_mon_create(body: MonNodeCreateBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    node, secret = _mon(monitoring.create_node, body.name, body.ip, body.port or monitoring.DEFAULT_PORT)
+    # ключ показывается один раз, в бд только шифротекст
+    return {"node": monitoring.node_brief(node), "secret": secret}
+
+
+@app.get("/api/panel/monitoring/nodes/{node_id}")
+def panel_mon_node(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    return _mon(monitoring.node_detail, node_id)
+
+
+@app.get("/api/panel/monitoring/nodes/{node_id}/series")
+def panel_mon_series(node_id: int, metric: str = Query(...), range: str = Query("24h"),
+                     _: dict = Depends(require_panel)) -> dict[str, Any]:
+    if not monitoring.get_node(node_id):
+        raise HTTPException(404, detail={"message": "Нода не найдена"})
+    return _mon(monitoring.series, node_id, metric, range)
+
+
+@app.patch("/api/panel/monitoring/nodes/{node_id}")
+def panel_mon_update(node_id: int, body: MonNodeUpdateBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    _mon(monitoring.update_node, node_id, body.model_dump())
+    return _mon(monitoring.node_detail, node_id)
+
+
+@app.post("/api/panel/monitoring/nodes/{node_id}/start")
+def panel_mon_start(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    _mon(monitoring.start_node, node_id)
+    return _mon(monitoring.node_detail, node_id)
+
+
+@app.post("/api/panel/monitoring/nodes/{node_id}/stop")
+def panel_mon_stop(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    _mon(monitoring.stop_node, node_id)
+    return _mon(monitoring.node_detail, node_id)
+
+
+@app.post("/api/panel/monitoring/nodes/{node_id}/speedtest")
+def panel_mon_speedtest(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    return _mon(monitoring.trigger_speedtest, node_id)
+
+
+@app.post("/api/panel/monitoring/nodes/{node_id}/reboot")
+def panel_monitoring_reboot(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    _mon(monitoring.reboot_node, node_id)
+    return _mon(monitoring.node_detail, node_id)
+
+
+@app.post("/api/panel/monitoring/nodes/{node_id}/update")
+def panel_monitoring_update(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    _mon(monitoring.request_update, node_id)
+    return _mon(monitoring.node_detail, node_id)
+
+
+@app.post("/api/panel/monitoring/nodes/{node_id}/vless-check")
+def panel_mon_vless_check(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    node = monitoring.get_node(node_id)
+    if not node:
+        raise HTTPException(404, detail={"message": "Нода не найдена"})
+    if not node.get("vless_enc"):
+        raise HTTPException(400, detail={"message": "VLESS-ключ не задан"})
+    monitoring.vless_node(node)
+    return _mon(monitoring.node_detail, node_id)
+
+
+@app.post("/api/panel/monitoring/nodes/{node_id}/rotate-secret")
+def panel_mon_rotate(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    if not monitoring.get_node(node_id):
+        raise HTTPException(404, detail={"message": "Нода не найдена"})
+    return {"secret": monitoring.rotate_secret(node_id)}
+
+
+@app.delete("/api/panel/monitoring/nodes/{node_id}")
+def panel_mon_delete(node_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    monitoring.delete_node(node_id)
+    return {"ok": True}
+
+
+def _serialize_withdrawal_admin(w: dict[str, Any]) -> dict[str, Any]:
+    user = get_user(int(w["user_id"])) if w.get("user_id") else None
+    data = services.serialize_withdrawal(w)
+    data["username"] = (user or {}).get("username")
+    data["telegram_id"] = (user or {}).get("telegram_id")
+    data["email"] = (user or {}).get("email")
+    data["is_banned"] = bool((user or {}).get("is_banned"))
+    return data
+
+
+@app.get("/api/panel/withdrawals")
+def panel_withdrawals(status: Optional[str] = Query(None), _: dict = Depends(require_panel)) -> dict[str, Any]:
+    if status and status != "all":
+        rows = db.fetchall("SELECT * FROM withdrawals WHERE status = ? AND project_id = ? ORDER BY id DESC",
+                           (status, db.pid()))
+    else:
+        rows = db.fetchall("SELECT * FROM withdrawals WHERE project_id = ? ORDER BY id DESC", (db.pid(),))
+    _w = "SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS s FROM withdrawals WHERE status = ? AND project_id = ?"
+    pending = db.fetchone(_w, ("pending", db.pid()))
+    approved = db.fetchone(_w, ("approved", db.pid()))
+    done = db.fetchone(_w, ("completed", db.pid()))
+    return {
+        "items": [_serialize_withdrawal_admin(w) for w in rows],
+        "pending_count": int(pending["c"]) if pending else 0,
+        "pending_amount": round(float(pending["s"]) if pending else 0, 2),
+        "approved_count": int(approved["c"]) if approved else 0,
+        "approved_amount": round(float(approved["s"]) if approved else 0, 2),
+        "completed_count": int(done["c"]) if done else 0,
+        "completed_amount": round(float(done["s"]) if done else 0, 2),
+    }
+
+
+@app.post("/api/panel/withdrawals/{withdrawal_id}/approve")
+def panel_withdraw_approve(withdrawal_id: int, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """одобрить вывод: статус «одобрен»."""
+    try:
+        w = services.approve_withdrawal(withdrawal_id)
+    except services.ServiceError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    return _serialize_withdrawal_admin(w)
+
+
+@app.post("/api/panel/withdrawals/{withdrawal_id}/complete")
+def panel_withdraw_complete(withdrawal_id: int, body: WithdrawCompleteBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """завершить вывод: hash + статус + сообщение юзеру."""
+    try:
+        w = services.complete_withdrawal(withdrawal_id, body.tx_hash)
+    except services.ServiceError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    user = get_user(int(w["user_id"])) if w.get("user_id") else None
+    delivered = False
+    if user and user.get("telegram_id"):
+        try:
+            delivered = forum.dm_withdrawal_completed(int(user["telegram_id"]), w["amount"], str(w.get("tx_link") or ""),
+                                                      sbp=(w.get("method") == "sbp"))
+        except Exception:  # noqa: BLE001
+            delivered = False
+    return {**_serialize_withdrawal_admin(w), "notified": delivered}
+
+
+@app.post("/api/panel/withdrawals/{withdrawal_id}/reject")
+def panel_withdraw_reject(withdrawal_id: int, body: WithdrawRejectBody, _: dict = Depends(require_panel)) -> dict[str, Any]:
+    """отказ; refund=true вернуть сумму на реф. баланс."""
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(400, detail={"message": "Укажите причину отказа"})
+    try:
+        w = services.reject_withdrawal(withdrawal_id, reason, refund=bool(body.refund))
+    except services.ServiceError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    user = get_user(int(w["user_id"])) if w.get("user_id") else None
+    if user and user.get("telegram_id"):
+        try:
+            forum.dm_withdrawal_rejected(int(user["telegram_id"]), w["amount"], reason, bool(body.refund))
+        except Exception:  # noqa: BLE001
+            pass
+    return _serialize_withdrawal_admin(w)
+
+
+def _reject_withdrawals_on_ban(user_id: int) -> int:
+    """при бане незавершённые выводы отклоняются с возвратом."""
+    return len(services.reject_open_withdrawals_for_user(user_id, "Аккаунт заблокирован"))
+
+
+@app.get("/api/panel/content/offer")
+def panel_get_offer(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return {"text": db.get_setting("offer_text", "")}
+
+
+@app.put("/api/panel/content/offer")
+def panel_put_offer(body: ContentTextBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    db.set_setting("offer_text", body.text)
+    return {"text": body.text}
+
+
+@app.get("/api/panel/content/privacy")
+def panel_get_privacy(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return {"text": db.get_setting("privacy_text", "")}
+
+
+@app.put("/api/panel/content/privacy")
+def panel_put_privacy(body: ContentTextBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    db.set_setting("privacy_text", body.text)
+    return {"text": body.text}
+
+
+@app.get("/api/panel/plans")
+def panel_get_plans(_: dict = Depends(require_owner)) -> list[dict[str, Any]]:
+    return get_active_plans()
+
+
+@app.get("/api/panel/plans/meta")
+def panel_plans_meta(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return get_plans_meta()
+
+
+# поля вкладки «Анти-абуз»; всё остальное в PUT /plans — цены и пробный период
+_AA_PLAN_FIELDS = {"antiabuse_enabled", "aa_hwid_multiplier", "aa_ip_extra", "aa_grace_hours", "aa_warn_days",
+                   "trial_hwid_enabled", "trial_hwid_max"}
+
+
+@app.put("/api/panel/plans")
+def panel_put_plans(body: PlansUpdateBody, p: dict = Depends(require_owner)) -> dict[str, Any]:
+    if is_admin(p):
+        # цены и анти-абуз сохраняются одной ручкой: право на одно не даёт менять другое
+        sent = {k for k, v in body.model_dump(exclude_unset=True).items() if v is not None} - {"whitelist_squad_uuid"}
+        if sent & _AA_PLAN_FIELDS and not admin_has(p, "settings.antiabuse"):
+            raise HTTPException(403, detail={"message": "Нет права менять анти-абуз"})
+        if sent - _AA_PLAN_FIELDS and not admin_has(p, "settings.price"):
+            raise HTTPException(403, detail={"message": "Нет права менять цены"})
+    def _num(v: Any, lo: float, hi: float) -> float:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, detail={"message": "Некорректное число"})
+        if f < lo or f > hi:
+            raise HTTPException(400, detail={"message": f"Значение должно быть от {lo:g} до {hi:g}"})
+        return f
+
+    if body.base_price is not None:
+        db.set_setting("base_price", f"{_num(body.base_price, 1, 100000):g}")
+    if body.extra_device_price is not None:
+        db.set_setting("extra_device_price", f"{_num(body.extra_device_price, 0, 100000):g}")
+    if body.trial_enabled is not None:
+        db.set_setting("trial_enabled", "1" if body.trial_enabled else "0")
+    if body.trial_miniapp_enabled is not None:
+        db.set_setting("trial_miniapp_enabled", "1" if body.trial_miniapp_enabled else "0")
+    if body.channel_required is not None:
+        db.set_setting("channel_required", "1" if body.channel_required else "0")
+    if body.trial_web_enabled is not None:
+        db.set_setting("trial_web_enabled", "1" if body.trial_web_enabled else "0")
+    if body.trial_days is not None:
+        db.set_setting("trial_days", str(int(_num(body.trial_days, 1, 365))))
+    if body.trial_traffic_gb is not None:
+        db.set_setting("trial_traffic_gb", str(int(_num(body.trial_traffic_gb, 0, 100000))))
+    if body.trial_devices is not None:
+        db.set_setting("trial_devices", str(int(_num(body.trial_devices, 1, 20))))
+    if body.paid_traffic_gb is not None:
+        db.set_setting("paid_traffic_gb", str(int(_num(body.paid_traffic_gb, 0, 100000))))
+    if body.traffic_reset_price is not None:
+        db.set_setting("traffic_reset_price", f"{_num(body.traffic_reset_price, 0, 100000):g}")
+    if body.antiabuse_enabled is not None:
+        db.set_setting("antiabuse_enabled", "1" if body.antiabuse_enabled else "0")
+    for k in ("aa_hwid_multiplier", "aa_ip_extra", "aa_grace_hours", "aa_warn_days", "trial_hwid_max"):
+        v = getattr(body, k)
+        if v is not None:
+            db.set_setting(k, str(int(v)))
+    if body.trial_hwid_enabled is not None:
+        db.set_setting("trial_hwid_enabled", "1" if body.trial_hwid_enabled else "0")
+    for key, prefix, lo in (("period_prices", "period_price_", 1), ("period_stars", "period_stars_", 1)):
+        vals = getattr(body, key)
+        if not vals:
+            continue
+        for m_raw, v in vals.items():
+            try:
+                m = int(m_raw)
+            except (TypeError, ValueError):
+                continue
+            if m not in fulfillment.SUB_PERIODS:
+                continue
+            db.set_setting(f"{prefix}{m}", f"{_num(v, lo, 1000000):g}")
+    if body.tariff_devices is not None:
+        db.set_setting("tariff_devices", str(int(body.tariff_devices)))
+    if body.extra_device_stars is not None:
+        db.set_setting("extra_device_stars", f"{_num(body.extra_device_stars, 0, 100000):g}")
+    for key in ("device_prices", "device_stars"):
+        vals = getattr(body, key)
+        if vals is None:
+            continue
+        tiers: dict[str, float] = {}
+        for n_raw, v in vals.items():
+            try:
+                n = int(n_raw)
+            except (TypeError, ValueError):
+                continue
+            if v is None or str(v).strip() == "" or not (1 <= n <= fulfillment.MAX_DEVICE_NO):
+                continue
+            tiers[str(n)] = _num(v, 0, 100000)
+        db.set_setting(key, json.dumps(tiers, sort_keys=True))
+    # сайт — сначала: пока его набор не сохраняли, он берётся из бота (до изменения бота)
+    if body.pay_methods_web is not None and site_pay_split():
+        _save_pay_methods("pay_methods_web", pay_methods("web"), body.pay_methods_web)
+    if body.pay_methods is not None:
+        _save_pay_methods("pay_methods", pay_methods(), body.pay_methods)
+    try:  # таблица tariffs (GET /api/v1/tariffs) — те же цены, что в панели
+        apiv1_store.sync_tariffs()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api-v1] sync tariffs: {exc}", flush=True)
+    return {"plans": get_active_plans(), **get_plans_meta()}
+
+
+@app.get("/api/app/config")
+def app_config(request: Request) -> dict[str, Any]:
+    bot_id = ""
+    if P().bot_token and ":" in P().bot_token:
+        bot_id = P().bot_token.split(":", 1)[0]
+    meta = get_plans_meta()
+    prices = {p["devices"]: p["price_rub"] for p in get_active_plans()}
+    offer = db.get_setting("offer_text", "")
+    privacy = db.get_setting("privacy_text", "")
+    ip = _client_ip(request)
+    return {
+        "telegramOauthBotId": bot_id,
+        "telegramOauthUrl": "",
+        "botUsername": P().bot_username,
+        "miniappLink": (P().miniapp_link or "").strip(),
+        "siteDomain": (P().env("SITE_DOMAIN") or (urlparse(P().site_url).hostname or "")).lower(),
+        "miniappDomain": (P().env("MINIAPP_DOMAIN") or (urlparse(P().miniapp_url).hostname or "")).lower(),
+        "prices": prices,
+        "extraDevicePrice": meta["extra_device_price"],
+        "basePrice": meta["base_price"],
+        "minPrice": min_plan_price(),
+        "legalAvailable": bool(offer.strip() or privacy.strip()),
+        "supportUrl": P().support_url,
+        "trialEnabled": trial_enabled_for(app_source(request)),
+        "trialDays": fulfillment.trial_days(),
+        "providerMin": PROVIDER_MIN_RUB,
+        "payMethods": pay_methods(app_source(request)),
+        "trafficResetPrice": float(db.get_setting("traffic_reset_price", "0") or 0),
+        "captcha": captcha_mod.public_config(request.headers, ip),
+        # сайт проекта: кнопки «Скачать для Windows / macOS»
+        "desktop": _desktop_info(),
+    }
+
+
+# заблокированный видит главную в состоянии «заблокирована»
+_BANNED_ALLOWED_PATHS = {"/api/app/auth", "/api/app/me", "/api/app/me/terms", "/api/app/membership",
+                         "/api/app/legal",
+                         # заблокированным поддержка всё равно нужна
+                         "/api/app/support", "/api/app/support/upload", "/api/app/support/messages",
+                         "/api/app/support/read", "/api/app/support/close"}
+
+
+def _resolve_app_user_from_tg(tg: dict[str, Any], allow_banned: bool = False) -> dict[str, Any]:
+    telegram_id = int(tg.get("id") or 0)
+    if not telegram_id:
+        raise HTTPException(401, detail={"message": "Нет telegram id"})
+    user = upsert_telegram_user(
+        telegram_id=telegram_id,
+        username=tg.get("username"),
+        first_name=tg.get("first_name"),
+        last_name=tg.get("last_name"),
+    )
+    if user.get("is_banned") and not allow_banned:
+        raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
+    return user
+
+
+def _resolve_app_user_from_email(email: str) -> dict[str, Any]:
+    """найти юзера по email или создать (вход = регистрация)."""
+    email = email.strip().lower()
+    user = db.fetchone("SELECT * FROM users WHERE lower(email) = ? AND project_id = ?", (email, db.pid()))
+    if user:
+        if user.get("is_banned"):
+            raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
+        return user
+    db.execute(
+        "INSERT INTO users (project_id, telegram_id, username, email, balance, status, is_banned, referral_code, "
+        "is_partner, partner_balance, partner_rate, autopay_enabled, created_at) "
+        "VALUES (?, NULL, NULL, ?, 0, 'None', 0, ?, 0, 0, 25, 0, ?)",
+        (db.pid(), email, gen_ref_code(), db.utcnow_iso()),
+    )
+    fresh = get_user(db.last_id())
+    assert fresh is not None
+    return fresh
+
+
+@app.post("/api/app/auth")
+def app_auth(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")) -> dict[str, Any]:
+    data = validate_webapp_init_data(x_telegram_init_data or "")
+    tg_id = int((data.get("user") or {}).get("id") or 0)
+    existed = bool(tg_id and find_user_by_tg(tg_id))
+    user = _resolve_app_user_from_tg(data.get("user") or {}, allow_banned=True)
+    start_param = str((data.get("raw") or {}).get("start_param") or "").strip()
+    if not existed and start_param:
+        try:
+            _apply_start_param_referral(user, start_param)
+            user = get_user(int(user["id"])) or user
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ambassador] start_param: {exc}", flush=True)
+    # сессия-страховка, когда initdata протух
+    token = create_app_session(int(user["id"]), "miniapp")
+    return {"user": app_user_payload(user, "miniapp"), "token": token}
+
+
+def _apply_web_referral(user_id: int, code: Optional[str]) -> None:
+    """реферал с сайта /?ref=<id>: только для нового аккаунта."""
+    code = str(code or "").strip()
+    if not code or len(code) > 32:
+        return
+    user = get_user(user_id)
+    if not user or user.get("referred_by"):
+        return
+    ref = get_user(int(code)) if code.isdigit() else None
+    if not ref:
+        ref = db.fetchone("SELECT * FROM users WHERE referral_code = ?", (code.upper(),))
+    if not ref:
+        # амбассадор со ссылкой вида сайт/?ref=<своё слово>
+        try:
+            ref = ambassadors.by_site("/", urlencode_pairs([("ref", code)]), projects.of(user))
+        except Exception:  # noqa: BLE001
+            ref = None
+    if not ref or int(ref["id"]) == int(user_id) or projects.of(ref) != projects.of(user):
+        return
+    if ref.get("referred_by") and int(ref["referred_by"]) == int(user_id):
+        return
+    db.execute("UPDATE users SET referred_by = ? WHERE id = ? AND referred_by IS NULL", (ref["id"], user_id))
+
+
+def urlencode_pairs(pairs: list[tuple[str, str]]) -> str:
+    from urllib.parse import urlencode
+    return urlencode(pairs)
+
+
+def _apply_start_param_referral(user: dict[str, Any], start_param: str) -> None:
+    """мини-приложение открыто по ссылке ?startapp=<…> новым пользователем: амбассадор или ref_<id>."""
+    sp = str(start_param or "").strip()
+    if not sp or user.get("referred_by"):
+        return
+    ref = None
+    try:
+        ref = ambassadors.by_tg(sp, projects.of(user))
+    except Exception:  # noqa: BLE001
+        ref = None
+    if not ref and sp.startswith("ref_") and sp[4:].isdigit():
+        ref = get_user(int(sp[4:]))
+    if not ref or int(ref["id"]) == int(user["id"]) or projects.of(ref) != projects.of(user):
+        return
+    if ref.get("referred_by") and int(ref["referred_by"]) == int(user["id"]):
+        return
+    db.execute("UPDATE users SET referred_by = ? WHERE id = ? AND referred_by IS NULL", (ref["id"], user["id"]))
+
+
+@app.get("/api/app/site-ref")
+def app_site_ref(path: str = Query("/", max_length=400), q: str = Query("", max_length=600)) -> dict[str, Any]:
+    """сайт открыт по ссылке амбассадора (любой путь/параметры) → номер амбассадора для реф. привязки."""
+    if not P().feature("site"):
+        return {"ref": None}
+    try:
+        amb = ambassadors.by_site(path, q.lstrip("?"), db.pid())
+    except Exception:  # noqa: BLE001
+        amb = None
+    return {"ref": str(amb["id"]) if amb else None}
+
+
+def _require_captcha(token: Optional[str], request: Optional[Request]) -> None:
+    """капча только для входа по почте; oauth/mini app — без капчи."""
+    if not captcha_mod.enabled():
+        return
+    try:
+        captcha_mod.verify(token or "", request.headers if request else {}, _client_ip(request))
+    except captcha_mod.CaptchaError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+
+
+@app.post("/api/app/auth/oauth")
+def app_auth_oauth(body: OauthLoginBody, request: Request = None) -> dict[str, Any]:  # type: ignore[assignment]
+    # вход через Telegram Login Widget — без капчи (подпись уже от Telegram)
+    payload = body.model_dump(exclude={"ref", "captcha_token"})
+    validated = validate_oauth_login(payload)
+    was_new = find_user_by_tg(int(validated.get("id") or 0)) is None
+    user = _resolve_app_user_from_tg(
+        {
+            "id": validated.get("id"),
+            "username": validated.get("username"),
+            "first_name": validated.get("first_name"),
+            "last_name": validated.get("last_name"),
+        }
+    )
+    if was_new:
+        _apply_web_referral(int(user["id"]), body.ref)
+    else:
+        _notify_login(user, "Telegram", request)
+    token = create_app_session(int(user["id"]))
+    return {"user": app_user_payload(user, "web"), "token": token}
+
+
+@app.post("/api/app/auth/email/request")
+def app_auth_email_request(body: EmailRequestBody, request: Request = None) -> dict[str, Any]:  # type: ignore[assignment]
+    email = (body.email or "").strip().lower()
+    if not _valid_email(email):
+        raise HTTPException(400, detail={"message": "Введите корректный email"})
+    _require_captcha(body.captcha_token, request)
+    _email_send_limits(email, request)
+
+    code, throttled = create_email_code(email)
+    if not throttled:
+        send_login_code(email, code)
+    resp: dict[str, Any] = {"ok": True, "throttled": throttled, "resend_after": EMAIL_CODE_RESEND}
+    # без smtp отдаём код для отладки (не в проде)
+    if ENV != "production" and not mailer.is_configured():
+        resp["dev_code"] = code
+    return resp
+
+
+def _email_send_limits(email: str, request: Optional[Request]) -> None:
+    """лимиты писем с кодом входа на адрес и с ip (мини-приложение и API v1 — общие)."""
+    ip = _client_ip(request) or "unknown"
+    allowed, retry = ratelimit.rate_limit(f"emailcode:{email}:{ip}", 3, 300)
+    if allowed:
+        allowed, retry = ratelimit.rate_limit(f"emailcode_hour:{email}:{ip}", 10, 3600)
+    if allowed:
+        allowed, retry = ratelimit.rate_limit(f"emailcode_all:{email}", 30, 3600)
+    if allowed:
+        if ip:
+            allowed, retry = ratelimit.rate_limit(f"emailcode_ip:{ip}", 10, 300)
+            if allowed:
+                allowed, retry = ratelimit.rate_limit(f"emailcode_iphour:{ip}", 30, 3600)
+    if not allowed:
+        wait = f"{retry} сек." if retry < 90 else f"{math.ceil(retry / 60)} мин."
+        raise HTTPException(429, detail={"message": f"Слишком много запросов. Повторите через {wait}",
+                                         "code": "rate_limited", "retry_after_seconds": retry})
+
+
+def _email_verify_limits(email: str, request: Optional[Request]) -> None:
+    """лимиты перебора кода на адрес и ip."""
+    ip = _client_ip(request) or "unknown"
+    allowed, retry = ratelimit.rate_limit(f"emailverify:{email}:{ip}", 10, 3600)
+    if allowed:
+        allowed, retry = ratelimit.rate_limit(f"emailverify_ip:{ip}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много попыток. Повторите через {max(1, retry // 60)} мин."})
+
+
+@app.post("/api/app/auth/email/verify")
+def app_auth_email_verify(body: EmailVerifyBody, request: Request = None) -> dict[str, Any]:  # type: ignore[assignment]
+    email = (body.email or "").strip().lower()
+    _email_verify_limits(email, request)
+    _require_captcha(body.captcha_token, request)
+    if not verify_email_code(email, body.code or ""):
+        raise HTTPException(401, detail={"message": "Неверный или истёкший код"})
+    was_new = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND project_id = ?", (email, db.pid())) is None
+    user = _resolve_app_user_from_email(email)
+    if was_new:
+        _apply_web_referral(int(user["id"]), body.ref)
+    else:
+        _notify_login(user, "код на почту", request)
+    token = create_app_session(int(user["id"]))
+    return {"user": app_user_payload(user, "web"), "token": token}
+
+
+@app.post("/api/app/auth/logout")
+def app_auth_logout(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_app_session: Optional[str] = Header(None, alias="X-App-Session"),
+) -> dict[str, Any]:
+    token = _extract_app_token(authorization, x_app_session)
+    if token:
+        delete_app_session(token)
+    return {"ok": True}
+
+
+def _extract_app_token(authorization: Optional[str], x_app_session: Optional[str]) -> Optional[str]:
+    if x_app_session:
+        return x_app_session.strip()
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return None
+
+
+def _app_user_from_init(
+    request: Request,
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_app_session: Optional[str] = Header(None, alias="X-App-Session"),
+) -> dict[str, Any]:
+    allow_banned = request.url.path in _BANNED_ALLOWED_PATHS or request.url.path.startswith("/api/app/support/upload/")
+    token = _extract_app_token(authorization, x_app_session)
+    # 1) telegram mini app: подпись initdata
+    if x_telegram_init_data:
+        try:
+            data = validate_webapp_init_data(x_telegram_init_data)
+        except InitDataExpired as exc:
+            # initdata протух: пускаем по сессии того же tg
+            sess = get_app_session(token) if token else None
+            user = get_user(int(sess["user_id"])) if sess else None
+            if not user or not exc.telegram_id or int(user.get("telegram_id") or 0) != exc.telegram_id \
+                    or not same_project(user):
+                raise
+            if user.get("is_banned") and not allow_banned:
+                raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
+            request.state.app_via = "miniapp"
+            return user
+        tg = data.get("user") or {}
+        if tg.get("id"):
+            request.state.app_via = "miniapp"
+            return _resolve_app_user_from_tg(tg, allow_banned)
+    # 2) сессионный токен (email / oauth)
+    if token:
+        sess = get_app_session(token)
+        if not sess:
+            raise HTTPException(401, detail={"message": "Сессия истекла, войдите заново"})
+        request.state.app_via = "miniapp" if sess.get("source") == "miniapp" else "web"
+        user = get_user(int(sess["user_id"]))
+        if not user:
+            raise HTTPException(401, detail={"message": "Пользователь не найден"})
+        if not same_project(user):
+            # сессия другого проекта сети (другой бренд) — здесь она недействительна
+            raise HTTPException(401, detail={"message": "Сессия истекла, войдите заново"})
+        if user.get("is_banned") and not allow_banned:
+            raise HTTPException(403, detail={"message": "Аккаунт заблокирован"})
+        return user
+    # 3) dev/allow-unauth (в проде 401)
+    data = validate_webapp_init_data(x_telegram_init_data or "")
+    return _resolve_app_user_from_tg(data.get("user") or {})
+
+
+_CHANNEL_MEMBER_STATUSES = {"creator", "administrator", "member", "restricted"}
+
+
+def _check_channel_membership(user: dict[str, Any], *, force: bool = False) -> bool:
+    """подписан ли на обязательный канал (с кэшем ttl)."""
+    tgid = user.get("telegram_id")
+    if not tgid or not P().channel_id:
+        return True
+    # кэш: channel_ok не чаще ttl
+    if not force and int(user.get("channel_ok") or 0) == 1:
+        ts = parse_iso(user.get("channel_checked_at"))
+        if ts and (utcnow() - ts).total_seconds() < CHANNEL_CHECK_TTL:
+            return True
+    status = notifier.get_chat_member_status(P().channel_id, int(tgid))
+    if status is None:
+        # не смогли проверить (бот не админ канала?)
+        print(f"[channel] не удалось проверить подписку user {user.get('id')} "
+              f"(бот админ канала {P().channel_id}?)", flush=True)
+        return True  # fail-open
+    subscribed = status in _CHANNEL_MEMBER_STATUSES and status not in ("left", "kicked")
+    try:
+        db.execute(
+            "UPDATE users SET channel_ok = ?, channel_checked_at = ? WHERE id = ?",
+            (1 if subscribed else 0, db.utcnow_iso(), user["id"]),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return subscribed
+
+
+def require_channel_dep(
+    user: dict = Depends(_app_user_from_init),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+) -> dict[str, Any]:
+    """действия: tg без подписки на канал -> 403 (только если подписка обязательна в панели)."""
+    if user.get("telegram_id") and channel_required():
+        if not _check_channel_membership(user, force=False):
+            raise HTTPException(403, detail={
+                "message": f"Подпишитесь на канал {P().name}, чтобы продолжить",
+                "code": "channel_required",
+                "channel_url": P().channel_url,
+            })
+    return user
+
+
+@app.get("/api/app/membership")
+def app_membership(
+    force: int = Query(0),
+    user: dict = Depends(_app_user_from_init),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+) -> dict[str, Any]:
+    """статус подписки на канал. required — обязательна (без неё дальше нельзя);
+    если не обязательна, мини-приложение предлагает подписаться с кнопкой «Пропустить». Для email — не спрашиваем."""
+    fresh = get_user(int(user["id"])) or user
+    if not fresh.get("telegram_id") or not P().channel_id:
+        return {"required": False, "subscribed": True, "channel_url": P().channel_url}
+    required = channel_required()
+    # принудительная перепроверка: rate limit
+    if force:
+        allowed, _ = ratelimit.rate_limit(f"membership:{fresh['id']}", 6, 60)
+        force = 1 if allowed else 0
+    subscribed = _check_channel_membership(fresh, force=bool(force))
+    return {
+        "required": required,
+        "subscribed": bool(subscribed),
+        "channel_url": P().channel_url,
+    }
+
+
+@app.get("/api/app/me")
+def app_me(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    return {"user": app_user_payload(fresh, app_source(request))}
+
+
+# ── семейная подписка ──
+class FamilyInviteBody(BaseModel):
+    query: str = Field("", max_length=120)
+
+
+class FamilyJoinBody(BaseModel):
+    code: str = Field("", max_length=64)
+
+
+def _family_tg_notify(u: Optional[dict[str, Any]], text: str) -> None:
+    """сообщение ботом проекта (best-effort: семья не должна падать из-за телеграма)."""
+    try:
+        tgid = int((u or {}).get("telegram_id") or 0)
+        if not tgid:
+            return
+        payload: dict[str, Any] = {"chat_id": tgid, "text": text, "parse_mode": "HTML",
+                                   "disable_web_page_preview": True}
+        url = P().miniapp_url
+        if url:
+            payload["reply_markup"] = {"inline_keyboard": [[
+                {"text": f"Открыть {P().name}", "web_app": {"url": url}},
+            ]]}
+        notifier.call("sendMessage", payload, timeout=10.0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[family] не удалось отправить сообщение: {exc}", flush=True)
+
+
+def family_keeps_key(owner: Optional[dict[str, Any]]) -> bool:
+    """features.family_keep_key в project.json проекта владельца (у FGN): при выходе/удалении гостя
+    ключ владельца НЕ сбрасывается и устройства не отвязываются."""
+    try:
+        return bool(owner) and bool(projects.get(projects.of(owner)).feature("family_keep_key"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _family_revoke_owner_key(owner: Optional[dict[str, Any]], who: str) -> None:
+    """участник ушёл из семьи, но ссылка подписки владельца у него осталась в VPN-клиенте:
+    перевыпускаем ключ владельца, чтобы старая ссылка перестала работать
+    (кроме проектов с features.family_keep_key — там только уведомление владельцу)."""
+    if not owner:
+        return
+    if family_keeps_key(owner):
+        _family_tg_notify(owner, f"{_esc_html(who)} больше не в вашей семье.")
+        return
+    try:
+        reset_user_subscription(owner)
+        # устройства ушедшего занимали слоты владельца: отвязываем все, как при обычном перевыпуске
+        try:
+            client, rw = _rw_find_user(get_user(int(owner["id"])) or owner)
+            if client and rw:
+                client.delete_all_user_hwid_devices({"userId": _rw_num_id(rw)})
+        except Exception as exc:  # noqa: BLE001
+            forum.report_error("Семья: не удалось отвязать устройства владельца", f"{type(exc).__name__}: {exc}")
+        for mid in family.member_ids(int(owner["id"])):
+            _family_tg_notify(get_user(mid), "Ключ семейной подписки обновился. Откройте приложение и "
+                                             "добавьте подписку заново на своих устройствах.")
+    except Exception as exc:  # noqa: BLE001
+        forum.report_error("Семья: не удалось перевыпустить ключ владельца",
+                           f"owner={owner.get('id')}: {type(exc).__name__}: {exc}")
+        _family_tg_notify(owner, f"{_esc_html(who)} больше не в вашей семье. Перевыпустите ключ в приложении "
+                                 "(Подписка → Перевыпустить ключ), чтобы старая ссылка перестала работать.")
+        return
+    _family_tg_notify(owner, f"{_esc_html(who)} больше не в вашей семье. Мы перевыпустили ключ, чтобы старая "
+                             "ссылка перестала работать, — обновите подписку на своих устройствах в приложении.")
+
+
+def _family_state(fresh: dict[str, Any]) -> dict[str, Any]:
+    """состояние семьи для экрана «Добавить в семью».
+
+    Владелец получает код и участников, участник — только имя владельца (код семьи ему не нужен
+    и не показывается), остальные — пустое состояние.
+    """
+    owner = family_owner_for(fresh)
+    if owner is not None:
+        return {"role": "member", "code": None, "members": [], "can_invite": False,
+                "max_members": family.max_members(projects.of(owner)),
+                "owner_name": _user_label(owner), "owner_id": int(owner["id"])}
+    uid = int(fresh["id"])
+    pid = projects.of(fresh)
+    live = family.has_paid_sub(uid)
+    if not live and not family.has_members(uid):
+        return {"role": "none", "code": None, "members": [], "can_invite": False,
+                "max_members": family.max_members(pid), "owner_name": None}
+    return {
+        # код создаём только владельцу с живой подпиской (без подписки он всё равно бесполезен);
+        # запись появляется один раз, когда владелец сам открыл экран семьи, дальше GET — только чтение
+        "code": family.code_for(uid, pid) if live else None,
+        "members": family.members(uid),
+        "max_members": family.max_members(pid),
+        "role": "owner",
+        "can_invite": live,
+        "owner_name": None,
+    }
+
+
+@app.get("/api/app/family")
+def app_family(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """семья: владелец — код приглашения и участники; участник — чья подписка действует."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    return _family_state(fresh)
+
+
+@app.post("/api/app/family/members")
+def app_family_add(body: FamilyInviteBody, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """пригласить в семью: @username, почта, ID или ссылка на профиль."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Вы участник семьи — приглашать может только владелец"})
+    allowed, retry = ratelimit.rate_limit(f"family:add:{int(fresh['id'])}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много приглашений. Повторите через {retry} сек."})
+    try:
+        target = family.add_member(int(fresh["id"]), projects.of(fresh), body.query)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    if target:
+        # не больше одного сообщения в сутки от одного владельца одному человеку
+        # (цикл «пригласить → удалить» не должен превращаться в рассылку)
+        ok_msg, _ = ratelimit.rate_limit(f"family:msg:{int(fresh['id'])}:{int(target['id'])}", 1, 86400)
+        ok_target, _ = ratelimit.rate_limit(f"family:msg-to:{int(target['id'])}", 5, 86400)
+        if ok_msg and ok_target:
+            _family_tg_notify(target, f"Вас пригласили в семейную подписку {_esc_html(P().name)}. "
+                                      "Откройте приложение, чтобы принять приглашение.")
+    return _family_state(get_user(int(fresh["id"])) or fresh)
+
+
+@app.delete("/api/app/family/members/{key}")
+def app_family_remove(key: str, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """убрать участника или отменить приглашение (только владелец)."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Вы участник семьи — участников удаляет владелец"})
+    allowed, retry = ratelimit.rate_limit(f"family:del:{int(fresh['id'])}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много изменений. Повторите через {retry} сек."})
+    try:
+        removed = family.remove_member(int(fresh["id"]), key)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    if removed and removed.get("family_was_active"):
+        _family_tg_notify(removed, f"Вас убрали из семейной подписки {_esc_html(P().name)}.")
+        _family_revoke_owner_key(fresh, _user_label(removed))
+    return _family_state(get_user(int(fresh["id"])) or fresh)
+
+
+@app.post("/api/app/family/code")
+def app_family_code(user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """заменить код семьи: старый код перестаёт работать."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Вы участник семьи — код меняет владелец"})
+    if not family.has_paid_sub(int(fresh["id"])):
+        raise HTTPException(400, detail={"message": "Сначала оформите подписку"})
+    allowed, retry = ratelimit.rate_limit(f"family:code:{int(fresh['id'])}", 5, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Код меняли слишком часто. Повторите через {retry} сек."})
+    family.rotate_code(int(fresh["id"]), projects.of(fresh))
+    return _family_state(fresh)
+
+
+@app.post("/api/app/family/join")
+def app_family_join(body: FamilyJoinBody, request: Request,
+                    user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """войти в семью по коду владельца или по персональному токену приглашения."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    uid = int(fresh["id"])
+    allowed, retry = ratelimit.rate_limit(f"family:join:{uid}", 10, 900)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много попыток. Повторите через {retry} сек."})
+    ip = _client_ip(request)
+    if ip:
+        ok_ip, _ = ratelimit.rate_limit(f"family:join:ip:{ip}", 40, 900)
+        if not ok_ip:
+            raise HTTPException(429, detail={"message": "Слишком много попыток. Повторите позже."})
+    try:
+        info = family.join(fresh, body.code)
+    except family.FamilyError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    owner = get_user(int(info["owner_id"]))
+    if owner:
+        _family_tg_notify(owner, f"{_esc_html(_user_label(fresh))} вошёл в вашу семейную подписку.")
+    return {"success": True, "owner_id": int(info["owner_id"]), "owner_name": info["owner_name"]}
+
+
+@app.post("/api/app/family/leave")
+def app_family_leave(user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """выйти из семьи: подписка владельца больше не действует."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    owner_id = family.leave(int(fresh["id"]))
+    if owner_id is None:
+        raise HTTPException(400, detail={"message": "Вы не в семье"})
+    _family_revoke_owner_key(get_user(owner_id), _user_label(fresh))
+    return {"success": True}
+
+
+@app.post("/api/app/me/email/request")
+def app_me_email_request(body: UpdateEmailBody, user: dict = Depends(_app_user_from_init), request: Request = None) -> dict[str, Any]:  # type: ignore[assignment]
+    """Отправить код для привязки/смены email (нужно подтверждение кодом)."""
+    email = (body.email or "").strip().lower()
+    if not _valid_email(email):
+        raise HTTPException(400, detail={"message": "Введите корректный email"})
+    clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ? AND project_id = ?",
+                        (email, user["id"], projects.of(user)))
+    merge = None
+    if clash:
+        other = get_user(int(clash["id"]))
+        if other:
+            merge = merge_preview(get_user(int(user["id"])) or user, other)  # 409, если объединить нельзя
+
+    allowed, retry = ratelimit.rate_limit(f"emailbind:{user['id']}", 3, 300)
+    if allowed:
+        ip = _client_ip(request)
+        if ip:
+            allowed, retry = ratelimit.rate_limit(f"emailbind_ip:{ip}", 10, 300)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много запросов. Повторите через {retry} сек."})
+
+    code, throttled = create_email_code(email)
+    if not throttled:
+        send_login_code(email, code)
+    resp: dict[str, Any] = {"ok": True, "throttled": throttled, "resend_after": EMAIL_CODE_RESEND}
+    if merge:
+        resp["merge"] = merge  # мини-приложение покажет предупреждение об объединении
+    if ENV != "production" and not mailer.is_configured():
+        resp["dev_code"] = code
+    return resp
+
+
+@app.post("/api/app/me/terms")
+def app_me_accept_terms(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """согласие с офертой и политикой."""
+    db.execute("UPDATE users SET terms_accepted_at = COALESCE(terms_accepted_at, ?) WHERE id = ?",
+               (iso(), user["id"]))
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    return {"user": app_user_payload(fresh, app_source(request))}
+
+
+@app.put("/api/app/me/email")
+def app_me_email(body: EmailVerifyBody, request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """привязать/сменить email после кода из письма."""
+    email = (body.email or "").strip().lower()
+    if not _valid_email(email):
+        raise HTTPException(400, detail={"message": "Некорректный email"})
+    _email_verify_limits(email, request)
+    clash = db.fetchone("SELECT id FROM users WHERE lower(email) = ? AND id != ? AND project_id = ?",
+                        (email, user["id"], projects.of(user)))
+    other = get_user(int(clash["id"])) if clash else None
+    if other and not body.merge:
+        # код не тратим, пока нет согласия на объединение
+        raise HTTPException(409, detail={"message": "Этот email уже есть у другого аккаунта",
+                                         "merge": merge_preview(get_user(int(user["id"])) or user, other)})
+    if not verify_email_code(email, body.code or ""):
+        raise HTTPException(401, detail={"message": "Неверный или истёкший код"})
+    merged = None
+    old_email = (get_user(int(user["id"])) or user).get("email")
+    if other:
+        merged = merge_accounts(int(user["id"]), int(other["id"]))
+    db.execute("UPDATE users SET email = ? WHERE id = ?", (email, user["id"]))
+    _email_changed(old_email, email)
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    return {"user": serialize_app_user(fresh, app_source(request)), "merged": merged}
+
+
+@app.delete("/api/app/me/email")
+def app_me_email_unbind(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if not fresh.get("telegram_id"):
+        raise HTTPException(400, detail={"message": "Нельзя отвязать email: это единственный способ входа"})
+    db.execute("UPDATE users SET email = NULL WHERE id = ?", (user["id"],))
+    _email_changed(fresh.get("email"), None)
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    return {"user": app_user_payload(fresh, app_source(request))}
+
+
+@app.put("/api/app/me/telegram")
+def app_me_telegram(body: OauthBody, request: Request, merge: bool = Query(False),
+                    user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """привязать telegram; при конфликте 409 или merge=1."""
+    validated = validate_oauth_login(body.model_dump())
+    new_tg = int(validated.get("id") or 0)
+    if not new_tg:
+        raise HTTPException(400, detail={"message": "Нет Telegram id"})
+    clash = db.fetchone("SELECT id FROM users WHERE telegram_id = ? AND id != ? AND project_id = ?",
+                        (new_tg, user["id"], projects.of(user)))
+    if clash:
+        other = get_user(int(clash["id"]))
+        assert other is not None
+        if not merge:
+            raise HTTPException(409, detail={"message": "Этот Telegram уже есть у другого аккаунта",
+                                             "merge": merge_preview(get_user(int(user["id"])) or user, other)})
+        merge_accounts(int(user["id"]), int(other["id"]))
+    before = get_user(int(user["id"])) or user
+    db.execute(
+        "UPDATE users SET telegram_id = ?, username = COALESCE(?, username) WHERE id = ?",
+        (new_tg, validated.get("username"), user["id"]),
+    )
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    # rw ищет по tg id: переносим привязку вместе
+    if before.get("telegram_id") != new_tg:
+        try:
+            client, rw = _rw_find_user(before)
+            rw_id = _rw_num_id(rw) if rw else None
+            if client and rw_id:
+                client.update_user(id=rw_id, telegram_id=new_tg)
+        except Exception as exc:  # noqa: BLE001
+            forum.report_error("Смена Telegram: не удалось обновить Remnawave", f"user {user['id']}: {type(exc).__name__}: {exc}")
+    return {"user": app_user_payload(fresh, app_source(request))}
+
+
+def _has_trial_ever(user_id: int) -> bool:
+    return bool(db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND type = 'trial' LIMIT 1", (user_id,)
+    ))
+
+
+def _has_any_sub(user_id: int) -> bool:
+    return bool(db.fetchone("SELECT id FROM subscriptions WHERE user_id = ? LIMIT 1", (user_id,)))
+
+
+def _clear_trial_claim(user_id: int, telegram_id: Optional[int] = None) -> None:
+    """после RESET_TRIAL можно взять пробный снова."""
+    db.execute("DELETE FROM trial_claims WHERE user_id = ?", (int(user_id),))
+    tg = telegram_id
+    if tg is None:
+        u = get_user(int(user_id)) or {}
+        tg = u.get("telegram_id")
+    if tg:
+        db.execute("DELETE FROM trial_claims WHERE telegram_id = ? AND project_id = "
+                   "(SELECT project_id FROM users WHERE id = ?)", (int(tg), int(user_id)))
+
+
+def _trial_blocks(user_id: int) -> Optional[str]:
+    """почему пробный недоступен; None — можно выдать."""
+    u0 = get_user(int(user_id)) or {}
+    if int(u0.get("trial_reset") or 0):
+        # админ сбросил пробный: мешает только живая подписка (старые/платные в прошлом — нет)
+        if db.fetchone(
+            "SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('Active', 'Banned') "
+            "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1", (int(user_id), iso()),
+        ):
+            return "has_sub"
+        return None
+    if db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status != 'Deleted' LIMIT 1",
+        (int(user_id),),
+    ):
+        return "has_sub"
+    if db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND type != 'trial' LIMIT 1",
+        (int(user_id),),
+    ):
+        return "had_paid"
+    u = get_user(int(user_id)) or {}
+    if u.get("telegram_id") and db.fetchone(
+        "SELECT 1 FROM trial_claims WHERE telegram_id = ? AND project_id = ?", (int(u["telegram_id"]), projects.of(u))
+    ):
+        return "claimed"
+    return None
+
+
+_TRIAL_REASON_TEXT = {
+    "off": "пробный выключен в панели (общий переключатель)",
+    "off_miniapp": "пробный выключен для мини-приложения",
+    "off_web": "пробный выключен для сайта",
+    "has_sub": "есть подписка (действующая или истёкшая)",
+    "had_paid": "раньше была платная подписка",
+    "claimed": "этот Telegram уже брал пробный",
+}
+
+
+def trial_reason(user_id: int, source: Optional[str] = None) -> Optional[str]:
+    """почему пробный недоступен (код), None — доступен."""
+    if not trial_enabled():
+        return "off"
+    if source is not None and not trial_source_enabled(source):
+        return "off_miniapp" if source == "miniapp" else "off_web"
+    return _trial_blocks(user_id)
+
+
+def _trial_available_for(user_id: int, source: Optional[str] = None) -> bool:
+    """пробный доступен: вкл (в т.ч. для мини-приложения/сайта), нет живой/платной подписки, tg ещё не брал."""
+    if not trial_enabled_for(source):
+        return False
+    return _trial_blocks(user_id) is None
+
+
+@app.get("/api/app/subscription")
+def app_subscription(request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    # участник семьи пользуется подпиской владельца: ключ и трафик — его
+    owner = family_owner_for(fresh)
+    view = owner or fresh
+    keys = db.fetchall(
+        "SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id DESC", (view["id"],)
+    )
+    serialized = [serialize_key(k, view) for k in keys]
+    active = next((k for k in serialized if k.get("status") == "Active"), None)
+    status = subscription_status_for_user(view)
+    expired_key = None
+    delete_at = None
+    if status == "expired" and owner is None:
+        last = last_expired_subscription(int(fresh["id"]))
+        if last:
+            expired_key = serialize_key(last, fresh)
+            exp = parse_iso(last.get("expires_at"))
+            if exp:
+                delete_at = iso(exp + timedelta(days=fulfillment.DELETE_AFTER_DAYS))
+    return {
+        "status": status,
+        "until": paid_until_for_user(int(view["id"])) if status in ("active", "trial") else None,
+        "key": active if status in ("active", "trial") else None,
+        # закончившаяся подписка и дата автоудаления
+        "expired_key": expired_key,
+        "delete_at": delete_at,
+        "keys": [k for k in serialized if k.get("status") != "Deleted"],
+        "trial_enabled": trial_enabled_for(app_source(request)),
+        # в семье пробный не нужен: подписка уже действует
+        "trial_available": False if owner is not None else _trial_available_for(int(fresh["id"]), app_source(request)),
+        # семья: участник видит, чья подписка действует (экран «Настроить подписку»)
+        "family": ({"role": "member", "owner_name": _user_label(owner), "owner_id": int(owner["id"])}
+                   if owner is not None else None),
+    }
+
+
+def _rw_traffic(rw: dict[str, Any]) -> dict[str, Any]:
+    """трафик юзера remnawave (userTraffic в 3.x)."""
+    ut = rw.get("userTraffic") if isinstance(rw.get("userTraffic"), dict) else {}
+
+    def _n(*vals: Any) -> Optional[int]:
+        for v in vals:
+            try:
+                if v is not None:
+                    return int(float(v))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    return {
+        "used_bytes": _n(ut.get("usedTrafficBytes"), rw.get("usedTrafficBytes"), rw.get("used_traffic_bytes")),
+        "limit_bytes": _n(rw.get("trafficLimitBytes"), rw.get("traffic_limit_bytes")) or 0,
+        "strategy": str(rw.get("trafficLimitStrategy") or rw.get("traffic_limit_strategy") or "NO_RESET").upper(),
+        "last_reset_at": rw.get("lastTrafficResetAt") or ut.get("lastTrafficResetAt"),
+    }
+
+
+@app.get("/api/app/subscription/traffic")
+def app_subscription_traffic(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """сколько трафика потрачено; available=false если не узнали."""
+    fresh = get_user(int(user["id"])) or user
+    view = family_owner_for(fresh) or fresh  # в семье трафик общий — считаем по владельцу
+    try:
+        _client, rw = _rw_find_user(view)
+    except Exception:  # noqa: BLE001
+        rw = None
+    if not isinstance(rw, dict):
+        return {"available": False}
+    return {"available": True, **_rw_traffic(grace.mask_rw(int(view["id"]), rw))}
+
+
+@app.get("/api/app/setup-status")
+def app_setup_status(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """нужен ли онбординг «не завершили настройку»."""
+    fresh = get_user(int(user["id"])) or user
+    # в семье «своё» состояние подключения — у владельца подписки
+    view = family_owner_for(fresh) or fresh
+    has_sub = bool(db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' LIMIT 1",
+        (view["id"],),
+    ))
+    ever: Optional[bool] = None
+    if has_sub:
+        try:
+            ever = provisioning.user_ever_connected(
+                int(view.get("telegram_id") or 0), view.get("email"))
+        except Exception:  # noqa: BLE001
+            ever = None
+    return {
+        "show_setup_prompt": bool(has_sub and ever is False),
+        "has_subscription": has_sub,
+        "ever_connected": ever,
+    }
+
+
+def unfreeze_legacy_frozen_subscriptions() -> int:
+    """заморозка удалена: frozen один раз возвращаем в работу."""
+    rows = db.fetchall("SELECT * FROM subscriptions WHERE status = 'Frozen'")
+    for sub in rows:
+        rem = int(sub.get("frozen_remaining") or 0)
+        new_exp = utcnow() + timedelta(seconds=max(0, rem))
+        db.execute(
+            "UPDATE subscriptions SET status = 'Active', frozen_at = NULL, frozen_remaining = NULL, "
+            "expires_at = ? WHERE id = ?",
+            (iso(new_exp), sub["id"]),
+        )
+        user = get_user(int(sub["user_id"]))
+        if user:
+            client, rw = _rw_find_user(user)
+            if client and rw:
+                try:
+                    client.enable_user(_rw_num_id(rw))
+                    client.update_user(id=_rw_num_id(rw), expire_at=new_exp, status="ACTIVE")
+                except Exception:  # noqa: BLE001
+                    pass
+            sync_user_status_from_subs(int(sub["user_id"]))
+    return len(rows)
+
+
+@app.post("/api/app/trial")
+def app_activate_trial(request: Request, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """активация бесплатного пробного (отдельно вкл/выкл для мини-приложения и сайта)."""
+    allowed, retry = ratelimit.rate_limit(f"trial:{user['id']}", 5, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if not fresh.get("terms_accepted_at"):
+        raise HTTPException(403, detail={"message": "Сначала примите условия оферты и политику конфиденциальности"})
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(400, detail={"message": "У вас есть семейная подписка — пробный период не нужен",
+                                         "code": "in_family"})
+    src = app_source(request)
+    if not trial_enabled_for(src):
+        print(f"[trial] отказ user {fresh['id']}: выключен для {src}", flush=True)
+        raise HTTPException(403, detail={"message": "Пробный период сейчас недоступен", "code": "trial_disabled"})
+    if not fresh.get("telegram_id"):
+        raise HTTPException(400, detail={"message": "Пробный доступен только при входе через Telegram",
+                                         "code": "need_telegram"})
+    live_trial = db.fetchone(
+        "SELECT * FROM subscriptions WHERE user_id = ? AND type = 'trial' AND status = 'Active' "
+        "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+        (int(fresh["id"]), iso()),
+    )
+    if live_trial:
+        return {"success": True, "subscription_id": live_trial["id"], "already": True}
+    why = _trial_blocks(int(fresh["id"]))
+    if why:
+        print(f"[trial] отказ user {fresh['id']}: {why}", flush=True)
+        raise HTTPException(400, detail={"message": "Пробный период уже был активирован", "code": "trial_used"})
+    cur = db.execute("INSERT OR IGNORE INTO trial_claims (project_id, telegram_id, user_id, claimed_at) VALUES (?, ?, ?, ?)",
+                     (projects.of(fresh), int(fresh["telegram_id"]), int(fresh["id"]), iso()))
+    if not cur.rowcount:
+        print(f"[trial] отказ user {fresh['id']}: claim", flush=True)
+        raise HTTPException(400, detail={"message": "Пробный период уже был активирован", "code": "trial_used"})
+    try:
+        result = fulfillment.grant_trial(fresh)
+        db.execute("UPDATE users SET trial_reset = 0 WHERE id = ?", (int(fresh["id"]),))
+    except Exception as exc:  # noqa: BLE001
+        db.execute("DELETE FROM trial_claims WHERE telegram_id = ? AND user_id = ? AND project_id = ?",
+                   (int(fresh["telegram_id"]), int(fresh["id"]), projects.of(fresh)))
+        forum.report_error("Не удалось выдать пробную подписку", f"{type(exc).__name__}: {exc}")
+        raise HTTPException(502, detail={"message": "Не удалось активировать пробный период"})
+    return {"success": True, **result}
+
+
+def _app_sub_url(user: dict[str, Any]) -> Optional[str]:
+    """url подписки для импорта в приложение — с подменой домена проекта пользователя."""
+    return subdomain.vpn(_app_sub_url_raw(user), project=projects.of(user))
+
+
+def _app_sub_url_raw(user: dict[str, Any]) -> Optional[str]:
+    # 1) remnawave: настоящая ссылка
+    client, rw = _rw_find_user(user)
+    if client and rw:
+        try:
+            u = client.subscription_url_for(rw)
+            if u:
+                return str(u)
+        except Exception:  # noqa: BLE001
+            pass
+    # 2) fallback: short_uuid или сохранённый конфиг
+    row = db.fetchone(
+        "SELECT short_uuid, key_config FROM subscriptions WHERE user_id = ? AND status != 'Banned' "
+        "ORDER BY id DESC LIMIT 1",
+        (user["id"],),
+    )
+    if not row:
+        return None
+    base = _env("REMWAVE_SUB_PUBLIC_URL")
+    if base and row.get("short_uuid"):
+        return f"{base.rstrip('/')}/api/sub/{row['short_uuid']}"
+    return row.get("key_config")
+
+
+@app.get("/api/app/subscription/applink")
+def app_subscription_applink(
+    app: str = Query("incy"),
+    user: dict = Depends(require_channel_dep),
+) -> dict[str, Any]:
+    """deep-link для добавления подписки в приложение."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if subscription_status_for_user(fresh) == "blocked":
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    # в семье ссылка подписки — владельца
+    view = family_owner_for(fresh) or fresh
+    if subscription_status_for_user(view) == "blocked":
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    sub_url = _app_sub_url(view)
+    if not sub_url:
+        raise HTTPException(404, detail={"message": "Нет активной подписки"})
+
+    which = (app or "incy").lower()
+    if which == "koala":
+        # Koala Clash (компьютер): koala-clash://install-config?url=… — без шифрования, его у Koala нет
+        import applinks  # type: ignore
+        link = applinks.build_link("koala", sub_url, name=P().app_link_name)
+        return {"app": "koala", "link": link, "encrypted": False, "subscription_url": sub_url,
+                "open_url": _deeplink_redirect_url(link, app="koala")}
+    if which in ("incy", "happ"):
+        # только зашифрованные ссылки: incy://crypt1/…, happ://crypt5/… (см. src/api/applinks.py)
+        import applinks  # type: ignore
+        try:
+            link = applinks.build_link(which, sub_url, name=P().app_link_name)
+        except applinks.AppLinkError as exc:
+            raise HTTPException(502, detail={"message": f"{exc}. Попробуйте ещё раз через минуту.",
+                                             "code": "applink_encrypt_failed"})
+        # telegram не открывает incy/happ:// сам — отдаём https-страницу перехода
+        return {"app": which, "link": link, "encrypted": True,
+                "open_url": _deeplink_redirect_url(link, app=which)}
+    # other: просто https
+    return {"app": "other", "link": sub_url, "encrypted": False, "open_url": sub_url}
+
+
+def _deeplink_redirect_url(deep_link: str, alt: Optional[str] = None, app: Optional[str] = None) -> str:
+    """https://мини-приложение/redirect.html?url=<схема>[&alt=…&app=…] для telegram.
+    redirect.html лежит в контейнере мини-приложения, поэтому база — P().miniapp_url
+    (SITE_URL — только если redirect.html выложен и там)."""
+    from urllib.parse import quote
+    base = (P().miniapp_url or P().site_url).rstrip("/")
+    if not base:
+        return deep_link
+    url = f"{base}/redirect.html?url={quote(deep_link, safe='')}"
+    if alt:
+        url += f"&alt={quote(alt, safe='')}"
+    if app:
+        url += f"&app={quote(app, safe='')}"
+    return url
+
+
+def _rw_device_limit(rw: Optional[dict[str, Any]]) -> Optional[int]:
+    """hwidDeviceLimit пользователя Remnawave (None — нет данных / без лимита)."""
+    if not isinstance(rw, dict):
+        return None
+    val = rw.get("hwidDeviceLimit", rw.get("hwid_device_limit"))
+    try:
+        n = int(val) if val is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= 100 else None
+
+
+@app.get("/api/app/devices")
+def app_devices(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    # участник семьи видит устройства общей подписки и может докупать слоты; удалять — только владелец
+    owner = family_owner_for(fresh)
+    view = owner or fresh
+    meta = get_plans_meta()
+    keys = db.fetchall(
+        "SELECT devices_limit, type FROM subscriptions WHERE user_id = ? AND status = 'Active'",
+        (view["id"],),
+    )
+    limit = max((int(k.get("devices_limit") or 0) for k in keys), default=1)
+    # докупка устройств — к платной подписке; и владельцу, и участникам семьи (слоты — в подписку владельца)
+    can_buy = any(str(k.get("type") or "") != "trial" for k in keys)
+
+    # реальные hwid из remnawave
+    devices: list[dict[str, Any]] = []
+    client, rw = _rw_find_user(view)
+    # лимит в Remnawave — источник правды: его могли поменять прямо в панели Remnawave.
+    # Подтягиваем в БД, иначе мини-апп покажет старый лимит, а продление вернёт его в панель.
+    rw_limit = _rw_device_limit(rw)
+    if rw_limit and rw_limit != limit and keys:
+        db.execute("UPDATE subscriptions SET devices_limit = ? WHERE user_id = ? AND status = 'Active'",
+                   (rw_limit, view["id"]))
+        limit = rw_limit
+    if client and rw:
+        try:
+            raw = unwrap_rw(client.get_user_hwid_devices(_rw_num_id(rw)))
+            items = raw.get("devices") if isinstance(raw, dict) else raw
+            for d in (items or []):
+                name = " · ".join(x for x in (d.get("platform"), d.get("deviceModel") or d.get("device_model")) if x)
+                devices.append({
+                    "id": d.get("hwid"),
+                    "name": name or "Устройство",
+                    "platform": d.get("platform"),
+                    "last_seen": d.get("updatedAt") or d.get("updated_at") or d.get("createdAt") or d.get("created_at"),
+                })
+        except Exception:  # noqa: BLE001
+            pass
+    active_sub = db.fetchone(
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' ORDER BY id DESC LIMIT 1", (view["id"],))
+    addons = fulfillment.device_addons_for((active_sub or {}).get("id"))
+    return {"devices": devices, "used": len(devices), "limit": limit, "can_buy": can_buy, "can_delete": owner is None,
+            "family_member": owner is not None,
+            "extra_device_price": float(meta["extra_device_price"]),
+            "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
+            "addon_months": list(fulfillment.DEVICE_ADDON_MONTHS),
+            "addons": [{"count": int(a["count"]), "expires_at": a["expires_at"]} for a in addons]}
+
+
+@app.delete("/api/app/devices/{device_id}")
+def app_revoke_device(device_id: str, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Устройства общие для семьи — их отвязывает владелец подписки"})
+    client, rw = _rw_find_user(fresh)
+    if not client or not rw:
+        raise HTTPException(400, detail={"message": "Устройства недоступны"})
+    if not device_id:
+        raise HTTPException(400, detail={"message": "Не указано устройство"})
+    try:
+        # отвязываем только у своего rw-аккаунта
+        client.delete_hwid_device({"userId": _rw_num_id(rw), "hwid": device_id})
+    except Exception as exc:  # noqa: BLE001
+        forum.report_error("Не удалось отвязать устройство (мини-приложение)", f"{type(exc).__name__}: {exc}")
+        raise HTTPException(502, detail={"message": "Не удалось отвязать устройство. Попробуйте позже."})
+    return {"success": True, "device_id": device_id}
+
+
+@app.post("/api/app/subscription/reissue")
+def app_reissue_key(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """перевыпуск ключа: новая ссылка, старая перестаёт работать, все устройства отвязываются."""
+    fresh = get_user(int(user["id"]))
+    assert fresh is not None
+    if family_owner_for(fresh) is not None:
+        raise HTTPException(403, detail={"message": "Ключ общий для семьи — перевыпустить его может владелец подписки"})
+    status = subscription_status_for_user(fresh)
+    if status == "blocked":
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    if status not in ("active", "trial"):
+        raise HTTPException(400, detail={"message": "Нет активной подписки"})
+    # не чаще 3 раз в сутки
+    allowed, retry = ratelimit.rate_limit(f"reissue:{fresh['id']}", 3, 86400)
+    if not allowed:
+        hours = max(1, int(retry // 3600) + 1)
+        raise HTTPException(429, detail={"message": f"Ключ уже перевыпускали несколько раз. Попробуйте через {hours} ч."})
+    info = reset_user_subscription(fresh)
+    # старые устройства отвязываем, чтобы ключ можно было заново добавить на свои
+    try:
+        client, rw = _rw_find_user(get_user(int(fresh["id"])) or fresh)
+        if client and rw:
+            client.delete_all_user_hwid_devices({"userId": _rw_num_id(rw)})
+    except Exception as exc:  # noqa: BLE001
+        forum.report_error("Перевыпуск ключа: не удалось отвязать устройства", f"{type(exc).__name__}: {exc}")
+    return {"success": True, "subscription_url": info.get("subscription_url")}
+
+
+def _compute_order_price(user: dict[str, Any], body: CreatePaymentBody) -> dict[str, Any]:
+    """цена заказа (руб/звёзды) с учётом назначения и скидки."""
+    prices = plan_price_map()
+    meta = get_plans_meta()
+    purpose = body.purpose or "subscription"
+    # подписка и доп. устройства — на 1/3/6/12 мес
+    req_months = int(body.months or 1)
+    allowed = fulfillment.DEVICE_ADDON_MONTHS if purpose == "devices" else fulfillment.SUB_PERIODS
+    if purpose != "traffic_reset" and req_months not in allowed:
+        raise HTTPException(400, detail={"message": "Срок: 1, 3, 6 или 12 месяцев"})
+    months = req_months if purpose != "traffic_reset" else 1
+    if purpose not in ("subscription", "extend", "devices", "traffic_reset", "gift"):
+        raise HTTPException(400, detail={"message": "Неизвестный тип платежа"})
+    # период — пакет проекта (plan_min_devices()); extra — только слоты сверх пакета (отрицательные с клиента игнор.)
+    pack = plan_min_devices()
+    plan_devices = pack if purpose in ("subscription", "extend") else int(body.plan_devices or 1)
+    extra_raw = int(body.extra_devices or 0)
+    extra = min(50, max(0, extra_raw))
+    extra_price = float(meta["extra_device_price"])
+    # разбивка для экрана оплаты (подписка/продление): тариф + доп. устройства
+    base_part: Optional[float] = None
+    devices_part = 0.0
+    keep = 0
+    min_devices = plan_min_devices()
+    default_devices = plan_default_devices()
+    # участник семьи: его оплата продлевает семейную подписку (владельца) — на столько устройств,
+    # сколько в ней сейчас, или больше; уменьшать может только владелец.
+    # докупка устройств участником идёт в подписку владельца (devices_target_user_id)
+    fam_owner = family_renew_owner(user) if purpose in ("subscription", "extend") else None
+    devices_locked = False
+    family_sub_id: Optional[int] = None
+
+    if purpose == "traffic_reset":
+        tr_price = float(db.get_setting("traffic_reset_price", "0") or 0)
+        if tr_price <= 0:
+            raise HTTPException(400, detail={"message": "Досрочный сброс трафика недоступен"})
+        if subscription_status_for_user(user) not in ("active", "trial"):
+            raise HTTPException(400, detail={"message": "Сброс трафика доступен только при активной подписке"})
+        price = tr_price
+        stars = int(round(tr_price))
+    elif purpose == "gift":
+        # подарок другу: тариф на период
+        extra = 0
+        price = float(fulfillment.period_price(months))
+        stars = int(fulfillment.period_stars(months))
+    elif purpose == "devices":
+        # доп. устройства со своим сроком: цена × кол-во × месяцы
+        if extra <= 0:
+            raise HTTPException(400, detail={"message": "Не указано число устройств"})
+        # гость семьи докупает слоты к общей подписке — подписке владельца
+        sub_uid = devices_target_user_id(user)
+        sub = None
+        if body.subscription_id:
+            sub = db.fetchone(
+                "SELECT id, expires_at, type, devices_limit FROM subscriptions WHERE id = ? AND user_id = ? AND status = 'Active'",
+                (body.subscription_id, sub_uid),
+            )
+            if not sub:
+                raise HTTPException(400, detail={"message": "Подписка не найдена или не активна"})
+        if not sub:
+            sub = db.fetchone(
+                "SELECT id, expires_at, type, devices_limit FROM subscriptions WHERE user_id = ? AND status = 'Active' "
+                "ORDER BY id DESC LIMIT 1",
+                (sub_uid,),
+            )
+        if not sub:
+            raise HTTPException(400, detail={"message": "Нет активной подписки для докупки устройств"})
+        if sub.get("type") == "trial":
+            raise HTTPException(400, detail={"message": "В пробной подписке докупить устройства нельзя — сначала оформите подписку"})
+        if int(sub.get("devices_limit") or 1) + extra > 50:
+            raise HTTPException(400, detail={"message": "Слишком много устройств в одной подписке"})
+        price = round(fulfillment.devices_cost(int(sub.get("devices_limit") or 1), extra) * months, 2)
+        stars = fulfillment.devices_cost_stars(int(sub.get("devices_limit") or 1), extra) * months
+        if stars <= 0:
+            stars = int(round(price))  # цена в ⭐ не задана (0) — как в рублях
+        if price <= 0:
+            raise HTTPException(400, detail={"message": "Стоимость докупки не рассчитана"})
+    else:
+        # покупка/продление: число устройств = план
+        target, upgrading_trial = fulfillment.find_extend_target(int(user["id"]), purpose, body.subscription_id)
+        if target and target.get("no_renew"):
+            raise HTTPException(400, detail={"message": "Продление этой подписки недоступно"})
+        # тариф = период за пакет проекта (3 устройства, у BatmanVPN — 1); сверх пакета — доплата. при продлении число устройств
+        # выбирается заново: можно и уменьшить до пакета, и увеличить до MAX_PLAN_DEVICES
+        base = fulfillment.period_price(months)
+        base_stars = fulfillment.period_stars(months)
+        total_devices = pack + extra
+        min_devices = pack
+        # по умолчанию — сколько устройств по тарифу сейчас в подписке (без отдельно докупленных:
+        # они со своим сроком и остаются сверху); уменьшить можно до пакета
+        default_devices = max(pack, plan_default_devices())
+        cur_target, upgrading_trial = fulfillment.find_extend_target(int(user["id"]), purpose, body.subscription_id)
+        if cur_target and not upgrading_trial:
+            cur_base = int(cur_target.get("devices_limit") or 0) - fulfillment.active_addon_devices(cur_target.get("id"))
+            default_devices = min(MAX_PLAN_DEVICES, max(pack, cur_base))
+        if fam_owner is not None:
+            # семейная подписка: минимум и по умолчанию — сколько в ней сейчас по тарифу
+            # (отдельно докупленные остаются сверху), меньше нельзя
+            fam_target, _ = fulfillment.find_extend_target(int(fam_owner["id"]), "subscription", None)
+            fam_cur = plan_default_devices()
+            if fam_target and fam_target.get("no_renew"):
+                raise HTTPException(400, detail={"message": "Продление семейной подписки недоступно"})
+            if fam_target:
+                family_sub_id = int(fam_target["id"])
+                fam_cur = int(fam_target.get("devices_limit") or 0) - fulfillment.active_addon_devices(fam_target.get("id"))
+            min_devices = default_devices = min(MAX_PLAN_DEVICES, max(pack, fam_cur))
+        if total_devices < min_devices:
+            extra = min_devices - pack
+            total_devices = min_devices
+        if total_devices > MAX_PLAN_DEVICES:
+            raise HTTPException(400, detail={"message": f"Устройств: не больше {MAX_PLAN_DEVICES}"})
+        keep = 0
+        add = max(0, extra)
+        devices_price = fulfillment.devices_cost(pack, add) * months
+        stars_dev = fulfillment.devices_cost_stars(pack, add) * months
+        base_part = float(base)
+        devices_part = float(devices_price)
+        price = float(base) + devices_price
+        stars = int(base_stars) + int(stars_dev)
+
+    # скидка: промо/акция; reset трафика без скидки
+    full_price = round(float(price), 2)
+    percent = 0.0
+    compensation_id = None
+    promo_activation_id = None
+    if purpose != "traffic_reset":
+        eff = effective_discount(int(user["id"]))
+        percent = float(eff["percent"])
+        if percent > 0:
+            price = discounted(price, percent)
+            stars = int(discounted(stars, percent))
+            compensation_id = eff.get("compensation_id")
+            promo_activation_id = eff.get("promo_activation_id")
+
+    return {"price": round(float(price), 2), "stars": int(stars), "months": months,
+            "extra": extra, "purpose": purpose, "full_price": full_price, "discount_percent": percent,
+            "compensation_id": compensation_id, "promo_activation_id": promo_activation_id,
+            "plan_devices": plan_devices,
+            "devices_total": plan_devices + extra + keep, "min_devices": min_devices,
+            "default_devices": default_devices,
+            "max_devices": MAX_PLAN_DEVICES, "extra_device_price": extra_price,
+            "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
+            "base_price": base_part, "devices_price": round(devices_part, 2),
+            "devices_locked": devices_locked, "family_sub_id": family_sub_id}
+
+
+def _referral_split(bal: float, price: float, pmin: float) -> float:
+    """сколько списать с реф. баланса с учётом минимума провайдера."""
+    if bal <= 0 or price <= 0:
+        return 0.0
+    desired = min(bal, price)
+    leftover = round(price - desired, 2)
+    if 0 < leftover < pmin:
+        desired = price if bal >= price else round(price - pmin, 2)
+    return round(max(0.0, min(bal, desired)), 2)
+
+
+def _referral_preview(user_id: int, price: float, method: str, use_ref: bool) -> dict[str, Any]:
+    """сколько спишется с реф. баланса и итог к оплате."""
+    pmin = provider_min_rub(method)
+    if not use_ref or method == "tg_stars" or price <= 0:
+        return {"referral_applied": 0.0, "charge": round(price, 2), "provider_min": pmin}
+    u = get_user(user_id)
+    bal = float((u or {}).get("partner_balance") or 0)
+    applied = _referral_split(bal, price, pmin)
+    return {"referral_applied": applied, "charge": round(price - applied, 2), "provider_min": pmin}
+
+
+@app.post("/api/app/payment/quote")
+def app_payment_quote(body: CreatePaymentBody, request: Request, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """предпросмотр цены без создания платежа."""
+    q = _compute_order_price(get_user(int(user["id"])) or user, body)
+    is_stars = body.method == "tg_stars"
+    prev = _referral_preview(int(user["id"]), q["price"], body.method, bool(body.use_referral_balance))
+    pm = pay_method(body.method, app_source(request))
+    return {
+        "total": float(q["stars"]) if is_stars else float(prev["charge"]),
+        "method_enabled": bool(pm and pm.get("enabled")),
+        "purpose": q["purpose"],
+        "price": q["price"],
+        "stars": q["stars"],
+        "full_price": q.get("full_price"),
+        "discount_percent": q.get("discount_percent") or 0,
+        "referral_applied": prev["referral_applied"],
+        "charge": 0 if is_stars else prev["charge"],
+        "provider_min": prev["provider_min"],
+        "is_stars": is_stars,
+        # устройства (подписка/продление): сколько будет, минимум, разбивка цены до скидки
+        "plan_devices": q.get("plan_devices"),
+        "devices_total": q.get("devices_total"),
+        "min_devices": q.get("min_devices"),
+        "default_devices": q.get("default_devices"),
+        "max_devices": q.get("max_devices"),
+        "extra_device_price": q.get("extra_device_price"),
+        "device_prices": q.get("device_prices"),
+        "base_price": q.get("base_price"),
+        "devices_price": q.get("devices_price"),
+        "devices_locked": bool(q.get("devices_locked")),
+        "family_member": q.get("family_sub_id") is not None,  # продлевает семейную подписку
+    }
+
+
+_MAIN_APP_CACHE: dict[str, dict[str, Any]] = {}  # по проектам: у каждого свой бот
+
+
+def _bot_has_main_app() -> bool:
+    """есть ли у бота проекта главное мини-приложение."""
+    now = time.time()
+    c = _MAIN_APP_CACHE.setdefault(db.pid(), {"at": 0.0, "value": None})
+    if c["value"] is not None and now - c["at"] < 600:
+        return bool(c["value"])
+    me = notifier.call("getMe", {}, timeout=5.0) or {}
+    val = bool(me.get("has_main_web_app")) if me else None
+    if val is not None:
+        c.update(at=now, value=val)
+    return bool(val)
+
+
+def _payment_return_url(payment_id: str, in_telegram: bool, failed: bool = False, origin: str = "") -> Optional[str]:
+    """куда ЮKassa вернёт после оплаты (сайт или мини-приложение).
+    origin — Origin запроса из браузера: если это домен проекта (сайт), возвращаем туда же —
+    вход на сайте хранится в его localStorage, на домене мини-приложения его нет."""
+    if in_telegram and P().bot_username:
+        tag = f"{'payfail' if failed else 'pay'}_{payment_id}"
+        link = (P().miniapp_link or "").strip().rstrip("/")
+        if re.fullmatch(r"https://t\.me/[A-Za-z0-9_]{4,32}/[A-Za-z0-9_]{3,64}", link):
+            return f"{link}?startapp={tag}"
+        if _bot_has_main_app():
+            return f"https://t.me/{P().bot_username}?startapp={tag}"
+        # нет главного мини-приложения: кнопка «открыть» через бота
+        return f"https://t.me/{P().bot_username}?start={tag}"
+    suffix = "&result=fail" if failed else ""
+    try:
+        from urllib.parse import urlparse as _up
+        o = _up((origin or "").strip())
+        host = (o.hostname or "").lower()
+        if o.scheme == "https" and host and host in P().hosts:
+            return f"https://{o.netloc}/payment/return?payment_id={payment_id}{suffix}"
+    except ValueError:
+        pass
+    if P().miniapp_url:
+        return f"{P().miniapp_url}/payment/return?payment_id={payment_id}{suffix}"
+    base = P().yookassa_return_url
+    return f"{base}?payment_id={payment_id}" if base else None
+
+
+@app.post("/api/app/payment/create")
+def app_payment_create(body: CreatePaymentBody, request: Request, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    # rate limit на создание платежей
+    allowed, retry = ratelimit.rate_limit(f"pay:{user['id']}", 20, 600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
+
+    if not user.get("terms_accepted_at"):
+        raise HTTPException(403, detail={"message": "Сначала примите условия оферты и политику конфиденциальности"})
+    q = _compute_order_price(user, body)
+    price = q["price"]
+    stars = q["stars"]
+    months = q["months"]
+    extra = q["extra"]
+    if q.get("family_sub_id"):
+        # участник семьи оплачивает продление семейной подписки (выдача — владельцу, см. grant_subscription)
+        body.purpose = "extend"
+        body.subscription_id = int(q["family_sub_id"])
+
+    # докупка без subscription_id: берём активную (у гостя семьи — подписку владельца)
+    if q["purpose"] == "devices" and not body.subscription_id:
+        s = db.fetchone(
+            "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'Active' "
+            "ORDER BY id DESC LIMIT 1", (devices_target_user_id(user),))
+        if s:
+            body.subscription_id = int(s["id"])
+
+    is_stars = body.method == "tg_stars"
+    pmin = provider_min_rub(body.method)
+    pm = pay_method(body.method, app_source(request))  # сайт и бот — свои способы
+    if not pm or not pm["enabled"]:
+        raise HTTPException(400, detail={"message": "Этот способ оплаты пока недоступен"})
+
+    # оплата реф. балансом (рубли, не stars), до 100%
+    referral_applied = 0.0
+    if body.use_referral_balance and not is_stars and price > 0:
+        fresh = get_user(int(user["id"]))
+        bal = float((fresh or {}).get("partner_balance") or 0)
+        if bal > 0:
+            referral_applied = _referral_split(bal, float(price), pmin)
+            if referral_applied > 0:
+                frozen = db.execute(
+                    "UPDATE users SET partner_balance = partner_balance - ? "
+                    "WHERE id = ? AND partner_balance >= ?",
+                    (referral_applied, int(user["id"]), referral_applied),
+                )
+                if db.changes() == 0:
+                    referral_applied = 0.0  # баланс изменился между чтением и списанием
+
+    charge = round(float(price) - referral_applied, 2)
+
+    # минимум провайдера, если ему что-то платим
+    if not is_stars and charge > 0 and charge < pmin:
+        if referral_applied > 0:  # разморозить, раз платёж не создаём
+            db.execute("UPDATE users SET partner_balance = partner_balance + ? WHERE id = ?",
+                       (referral_applied, int(user["id"])))
+        method_name = {"card": "картой", "sberpay": "через SberPay", "sbp": "через СБП"}.get(
+            body.method, "этим способом")
+        raise HTTPException(400, detail={
+            "message": f"Минимальная сумма оплаты {method_name} — {int(pmin)} ₽"})
+
+    # полностью с баланса: провайдер не нужен
+    fully_by_balance = (not is_stars) and charge <= 0 and referral_applied > 0
+    provider = "tg_stars" if is_stars else ("balance" if fully_by_balance else "yookassa")
+
+    payment = fulfillment.create_payment_intent(
+        user_id=int(user["id"]),
+        provider=provider,
+        method="balance" if fully_by_balance else body.method,
+        amount=float(max(0.0, charge)),
+        currency="XTR" if is_stars else "RUB",
+        stars=stars if is_stars else None,
+        purpose=body.purpose or "subscription",
+        plan_devices=int(q.get("plan_devices") or body.plan_devices),
+        months=months,
+        extra_devices=extra,
+        subscription_id=body.subscription_id,
+        referral_applied=referral_applied,
+    )
+    payment_id = payment["payment_id"]
+    if q.get("compensation_id"):
+        # скидка компенсации: спишется при оплате этого платежа
+        db.execute("UPDATE payments SET compensation_id = ? WHERE payment_id = ?", (int(q["compensation_id"]), payment_id))
+    if q.get("promo_activation_id"):
+        # скидка промокода «1 раз на семью»: сгорит при оплате этого платежа
+        db.execute("UPDATE payments SET promo_activation_id = ? WHERE payment_id = ?",
+                   (int(q["promo_activation_id"]), payment_id))
+    ret = str(body.return_to or "").strip()
+    if ret.startswith("/") and not ret.startswith("//") and len(ret) <= 200:
+        db.execute("UPDATE payments SET return_to = ? WHERE payment_id = ?", (ret, payment_id))
+
+    if fully_by_balance:
+        res = fulfillment.fulfill_payment(payment_id)
+        if res.get("ok"):
+            return {
+                "payment_id": payment_id, "amount": 0, "full_price": float(price),
+                "referral_applied": referral_applied, "currency": "RUB",
+                "method": "balance", "provider": "balance", "status": "paid", "paid": True,
+            }
+        fulfillment.mark_failed(payment_id, "balance_fulfill_failed")  # вернёт баланс
+        raise HTTPException(502, detail={"message": "Не удалось активировать. Средства возвращены на баланс."})
+
+    # описание для провайдера: «назначение (id юзера)»
+    title = P().name
+    description = _payment_description(q["purpose"], int(user["id"]))
+
+    if is_stars:
+        if telegram_stars is None or not telegram_stars.TelegramStars().is_configured():
+            fulfillment.mark_failed(payment_id, "stars_not_configured")
+            raise HTTPException(503, detail={"message": "Оплата звёздами недоступна"})
+        try:
+            link = telegram_stars.TelegramStars().create_invoice_link(
+                title=title, description=description, payload=payment_id, stars=stars
+            )
+        except Exception as exc:  # noqa: BLE001
+            fulfillment.mark_failed(payment_id, f"stars_invoice_error: {exc}")
+            forum.report_error("Не удалось создать счёт Telegram Stars", f"{type(exc).__name__}: {exc}")
+            raise HTTPException(502, detail={"message": "Не удалось создать счёт в звёздах"})
+        fulfillment.set_provider_data(payment_id, invoice_link=link)
+        return {
+            "payment_id": payment_id,
+            "amount": stars,
+            "currency": "XTR",
+            "method": body.method,
+            "provider": "tg_stars",
+            "invoice_link": link,
+            "pay_url": None,
+            "status": "pending",
+        }
+
+    if yookassa is None:
+        fulfillment.mark_failed(payment_id, "yookassa_module_missing")
+        raise HTTPException(503, detail={"message": "Платёжная система недоступна"})
+    client = yookassa.get_client()
+    if not client.is_configured():
+        fulfillment.mark_failed(payment_id, "yookassa_not_configured")
+        raise HTTPException(503, detail={"message": "Платёжная система не настроена"})
+
+    # куда вернуть после оплаты: мини-приложение или сайт
+    in_telegram = bool((request.headers.get("X-Telegram-Init-Data") or "").strip())
+    return_url = _payment_return_url(payment_id, in_telegram, origin=request.headers.get("Origin") or "")
+    # приложение (API v1): свой адрес возврата из панели — «Приложение (API)»
+    app_tpl = getattr(getattr(request, "state", None), "pay_return_url", None)
+    if app_tpl:
+        return_url = str(app_tpl).replace("{payment_id}", payment_id)
+    try:
+        yp = client.create_payment(
+            amount=float(charge),
+            method=body.method,
+            description=description,
+            return_url=return_url,
+            payment_id=payment_id,
+            user_id=str(user["telegram_id"] or f"web{int(user['id'])}"),
+            receipt_email=user.get("email"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        fulfillment.mark_failed(payment_id, f"yookassa_error: {exc}")
+        forum.report_error("Не удалось создать ссылку на оплату (ЮKassa)", f"{type(exc).__name__}: {exc}")
+        raise HTTPException(502, detail={"message": "Не удалось создать платёж"})
+
+    provider_txn = yp.get("id")
+    conf = yp.get("confirmation") if isinstance(yp.get("confirmation"), dict) else {}
+    pay_url = conf.get("confirmation_url")
+    fulfillment.set_provider_data(
+        payment_id, provider_payment_id=str(provider_txn) if provider_txn else None, pay_url=pay_url
+    )
+    return {
+        "payment_id": payment_id,
+        "amount": charge,
+        "full_price": float(price),
+        "referral_applied": referral_applied,
+        "currency": "RUB",
+        "method": body.method,
+        "provider": "yookassa",
+        "pay_url": pay_url,
+        "transaction_id": provider_txn,
+        "status": "pending",
+    }
+
+
+def _devices_label(n: int) -> str:
+    n = max(1, int(n))
+    if n == 1:
+        return "1 устройство"
+    if 2 <= n <= 4:
+        return f"{n} устройства"
+    return f"{n} устройств"
+
+
+@app.get("/api/app/payment/unseen")
+def app_payment_unseen(payment_id: Optional[str] = Query(None, max_length=64),
+                       user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """платёж, итог которого юзер ещё не видел."""
+    now = utcnow()
+    if payment_id:
+        row = db.fetchone(
+            "SELECT * FROM payments WHERE payment_id = ? AND user_id = ? AND provider != 'balance' AND created_at >= ?",
+            (str(payment_id), int(user["id"]), iso(now - timedelta(hours=24))))
+    else:
+        row = None
+    row = row or db.fetchone(
+        "SELECT * FROM payments WHERE user_id = ? AND result_seen_at IS NULL "
+        "AND provider != 'balance' AND created_at >= ? "
+        "AND (status IN ('paid', 'processing') OR (status = 'pending' AND created_at >= ?)) "
+        "ORDER BY created_at DESC LIMIT 1",
+        (int(user["id"]), iso(now - timedelta(hours=24)), iso(now - timedelta(minutes=30))),
+    )
+    if not row:
+        return {"payment": None}
+    return {"payment": {
+        "payment_id": row["payment_id"],
+        "status": row["status"],
+        "provider": row.get("provider"),
+        "purpose": row.get("purpose"),
+        "return_to": row.get("return_to"),
+        "pay_url": row.get("pay_url"),
+        "invoice_link": row.get("invoice_link"),
+    }}
+
+
+class PaymentSeenBody(BaseModel):
+    payment_id: str
+
+
+@app.post("/api/app/payment/seen")
+def app_payment_seen(body: PaymentSeenBody, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """юзер увидел итог оплаты: больше не показываем при старте."""
+    db.execute(
+        "UPDATE payments SET result_seen_at = ? WHERE payment_id = ? AND user_id = ? AND result_seen_at IS NULL",
+        (db.utcnow_iso(), str(body.payment_id), int(user["id"])),
+    )
+    return {"ok": True}
+
+
+@app.get("/api/app/payment/status")
+def app_payment_status(
+    payment_id: str = Query(...), user: dict = Depends(_app_user_from_init)
+) -> dict[str, Any]:
+    payment = fulfillment.get_payment(payment_id)
+    if not payment or int(payment["user_id"]) != int(user["id"]):
+        raise HTTPException(404, detail={"message": "Платёж не найден"})
+
+    # pending: спросить провайдера не чаще раза / 10 сек
+    if payment["status"] == "pending":
+        allowed, _ = ratelimit.rate_limit(f"paycheck:{payment_id}", 1, 10)
+        if allowed:
+            fulfillment.confirm_via_provider(payment_id)
+            payment = fulfillment.get_payment(payment_id) or payment
+
+    sub = None
+    if payment.get("subscription_id"):
+        row = db.fetchone("SELECT * FROM subscriptions WHERE id = ?", (payment["subscription_id"],))
+        if row:
+            sub = serialize_key(row, get_user(int(user["id"])))
+
+    return {
+        "payment_id": payment_id,
+        "status": payment["status"],  # pending | paid | failed
+        "provider": payment.get("provider"),
+        "amount": payment.get("amount"),
+        "currency": payment.get("currency"),
+        "pay_url": payment.get("pay_url"),
+        "invoice_link": payment.get("invoice_link"),
+        "purpose": payment.get("purpose"),
+        "method": payment.get("method"),
+        # для экрана «Оплачено»: срок, списано с баланса
+        "months": int(payment.get("months") or 0),
+        "days": fulfillment.period_days(int(payment.get("months") or 1)) if payment.get("purpose") in ("subscription", "gift") else None,
+        "stars": payment.get("stars"),
+        "referral_applied": float(payment.get("referral_applied") or 0),
+        "extra_devices": int(payment.get("extra_devices") or 0),
+        # купленный подарок: код показываем покупателю
+        "gift_code": (reflevels.create_bought_gift(int(user["id"]), int(payment.get("months") or 1), payment_id)
+                      if payment.get("purpose") == "gift" and payment["status"] == "paid" else None),
+        "subscription": sub,
+    }
+
+
+@app.post("/api/app/promocode/redeem")
+def app_promo_redeem(body: RedeemPromoBody, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    # защита от перебора промокодов
+    allowed, retry = ratelimit.rate_limit(f"promo:{user['id']}", 10, 600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много попыток. Повторите через {retry} сек."})
+    # подарок от друга (GIFT-…): месяц подписки
+    if reflevels.is_gift_code(body.code):
+        fresh = get_user(int(user["id"])) or user
+        if subscription_status_for_user(fresh) in ("blocked", "banned"):
+            raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+        try:
+            g = reflevels.redeem_gift(body.code, fresh)
+        except reflevels.RewardError as exc:
+            raise HTTPException(exc.status, detail={"message": exc.message})
+        return {"success": True, "type": "gift", "expires_at": g.get("expires_at")}
+    info = apply_promo_to_user(int(user["id"]), body.code)
+    if info.get("type") == "days":
+        return {"success": True, "type": "days", "days": info["days"], "gift_id": info["gift_id"],
+                "message": f"Вы получили {_days_ru(info['days'])} к подписке, чтобы получить нажмите кнопку «Забрать»"}
+    return {
+        "success": True,
+        "type": "discount",
+        "value": info["percent"],
+        "discount_percent": info["percent"],
+        "expires_at": info["expires_at"],
+    }
+
+
+def _days_ru(n: int) -> str:
+    n = int(n)
+    w = "день" if n % 10 == 1 and n % 100 != 11 else ("дня" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "дней")
+    return f"{n} {w}"
+
+
+def grant_days_all(user_id: int, days: int, reason: str) -> Optional[str]:
+    """+дни ко всей подписке: VPN (база + Remnawave). Нет подписки — выдаётся новая."""
+    extend_user_sub(int(user_id), int(days))
+    user = get_user(int(user_id))
+    if user:
+        _rw_sync_expiry(user)
+    return paid_until_for_user(int(user_id))
+
+
+@app.get("/api/app/day-gifts")
+def app_day_gifts(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """подарочные дни, ждущие кнопку «Забрать» (промокод на дни, подарок вернувшимся)."""
+    items = services.pending_day_gifts(int(user["id"]))
+    return {"items": [{**g, "text": (f"Вы получили {_days_ru(g['days'])} к подписке, чтобы получить нажмите кнопку «Забрать»"
+                                     if g["source"] == "promo" else
+                                     f"Мы скучали! Дарим {_days_ru(g['days'])} подписки — нажмите «Забрать»")}
+                      for g in items]}
+
+
+@app.post("/api/app/day-gifts/{gift_id}/claim")
+def app_day_gift_claim(gift_id: int, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    fresh = get_user(int(user["id"])) or user
+    if subscription_status_for_user(fresh) in ("blocked", "banned"):
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    try:
+        g = services.take_day_gift(int(user["id"]), gift_id)
+    except services.ServiceError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    try:
+        until = grant_days_all(int(user["id"]), int(g["days"]), f"daygift{int(g['id'])}")
+    except Exception as exc:  # noqa: BLE001
+        services.release_day_gift(int(g["id"]))
+        forum.report_error("Не удалось начислить подарочные дни", f"gift {g['id']}: {type(exc).__name__}: {exc}")
+        raise HTTPException(502, detail={"message": "Не удалось начислить дни, попробуйте позже"})
+    return {"success": True, "days": int(g["days"]), "expires_at": until,
+            "message": f"Готово! +{_days_ru(g['days'])} к подписке"}
+
+
+@app.get("/api/app/migration")
+def app_migration(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """перенос из старого VPN (ресейл): окно «<старый VPN> теперь FGN» при входе."""
+    fresh = get_user(int(user["id"])) or user
+    if subscription_status_for_user(fresh) in ("blocked", "banned"):
+        return {"pending": None}
+    try:
+        return {"pending": resale.pending_for(fresh)}
+    except Exception as exc:  # noqa: BLE001 — окно не должно ломать вход
+        print(f"[resale] pending user {fresh.get('id')}: {type(exc).__name__}: {exc}", flush=True)
+        return {"pending": None}
+
+
+@app.post("/api/app/migration/claim")
+def app_migration_claim(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """«Заменить ключ»: выдать перенесённый срок (≤ 30 дней) к подписке."""
+    allowed, retry = ratelimit.rate_limit(f"resale-claim:{user['id']}", 10, 60)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
+    fresh = get_user(int(user["id"])) or user
+    if subscription_status_for_user(fresh) in ("blocked", "banned"):
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    try:
+        return resale.claim(fresh)
+    except resale.ResaleError as exc:
+        if exc.status >= 500:
+            forum.report_error("Перенос из старого VPN: не удалось выдать подписку", f"user {fresh.get('id')}: {exc.message}")
+        raise _resale_http(exc)
+
+
+@app.get("/api/app/discount")
+def app_discount(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """итоговая скидка или {active: false}."""
+    return effective_discount(int(user["id"]))
+
+
+def mask_email(email: str) -> str:
+    """маскировка локальной части email."""
+    email = (email or "").strip()
+    if "@" not in email:
+        return email
+    local, _, dom = email.partition("@")
+    if len(local) <= 2:
+        masked = (local[:1] or "*") + "**"
+    else:
+        masked = local[0] + "**" + local[-2:]
+    return f"{masked}@{dom}"
+
+
+def _site_ref_link(uid: int) -> Optional[str]:
+    """реф. ссылка на сайт проекта: https://<сайт>/?ref=<id>; нет сайта или домена — None."""
+    if not P().feature("site"):
+        return None
+    base = (P().site_url or "").strip().rstrip("/")
+    if not base:
+        dom = (P().env("SITE_DOMAIN") or "").strip().strip("/")
+        base = f"https://{dom}" if dom else ""
+    return f"{base}/?ref={int(uid)}" if base else None
+
+
+@app.get("/api/app/referral")
+def app_referral(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """экран «Реферальная программа»: только то, что показывает мини-приложение (из друзей — последние 6 для чипов)."""
+    reflevels._ensure_schema()
+    fresh = get_user(int(user["id"])) or user
+    uid = int(fresh["id"])
+    invited = reflevels.invited_referrals(uid)
+    active = reflevels.active_referrals(uid) if invited else 0
+    lv = reflevels.level_for(active)
+    nxt = reflevels.next_level(active)
+    earn = reflevels.earnings(uid)
+    return {
+        "level": {"key": lv["key"], "name": lv["name"], "rate": reflevels.effective_rate(fresh, active),
+                  "level_rate": lv["rate"], "custom_rate": bool(fresh.get("partner_rate_custom"))},
+        "next_level": ({"key": nxt["key"], "name": nxt["name"], "need": nxt["min"], "rate": nxt["rate"]} if nxt else None),
+        "levels": reflevels.levels_public(),
+        "active_count": active,
+        "friends": reflevels.friends_preview(uid) if invited else [],
+        "earned_month": earn["month"],
+        "rewards": reflevels.rewards_state(fresh, active),
+        # реф. ссылка: t.me/<bot>?start=ref_<id>; у амбассадора — своя из панели
+        "code": str(uid),
+        "link": ambassadors.tg_link(fresh) or f"https://t.me/{P().bot_username}?start=ref_{uid}",
+        # у проекта есть сайт: ссылка на сайт (сайт сохранит ?ref= и привяжет друга при регистрации)
+        "site_link": (ambassadors.site_link(fresh) if P().feature("site") else None) or _site_ref_link(uid),
+        "ambassador": bool(fresh.get("amb_tg") or fresh.get("amb_site")),
+        "is_partner": bool(fresh.get("is_partner")),
+        "partner_balance": fresh.get("partner_balance", 0),
+        "partner_rate": fresh.get("partner_rate", 25),
+        "referrals_count": invited,
+        "earned_total": earn["total"],
+        "min_withdraw": int(services.MIN_WITHDRAW_RUB),
+    }
+
+
+@app.get("/api/app/gifts")
+def app_gifts(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """подарки пользователя: купленные и за реферальный уровень."""
+    return {"items": reflevels.my_gifts(int(user["id"])), "bot_link": f"https://t.me/{P().bot_username}"}
+
+
+@app.post("/api/app/referral/claim")
+def app_referral_claim(user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """бесплатная личная подписка за активных друзей."""
+    allowed, retry = ratelimit.rate_limit(f"refclaim:{user['id']}", 5, 600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
+    fresh = get_user(int(user["id"])) or user
+    if subscription_status_for_user(fresh) in ("blocked", "banned"):
+        raise HTTPException(403, detail={"message": "Подписка заблокирована"})
+    try:
+        res = reflevels.claim_self(fresh)
+    except reflevels.RewardError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    return {"success": True, **res}
+
+
+@app.post("/api/app/referral/gift")
+def app_referral_gift(user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    """создать подарок на месяц для друга."""
+    allowed, retry = ratelimit.rate_limit(f"refgift:{user['id']}", 10, 600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
+    fresh = get_user(int(user["id"])) or user
+    try:
+        res = reflevels.create_gift(fresh)
+    except reflevels.RewardError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+    return {"success": True, "code": res["code"], "bot_link": f"https://t.me/{P().bot_username}"}
+
+
+@app.get("/api/app/withdrawals")
+def app_withdrawals(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    rows = db.fetchall(
+        "SELECT * FROM withdrawals WHERE user_id = ? ORDER BY id DESC LIMIT 50",
+        (int(user["id"]),),
+    )
+    return {
+        "items": [services.serialize_withdrawal(w) for w in rows],
+        "min_withdraw": int(services.MIN_WITHDRAW_RUB),
+    }
+
+
+@app.post("/api/app/withdraw")
+def app_withdraw(body: WithdrawBody, user: dict = Depends(require_channel_dep)) -> dict[str, Any]:
+    # rate limit на заявки вывода
+    allowed, retry = ratelimit.rate_limit(f"withdraw:{user['id']}", 5, 600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Повторите через {retry} сек."})
+    try:
+        w = services.request_withdrawal(int(user["id"]), body.amount, body.address, body.method, body.bank)
+    except services.ServiceError as exc:
+        raise HTTPException(exc.status, detail={"message": exc.message})
+
+    # уведомление в форум «выводы»
+    try:
+        res = forum.notify_withdrawal(w)
+        if res and res.get("message_id"):
+            services.set_withdrawal_forum_ref(int(w["id"]), res.get("chat", {}).get("id") or forum.chat_id(), int(res["message_id"]))
+    except Exception:  # noqa: BLE001
+        pass
+
+    fresh = get_user(int(user["id"]))
+    return {
+        "success": True,
+        "withdrawal": services.serialize_withdrawal(w),
+        "partner_balance": (fresh or {}).get("partner_balance", 0),
+    }
+
+
+@app.get("/api/app/history")
+def app_history(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    uid = int(user["id"])
+    items = db.fetchall(
+        # только проведённые и возвраты
+        "SELECT t.*, p.purpose AS p_purpose, p.method AS p_method, p.provider AS p_provider, "
+        "p.stars AS p_stars, p.amount AS p_amount, p.extra_devices AS p_extra, p.grant_info AS p_grant, "
+        "p.id AS p_id, p.months AS p_months FROM transactions t "
+        "LEFT JOIN payments p ON p.payment_id = t.payment_id AND p.user_id = t.user_id "
+        "WHERE t.user_id = ? AND t.status IN ('completed', 'refunded') "
+        "ORDER BY t.created_at DESC, t.id DESC",
+        (uid,),
+    )
+    # первая оплата: покупка, дальше продление
+    first = db.fetchone(
+        "SELECT MIN(id) AS id FROM payments WHERE user_id = ? AND purpose IN ('subscription', 'extend') "
+        "AND status IN ('paid', 'completed', 'refunded')", (uid,))
+    first_id = (first or {}).get("id")
+    out = [_history_item(tx, first_id) for tx in items]
+    # выводы (отклонённые не показываем)
+    wd_status = {"pending": "на рассмотрении", "approved": "одобрен, ждёт перевода", "completed": "выплачено"}
+    for w in db.fetchall("SELECT * FROM withdrawals WHERE user_id = ? AND status IN ('pending', 'approved', 'completed')", (uid,)):
+        out.append({
+            "id": f"w{w['id']}", "title": "Вывод средств", "method": wd_status.get(w["status"], ""),
+            "amount": round(float(w.get("amount") or 0), 2), "stars": None, "direction": "out",
+            "status": "completed", "created_at": w.get("created_at"),
+            "payment_method": "withdrawal", "description": "Вывод средств",
+        })
+    out.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return {"items": out}
+
+
+_HISTORY_METHOD = {"sbp": "СБП", "card": "картой", "sberpay": "SberPay", "tg_stars": "звёздами",
+                   "stars": "звёздами", "balance": "с реф. баланса", "crypto": "криптой"}
+
+
+def _history_item(tx: dict[str, Any], first_sub_payment_id: Any = None) -> dict[str, Any]:
+    """строка истории для мини-приложения."""
+    method = str(tx.get("payment_method") or "")
+    amount = float(tx.get("amount") or 0)
+    stars = None
+    if tx.get("p_purpose"):  # операция связана с нашим платежом
+        purpose = str(tx["p_purpose"])
+        if purpose == "devices":
+            g = db.loads(tx.get("p_grant"), {}) if tx.get("p_grant") else {}
+            before, after = (g or {}).get("devices_before"), (g or {}).get("devices_after")
+            if before and after:
+                title = f"Покупка устройства ({before} → {after})"
+            else:
+                n = int(tx.get("p_extra") or 1)
+                title = f"Покупка устройства (+{n})"
+        elif purpose == "traffic_reset":
+            title = "Сброс трафика"
+        elif purpose == "gift":
+            title = "Подарок подписки"
+        else:
+            # оплата с реф. баланса / докупка устройств: всё равно подписка
+            title = "Покупка подписки" if tx.get("p_id") == first_sub_payment_id else "Продление подписки"
+        pm = str(tx.get("p_method") or tx.get("p_provider") or "")
+        sub = _HISTORY_METHOD["balance"] if tx.get("p_provider") == "balance" else _HISTORY_METHOD.get(pm.lower(), "")
+        if pm == "tg_stars" and tx.get("p_stars"):
+            stars = int(tx["p_stars"])
+        amount = -abs(float(tx.get("p_amount") if tx.get("p_amount") is not None else amount))
+        direction = "out"
+    elif method == "referral":
+        title, sub, direction = "Бонус за друга", "", "in"
+    elif method == "referral_reversal":
+        title, sub, direction = "Бонус за друга", "отменён: друг вернул оплату", "out"
+    elif amount >= 0:
+        title, sub, direction = "Пополнение баланса", "", "in"
+    else:
+        title, sub, direction = "Списание баланса", "", "out"
+    return {
+        "id": tx["id"],
+        "title": title,
+        "method": sub,
+        "amount": round(abs(amount), 2),
+        "stars": stars,
+        "direction": direction,
+        "status": tx.get("status"),
+        "created_at": tx.get("created_at"),
+        "purpose": tx.get("p_purpose") or None,
+        "months": int(tx["p_months"]) if tx.get("p_purpose") and tx.get("p_months") else None,
+        # старые поля для кэшированной старой версии мини-приложения
+        "payment_method": tx.get("payment_method"),
+        "description": title,
+    }
+
+
+@app.get("/api/app/plans")
+def app_plans() -> dict[str, Any]:
+    meta = get_plans_meta()
+    return {
+        "plans": get_active_plans(),
+        "extra_device_price": meta["extra_device_price"],
+        "base_price": meta["base_price"],
+        # тарифы по периодам
+        "devices": plan_min_devices(),
+        "pack_devices": plan_min_devices(),
+        "min_devices": plan_min_devices(),
+        "default_devices": plan_default_devices(),
+        # цена n-го устройства в ₽/мес (индекс n-1) — для выбора устройств без входа (сайт)
+        "device_prices": fulfillment.device_price_table(fulfillment.MAX_DEVICE_NO),
+        "max_devices": MAX_PLAN_DEVICES,
+        "periods": [
+            {
+                "months": m, "days": fulfillment.period_days(m),
+                "price": fulfillment.period_price(m),
+                "stars": fulfillment.period_stars(m),
+                "by_devices": {
+                    str(n): fulfillment.subscription_price(m, n)
+                    for n in range(plan_min_devices(), MAX_PLAN_DEVICES + 1)
+                },
+            }
+            for m in fulfillment.SUB_PERIODS
+        ],
+    }
+
+
+@app.get("/api/app/legal")
+def app_legal() -> dict[str, Any]:
+    return {
+        "offer": db.get_setting("offer_text", ""),
+        "privacy": db.get_setting("privacy_text", ""),
+    }
+
+
+def _require_internal(secret: Optional[str]) -> None:
+    """доступ к internal api; без секрета в проде закрыто."""
+    if not INTERNAL_API_SECRET:
+        if ENV == "production":
+            raise HTTPException(403, detail="Forbidden")
+        return
+    if not secret or not hmac.compare_digest(str(secret), INTERNAL_API_SECRET):
+        raise HTTPException(403, detail="Forbidden")
+
+
+@app.post("/api/telegram/webhook")
+@app.post("/api/telegram/webhook/{project}")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: Optional[str] = Header(None, alias="X-Telegram-Bot-Api-Secret-Token"),
+) -> dict[str, Any]:
+    # апдейт проверяем по secret из setwebhook
+    # без секрета в проде вебхук запрещён
+    if not P().webhook_secret:
+        if IS_PROD:
+            raise HTTPException(403, detail="Forbidden")
+    elif not x_telegram_bot_api_secret_token or not hmac.compare_digest(
+        str(x_telegram_bot_api_secret_token), P().webhook_secret
+    ):
+        raise HTTPException(403, detail="Forbidden")
+    try:
+        update = await request.json()
+    except Exception:  # noqa: BLE001
+        return {"ok": True}
+
+    try:
+        # pre_checkout_query: ответить за 10 сек
+        pcq = update.get("pre_checkout_query")
+        if pcq:
+            payment_id = pcq.get("invoice_payload") or ""
+            payment = fulfillment.get_payment(payment_id) if payment_id else None
+            ok = fulfillment.stars_precheckout_ok(payment, pcq)
+            body: dict[str, Any] = {"pre_checkout_query_id": pcq["id"], "ok": ok}
+            if not ok:
+                body["error_message"] = "Платёж не найден или уже обработан."
+            notifier.call("answerPreCheckoutQuery", body)
+            return {"ok": True}
+
+        message = update.get("message") or {}
+        sp = message.get("successful_payment")
+        if sp:
+            payment_id = sp.get("invoice_payload") or ""
+            charge_id = sp.get("telegram_payment_charge_id") or ""
+            if payment_id:
+                res = fulfillment.fulfill_payment(
+                    payment_id, stars_charge_id=charge_id, amount=sp.get("total_amount"),
+                    stars_payer_id=(message.get("from") or {}).get("id"),
+                )
+                chat_id = (message.get("chat") or {}).get("id")
+                if chat_id:
+                    text = ("✅ <b>Оплата получена!</b>\nПодписка активирована."
+                            if res.get("ok") else
+                            "⚠️ Оплата получена, но при активации возникла ошибка. Напишите в поддержку.")
+                    notifier.call("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+    except Exception as exc:  # noqa: BLE001
+        try:
+            forum.report_error("Ошибка обработки Telegram webhook", f"{type(exc).__name__}: {exc}")
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True}
+
+
+@app.get("/api/internal/ping")
+def internal_ping(x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret")) -> dict[str, Any]:
+    _require_internal(x_internal_secret)
+    return {"ok": True}
+
+
+class InternalFulfillBody(BaseModel):
+    payment_id: str
+    provider_payment_id: Optional[str] = None
+    amount: Optional[float] = None
+    stars_charge_id: Optional[str] = None
+
+
+@app.post("/api/internal/payments/fulfill")
+def internal_payment_fulfill(
+    body: InternalFulfillBody,
+    x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret"),
+) -> dict[str, Any]:
+    _require_internal(x_internal_secret)
+    return fulfillment.fulfill_payment(
+        body.payment_id,
+        provider_payment_id=body.provider_payment_id,
+        amount=body.amount,
+        stars_charge_id=body.stars_charge_id,
+    )
+
+
+@app.post("/api/internal/payments/fail")
+def internal_payment_fail(
+    body: InternalFulfillBody,
+    x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret"),
+) -> dict[str, Any]:
+    _require_internal(x_internal_secret)
+    fulfillment.mark_failed(body.payment_id, "provider_canceled")
+    return {"ok": True}
+
+
+@app.post("/api/internal/payments/chargeback")
+def internal_payment_chargeback(
+    body: InternalFulfillBody,
+    x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret"),
+) -> dict[str, Any]:
+    """сообщение о чарджбеке от провайдера: помечаем, автоматом не откатываем."""
+    _require_internal(x_internal_secret)
+    p = fulfillment.get_payment(body.payment_id)
+    if not p:
+        return {"ok": False, "error": "payment_not_found"}
+    if p.get("chargeback_reported_at"):
+        return {"ok": True, "skipped": "already_reported"}
+    db.execute("UPDATE payments SET chargeback_reported_at = ? WHERE payment_id = ? AND chargeback_reported_at IS NULL",
+               (db.utcnow_iso(), body.payment_id))
+    st = str(p.get("status") or "")
+    if st == "paid":
+        todo = "НЕ делайте возврат. Панель → Финансы → ⋯ → «Чарджбек»."
+    elif st in ("refunding", "refunded"):
+        todo = "ВНИМАНИЕ: по этому платежу уже делался возврат — деньги могли уйти дважды, свяжитесь с платёжной системой."
+    elif st == "chargeback":
+        todo = "Чарджбек в панели уже проведён."
+    else:
+        todo = f"Статус платежа: {st}."
+    try:
+        forum.report_error(
+            "Чарджбек по платежу",
+            f"payment_id={body.payment_id}, платёж провайдера {p.get('provider_payment_id')}, user id{p.get('user_id')}, "
+            f"{p.get('amount')}₽. {todo}",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "reported": True}
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    errs = exc.errors()
+    print(f"[valid] {request.method} {request.url.path}: {errs}", flush=True)
+    e = (errs or [{}])[0]
+    loc = [str(x) for x in (e.get("loc") or []) if x not in ("body", "query", "path")]
+    field = loc[-1] if loc else ""
+    names = {
+        "pay_mode": "оплата", "channel_id": "канал", "bot_token": "токен бота",
+        "admins": "админы", "squads_vpn": "сквады", "squads_trial": "сквады пробного",
+        "yookassa_shop_id": "shopId ЮKassa", "yookassa_secret_key": "ключ ЮKassa",
+        "domain": "домен", "ip": "IP",
+    }
+    name = names.get(field, field)
+    typ = e.get("type") or ""
+    if typ == "string_pattern_mismatch" and field == "pay_mode":
+        msg = "Оплата: выберите ЮKassa или Stars"
+    elif typ == "string_type":
+        msg = f"{name}: ожидается текст" if name else "Неверный тип поля"
+    else:
+        raw = e.get("msg") or "неверное значение"
+        msg = f"{name}: {raw}" if name else raw
+    return JSONResponse(status_code=400, content={"detail": {"message": msg}, "error": msg})
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    detail = exc.detail
+    # причина отказа в авторизации — в лог (docker logs blinvpn-api), иначе видно только «401»
+    if exc.status_code in (401, 403) and request.url.path.startswith(("/api/app/", "/api/v1/")):
+        msg = detail.get("message") if isinstance(detail, dict) else detail
+        print(f"[auth] {exc.status_code} {request.method} {request.url.path}: {msg} "
+              f"(initData: {'есть' if request.headers.get('x-telegram-init-data') else 'нет'}, "
+              f"сессия: {'есть' if request.headers.get('x-app-session') or request.headers.get('authorization') else 'нет'})",
+              flush=True)
+    headers = getattr(exc, "headers", None)  # WWW-Authenticate и т.п. не теряем
+    if isinstance(detail, dict) and "message" in detail:
+        return JSONResponse(status_code=exc.status_code, content={"detail": detail, "error": detail.get("message")},
+                            headers=headers)
+    if isinstance(detail, str):
+        return JSONResponse(status_code=exc.status_code, content={"detail": detail, "error": detail}, headers=headers)
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)
+
+
+@app.exception_handler(OverflowError)
+async def overflow_handler(_: Request, __: OverflowError):
+    # id слишком большой для sqlite: объекта нет
+    return JSONResponse(status_code=404, content={"detail": {"message": "Не найдено"}, "error": "Не найдено"})
+
+
+def _sup(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except support.SupportError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+
+
+def _support_user(user: dict[str, Any]) -> dict[str, Any]:
+    """из чёрного списка поддержку не видит."""
+    fresh = get_user(int(user["id"])) or user
+    if fresh.get("is_banned") and str(fresh.get("ban_reason") or "").startswith(blacklist.BAN_REASON_PREFIX):
+        raise HTTPException(403, detail={"message": "Поддержка недоступна"})
+    return fresh
+
+
+def _support_limits() -> dict[str, Any]:
+    return {"max_file_mb": support.MAX_FILE_BYTES // support.MB, "max_files": support.MAX_FILES_PER_MESSAGE,
+            "max_text": support.MAX_TEXT, "keep_days": support.KEEP_AFTER_CLOSE_DAYS}
+
+
+def _for_user(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """ответ юзеру без имён сотрудников и номеров."""
+    return [support.public_message(m) for m in msgs if not m.get("internal")]
+
+
+def _form_init_data(form: Any) -> Optional[str]:
+    raw = form.get("init_data") if form is not None else None
+    if raw is None:
+        return None
+    if hasattr(raw, "read"):
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+async def _stream_upload(request: Request, chat_id: int, uploader: str, uploader_id: str, name: str,
+                         form: Any = None) -> dict[str, Any]:
+    """сырые байты или multipart (Telegram WebView часто ломает octet-stream + кастомные заголовки)."""
+    ct = (request.headers.get("content-type") or "").lower()
+    if form is not None or "multipart/form-data" in ct:
+        form = form if form is not None else await request.form()
+        item = form.get("file")
+        if item is None:
+            raise HTTPException(400, detail={"message": "Файл не получен"})
+        fname = (getattr(item, "filename", None) or name or "file")[:200]
+        data = await item.read() if hasattr(item, "read") else bytes(item)
+        if len(data) > support.MAX_FILE_BYTES:
+            raise HTTPException(413, detail={"message": f"Файл больше {support.MAX_FILE_BYTES // support.MB} МБ"})
+        up = await run_in_threadpool(_sup, support.Upload, chat_id, uploader, uploader_id, fname)
+        try:
+            await run_in_threadpool(up.write, data)
+        except support.SupportError as e:
+            raise HTTPException(e.status, detail={"message": e.message})
+        except BaseException:
+            up.abort()
+            raise
+        # finish в потоке: выгрузка в S3 большого файла иначе вешает весь API
+        return await run_in_threadpool(_sup, up.finish)
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > support.MAX_FILE_BYTES:
+        raise HTTPException(413, detail={"message": f"Файл больше {support.MAX_FILE_BYTES // support.MB} МБ"})
+    up = _sup(support.Upload, chat_id, uploader, uploader_id, name)
+    if declared and declared > up.limit:
+        up.abort()
+        raise HTTPException(413, detail={"message": f"Файл больше {up.limit // support.MB} МБ"})
+    try:
+        async for chunk in request.stream():
+            up.write(chunk)
+    except support.SupportError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+    except BaseException:
+        up.abort()
+        raise
+    return await run_in_threadpool(_sup, up.finish)
+
+
+def _notify_support_forum(user: dict[str, Any], chat: dict[str, Any], msg: dict[str, Any]) -> None:
+    """сообщение юзера -> топик поддержки."""
+    try:
+        fresh = support.get_chat(int(chat["id"])) or chat
+        t = support.ticket_info(fresh) or {}
+        first = bool(db.fetchone("SELECT 1 FROM support_messages WHERE ticket_id = ? AND sender = 'user' AND id < ? LIMIT 1",
+                                 (msg.get("ticket_id"), msg["id"]))) is False
+        if not first and int(fresh.get("unread_admin") or 0) > 1:
+            prev = db.fetchone("SELECT created_at FROM support_messages WHERE chat_id = ? AND sender = 'user' AND id < ? "
+                               "ORDER BY id DESC LIMIT 1", (chat["id"], msg["id"]))
+            p = parse_iso(prev["created_at"]) if prev else None
+            if p and (utcnow() - p).total_seconds() < 120:
+                return
+        base = forum.panel_url()
+        who = forum.user_link(int(user["id"]))
+        head = f"🆕 <b>Новое обращение №{t.get('number')}</b>" if first else f"💬 <b>Обращение №{t.get('number')}</b>"
+        # поддержка общая на сеть: помечаем, из какого проекта пишет человек
+        proj = f"[{projects.get(projects.of(fresh)).name}] " if len(projects.ids()) > 1 else ""
+        head = f"{_esc_html(proj)}{head}"
+        text = _esc_html(msg.get("text") or "")[:600]
+        files = msg.get("files") or []
+        att = f"\n📎 {len(files)} влож." if files else ""
+        link = f'\n<a href="{_esc_html(base)}/support/{int(chat["id"])}">Открыть чат</a>' if base else ""
+        forum.send("support", f"{head} · {who} ({_esc_html(_user_label(user))})\n{text}{att}{link}")
+        if first:
+            webpush.send("all", f"🆕 {proj}Новое обращение", f"{_user_label(user)}: {(msg.get('text') or '📎 вложение')[:200]}",
+                         url=f"/support/{int(chat['id'])}", tag=f"chat{int(chat['id'])}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@projects.scoped(lambda user, *a, **kw: projects.of_user(user))
+def _notify_support_user(user: dict[str, Any], msg: dict[str, Any], chat: Optional[dict[str, Any]] = None) -> Optional[int]:
+    """ответ поддержки -> бот и почта проекта пользователя (поддержка общая, боты у проектов свои)."""
+    email = (user.get("email") or "").strip()
+    if email and chat is not None and mailer.is_configured():
+        last = parse_iso(chat.get("last_email_at")) if chat.get("last_email_at") else None
+        if not last or (utcnow() - last).total_seconds() > 600:
+            db.execute("UPDATE support_chats SET last_email_at = ? WHERE id = ?", (iso(), chat["id"]))
+            _mail_async(mailer.send_support_reply, email, msg.get("text") or "", len(msg.get("files") or []),
+                        f"{P().miniapp_url}/support" if P().miniapp_url else "")
+    tg = user.get("telegram_id")
+    if not tg:
+        return None
+    try:
+        payload: dict[str, Any] = {"chat_id": int(tg), "text": _tg_support_text(msg.get("text") or ""), "parse_mode": "HTML",
+                                   "link_preview_options": {"is_disabled": True}}
+        if P().miniapp_url:
+            payload["reply_markup"] = {"inline_keyboard": [[{"text": "Открыть чат", "web_app": {"url": f"{P().miniapp_url}/support"}}]]}
+        res = notifier.call("sendMessage", payload)
+        return int(res["message_id"]) if isinstance(res, dict) and res.get("message_id") else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _support_cleanup_loop() -> None:
+    """раз в 10 мин: чистка старых переписок и журнала."""
+    while True:
+        try:
+            db.execute("DELETE FROM panel_audit WHERE ts < ?", (iso(utcnow() - timedelta(days=180)),))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            r = support.cleanup()
+            if r.get("messages") or r.get("files"):
+                print(f"[support] удалено старых сообщений: {r['messages']}, файлов: {r['files']}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[support] cleanup failed: {exc}", flush=True)
+        time.sleep(600)
+
+
+def _support_autoclose_loop() -> None:
+    """раз в минуту: автозакрытие, возврат в пул после смены, автоштрафы."""
+    while True:
+        try:
+            support.auto_close_expired()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[support] autoclose failed: {exc}", flush=True)
+        try:
+            idle = support.auto_close_idle_users()
+            if idle:
+                print(f"[support] закрыто без ответа пользователя: {idle}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[support] idle-close failed: {exc}", flush=True)
+        try:
+            released = support.release_ended_shifts()
+            if released:
+                print(f"[support] после смены в пул: {released}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[support] shift-release failed: {exc}", flush=True)
+        try:
+            r = autofine.run(_autofine_notify)
+            if r["fines"]:
+                print(f"[autofine] выписано штрафов: {r['fines']}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[autofine] failed: {exc}", flush=True)
+        time.sleep(60)
+
+
+def _autofine_notify(st: dict[str, Any], text: str) -> None:
+    if not st.get("telegram_id"):
+        return
+    try:
+        notifier.admin_call("sendMessage", {"chat_id": int(st["telegram_id"]), "parse_mode": "HTML", "text": text}, timeout=10.0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_HOST_RX = re.compile(r"^(?=.{4,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$")
+
+
+def _server_ip() -> str:
+    ip = _env("SERVER_IP")
+    if ip:
+        return ip
+    try:
+        import socket as _s
+        with _s.socket(_s.AF_INET, _s.SOCK_DGRAM) as so:
+            so.connect(("1.1.1.1", 53))
+            return so.getsockname()[0]
+    except OSError:
+        return ""
+
+
+def _mail_smtp_params(body: dict[str, Any]) -> tuple[str, int, str, Optional[str]]:
+    provider = str(body.get("provider") or "")
+    if provider in mailer.SMTP_PRESETS:
+        host, port = mailer.SMTP_PRESETS[provider]
+    else:
+        host = str(body.get("host") or "").strip().lower()
+        try:
+            port = int(body.get("port") or 465)
+        except (TypeError, ValueError):
+            port = 0
+        if not _HOST_RX.fullmatch(host):
+            raise HTTPException(400, detail={"message": "Неверный адрес SMTP-сервера"})
+        if port not in (465, 587, 2525, 25):
+            raise HTTPException(400, detail={"message": "Порт — 465 или 587"})
+    user = str(body.get("user") or "").strip()
+    if not _valid_email(user):
+        raise HTTPException(400, detail={"message": "Неверный адрес почты"})
+    pwd = body.get("password")
+    pwd = re.sub(r"\s+", "", str(pwd))[:200] if pwd else None  # google показывает пароль с пробелами
+    return host, port, user, pwd
+
+
+@app.get("/api/panel/mail")
+def panel_mail_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    out: dict[str, Any] = {**mailer.public_config(), "server_ip": _server_ip()}
+    # письма проекта уходят с его сервера мини-приложения: IP, на связи ли агент, DNS-записи
+    route = miniapps.mail_route()
+    if route:
+        srv = miniapps.server(route["server_id"]) if route["server_id"] else None
+        out.update({"server_ip": route["ip"], "server_online": bool(route.get("local")) or miniapps.server_online(srv),
+                    "server_local": bool(route.get("local")),
+                    "records": miniapps.mail_dns()["records"]})
+    return out
+
+
+@app.post("/api/panel/mail/login-test")
+def panel_mail_login_test(body: dict[str, Any] = Body(...), _: dict = Depends(require_owner)) -> dict[str, Any]:
+    host, port, user, pwd = _mail_smtp_params(body)
+    if not pwd:
+        cur = mailer.config()
+        pwd = cur["password"] if cur.get("user") == user and cur.get("host") == host else ""
+    if not pwd:
+        raise HTTPException(400, detail={"message": "Введите пароль приложения"})
+    ok, err = mailer.smtp_login_test(host, port, user, pwd)
+    if not ok:
+        raise HTTPException(400, detail={"message": err})
+    return {"ok": True}
+
+
+@app.post("/api/panel/mail/port25")
+def panel_mail_port25(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    route = miniapps.mail_route()
+    if route:  # проверяем с сервера мини-приложения — письма уходят с него
+        return {"open": miniapps.port25_open(route["server_id"]), "server_ip": route["ip"]}
+    return {"open": mailer.port25_open(), "server_ip": _server_ip()}
+
+
+@app.post("/api/panel/mail/dns")
+def panel_mail_dns(body: dict[str, Any] = Body(...), _: dict = Depends(require_owner)) -> dict[str, Any]:
+    dom = str(body.get("domain") or "").strip().lower()
+    if not _HOST_RX.fullmatch(dom):
+        raise HTTPException(400, detail={"message": "Неверный домен"})
+    return {"records": mailer.dns_records(dom, _server_ip()), "ptr": f"mail.{dom}"}
+
+
+@app.put("/api/panel/mail")
+def panel_mail_save(body: dict[str, Any] = Body(...), _: dict = Depends(require_owner)) -> dict[str, Any]:
+    mode = str(body.get("mode") or "")
+    if mode == "off":
+        cur = mailer.config()
+        mailer.save_config("off", host=cur["host"], port=cur["port"], user=cur["user"], domain_name=cur["domain"])
+    elif mode == "smtp":
+        host, port, user, pwd = _mail_smtp_params(body)
+        cur = mailer.config()
+        same_box = cur.get("user") == user and str(cur.get("host") or "").lower() == host.lower()
+        if not pwd and not (same_box and cur.get("password")):
+            raise HTTPException(400, detail={"message": "Введите пароль приложения"})
+        if pwd is None and cur.get("source") == "env" and same_box:
+            pwd = cur["password"]
+        mailer.save_config("smtp", host=host, port=port, user=user, password=pwd)
+    elif mode == "direct":
+        dom = str(body.get("domain") or "").strip().lower()
+        if not _HOST_RX.fullmatch(dom):
+            raise HTTPException(400, detail={"message": "Неверный домен"})
+        mailer.ensure_dkim(dom)
+        mailer.save_config("direct", domain_name=dom)
+    else:
+        raise HTTPException(400, detail={"message": "Неверный способ"})
+    return panel_mail_get(_)
+
+
+@app.post("/api/panel/mail/send-test")
+def panel_mail_send_test(body: dict[str, Any] = Body(...), _: dict = Depends(require_owner)) -> dict[str, Any]:
+    to = str(body.get("to") or "").strip()
+    if not _valid_email(to):
+        raise HTTPException(400, detail={"message": "Неверный адрес"})
+    if not mailer.is_configured():
+        raise HTTPException(409, detail={"message": "Почта не настроена"})
+    ok, err = mailer.send(to, f"{mailer.mail_from_name()}: проверка почты", text="Почта настроена — письма уходят.")
+    if not ok:
+        raise HTTPException(502, detail={"message": err[:300]})
+    return {"ok": True}
+
+
+@app.on_event("startup")
+def _clean_usernames() -> None:
+    """разово чиним ники, попавшие до валидации."""
+    try:
+        for r in db.fetchall("SELECT id, username FROM users WHERE username IS NOT NULL"):
+            ok = names.tg_username(r["username"])
+            if ok != r["username"]:
+                db.execute("UPDATE users SET username = ? WHERE id = ?", (ok, r["id"]))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[names] cleanup failed: {exc}", flush=True)
+
+
+@app.on_event("startup")
+def _support_startup() -> None:
+    threading.Thread(target=_support_cleanup_loop, name="support-cleanup", daemon=True).start()
+    threading.Thread(target=_support_autoclose_loop, name="support-autoclose", daemon=True).start()
+
+
+class SupportMessageBody(BaseModel):
+    text: Optional[str] = ""
+    files: list[str] = Field(default_factory=list)
+    reply_to: Optional[int] = None
+    internal: bool = False  # комментарий только для сотрудников
+
+
+@app.get("/api/app/support")
+def app_support_get(after: int = Query(0, ge=0), user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    u = _support_user(user)
+    chat = support.chat_for_user(int(u["id"]), create=False)
+    t = support.ticket_info(chat) if chat else None
+    ids = support.alive_ticket_ids(int(chat["id"])) if chat else set()
+    return {
+        "chat": {"id": chat["id"], "unread": int(chat.get("unread_user") or 0)} if chat else None,
+        "ticket": {"status": t["status"]} if t else None,     # номер обращения юзеру не показываем
+        "messages": support.messages(int(chat["id"]), after, tickets=ids, for_user=True) if chat else [],
+        # изменённые/удалённые сообщения из уже показанных
+        "changes": support.changes(int(chat["id"]), after, tickets=ids, for_user=True) if chat and after else [],
+        "limits": _support_limits(),
+    }
+
+
+@app.post("/api/app/support/upload")
+async def app_support_upload(request: Request, name: str = Query("file", max_length=200)) -> dict[str, Any]:
+    # WebView Telegram часто срезает X-Telegram-Init-Data на бинарном XHR — берём init_data из формы
+    form = None
+    extra_init = None
+    ct = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in ct:
+        form = await request.form()
+        extra_init = _form_init_data(form)
+    user = _app_user_from_init(
+        request,
+        x_telegram_init_data=extra_init or request.headers.get("x-telegram-init-data"),
+        authorization=request.headers.get("authorization"),
+        x_app_session=request.headers.get("x-app-session"),
+    )
+    u = _support_user(user)
+    allowed, retry = ratelimit.rate_limit(f"supup:{u['id']}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много файлов. Повторите через {max(1, retry // 60)} мин."})
+    chat = support.chat_for_user(int(u["id"]))
+    return await _stream_upload(request, int(chat["id"]), "user", str(u["id"]), name, form=form)
+
+
+# ── загрузка частями: большие файлы (видео) с телефона ──
+# одним длинным запросом видео на 10+ секунд часто не доходит (мобильная сеть/прокси рвут долгую загрузку),
+# поэтому мини-приложение шлёт файл кусками по CHUNK_BYTES и повторяет кусок при обрыве.
+_CHUNK_BYTES = 2 * 1024 * 1024
+_CHUNKED_TTL = 30 * 60
+_chunked: dict[str, dict[str, Any]] = {}
+_chunked_lock = threading.Lock()
+
+
+def _chunked_gc() -> None:
+    now_t = time.time()
+    with _chunked_lock:
+        stale = [k for k, v in _chunked.items() if now_t - v["touched"] > _CHUNKED_TTL]
+        items = [_chunked.pop(k) for k in stale]
+    for it in items:
+        try:
+            it["up"].abort()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _chunk_user(request: Request) -> tuple[dict[str, Any], Any]:
+    form = None
+    extra_init = None
+    if "multipart/form-data" in (request.headers.get("content-type") or "").lower():
+        form = await request.form()
+        extra_init = _form_init_data(form)
+    user = _app_user_from_init(
+        request,
+        x_telegram_init_data=extra_init or request.headers.get("x-telegram-init-data"),
+        authorization=request.headers.get("authorization"),
+        x_app_session=request.headers.get("x-app-session"),
+    )
+    return _support_user(user), form
+
+
+def _chunked_get(upload_id: str, user_id: int) -> dict[str, Any]:
+    with _chunked_lock:
+        it = _chunked.get(str(upload_id))
+    if not it or int(it["user_id"]) != int(user_id):
+        raise HTTPException(404, detail={"message": "Загрузка прервана — прикрепите файл ещё раз"})
+    return it
+
+
+@app.post("/api/app/support/upload/start")
+async def app_support_upload_start(request: Request, name: str = Query("file", max_length=200),
+                                   size: int = Query(0, ge=0)) -> dict[str, Any]:
+    u, _ = await _chunk_user(request)
+    if size > support.MAX_FILE_BYTES:
+        raise HTTPException(413, detail={"message": f"Файл больше {support.MAX_FILE_BYTES // support.MB} МБ"})
+    allowed, retry = ratelimit.rate_limit(f"supup:{u['id']}", 30, 3600)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много файлов. Повторите через {max(1, retry // 60)} мин."})
+    await run_in_threadpool(_chunked_gc)
+    chat = support.chat_for_user(int(u["id"]))
+    up = await run_in_threadpool(_sup, support.Upload, int(chat["id"]), "user", str(u["id"]), name)
+    upload_id = secrets.token_urlsafe(18)
+    with _chunked_lock:
+        _chunked[upload_id] = {"up": up, "user_id": int(u["id"]), "touched": time.time(),
+                               "lock": asyncio.Lock(), "size": int(size)}
+    return {"upload_id": upload_id, "chunk_size": _CHUNK_BYTES}
+
+
+@app.post("/api/app/support/upload/{upload_id}/chunk")
+async def app_support_upload_chunk(upload_id: str, request: Request, offset: int = Query(..., ge=0)) -> dict[str, Any]:
+    u, form = await _chunk_user(request)
+    it = _chunked_get(upload_id, int(u["id"]))
+    item = form.get("chunk") if form is not None else None
+    if item is None or not hasattr(item, "read"):
+        raise HTTPException(400, detail={"message": "Кусок файла не получен"})
+    data = await item.read()
+    if len(data) > _CHUNK_BYTES:
+        raise HTTPException(413, detail={"message": "Слишком большой кусок"})
+    async with it["lock"]:
+        up = it["up"]
+        it["touched"] = time.time()
+        if offset + len(data) <= up.size:
+            return {"received": up.size}  # этот кусок уже дошёл (повтор после обрыва ответа)
+        if offset != up.size:
+            raise HTTPException(409, detail={"message": "Части файла пришли не по порядку", "received": up.size})
+        try:
+            await run_in_threadpool(up.write, data)
+        except support.SupportError as e:
+            with _chunked_lock:
+                _chunked.pop(str(upload_id), None)
+            raise HTTPException(e.status, detail={"message": e.message})
+        return {"received": up.size}
+
+
+@app.post("/api/app/support/upload/{upload_id}/finish")
+async def app_support_upload_finish(upload_id: str, request: Request) -> dict[str, Any]:
+    u, _ = await _chunk_user(request)
+    it = _chunked_get(upload_id, int(u["id"]))
+    async with it["lock"]:
+        with _chunked_lock:
+            _chunked.pop(str(upload_id), None)
+        up = it["up"]
+        if it["size"] and up.size != it["size"]:
+            up.abort()
+            raise HTTPException(400, detail={"message": "Файл загрузился не полностью — попробуйте ещё раз"})
+        return await run_in_threadpool(_sup, up.finish)
+
+
+@app.post("/api/app/support/upload/{upload_id}/abort")
+async def app_support_upload_abort(upload_id: str, request: Request) -> dict[str, Any]:
+    u, _ = await _chunk_user(request)
+    with _chunked_lock:
+        it = _chunked.get(str(upload_id))
+        if it and int(it["user_id"]) == int(u["id"]):
+            _chunked.pop(str(upload_id), None)
+        else:
+            it = None
+    if it:
+        await run_in_threadpool(it["up"].abort)
+    return {"ok": True}
+
+
+@app.post("/api/app/support/messages")
+def app_support_send(body: SupportMessageBody, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    u = _support_user(user)
+    allowed, retry = ratelimit.rate_limit(f"supmsg:{u['id']}", 30, 300)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком много сообщений. Повторите через {retry} сек."})
+    chat = support.chat_for_user(int(u["id"]))
+    msg = _sup(support.send_message, chat, "user", None, body.text or "", body.files, str(u["id"]), body.reply_to)
+    # уведомление команде (Telegram, push) — в фоне: иначе ответ ждал Telegram до 30 с на каждого админа,
+    # и поле ввода в мини-приложении «зависало» с текстом после первого сообщения
+    _support_notify_async(u, chat, msg)
+    return _for_user([msg])[0]
+
+
+def _support_notify_async(user: dict[str, Any], chat: dict[str, Any], msg: dict[str, Any]) -> None:
+    import threading
+    pid = projects.current_id()
+
+    def _run() -> None:
+        with projects.use(pid):
+            _notify_support_forum(user, chat, msg)
+
+    threading.Thread(target=_run, name="support-notify", daemon=True).start()
+
+
+class SupportCloseBody(BaseModel):
+    message_id: int
+
+
+@app.post("/api/app/support/close")
+def app_support_close(body: SupportCloseBody, user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    """кнопка «нет, спасибо»: закрыть обращение."""
+    u = _support_user(user)
+    chat = support.chat_for_user(int(u["id"]), create=False)
+    if not chat:
+        raise HTTPException(404, detail={"message": "Чат не найден"})
+    return _sup(support.user_close, chat, body.message_id)
+
+
+@app.post("/api/app/support/read")
+def app_support_read(user: dict = Depends(_app_user_from_init)) -> dict[str, Any]:
+    u = _support_user(user)
+    chat = support.chat_for_user(int(u["id"]), create=False)
+    if chat:
+        support.mark_read(int(chat["id"]), "user")
+    return {"ok": True}
+
+
+@app.get("/api/support/file/{fid}")
+def support_file(fid: str, exp: int = Query(0), sig: str = Query("", max_length=64)):
+    """вложение по подписанной ссылке."""
+    f = support.check_file_token(fid, exp, sig)
+    if not f:
+        raise HTTPException(404, detail={"message": "Файл не найден или ссылка устарела"})
+    if (f.get("storage") or "local") == "s3":
+        # файл отдаёт хранилище по временной ссылке
+        try:
+            return RedirectResponse(support.s3_download_url(f), status_code=302, headers={"Cache-Control": "no-store"})
+        except s3store.S3Error:
+            raise HTTPException(503, detail={"message": "Хранилище временно недоступно"})
+    inline = f["kind"] in ("image", "video")
+    from urllib.parse import quote
+    disp = ("inline" if inline else "attachment") + f"; filename*=UTF-8''{quote(f['name'])}"
+    return FileResponse(f["path"], media_type=f["mime"] if inline else "application/octet-stream", headers={
+        "Content-Disposition": disp,
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, max-age=3600",
+    })
+
+
+def _chat_visible(c: dict[str, Any], p: dict[str, Any], t: Any = False) -> bool:
+    """что видит сотрудник: владелец/куратор все; оператор — пул и свои (чужие взятые и эскалации скрыты)."""
+    if is_full(p):
+        return True
+    if t is False:
+        t = support.ticket_info(c)
+    if not t or t["status"] != "open":
+        return False
+    if t.get("escalated"):
+        return False
+    assigned = t.get("assigned_admin")
+    if assigned and assigned != p["actor"]:
+        return False
+    return True
+
+
+def _visible_tickets(chat: dict[str, Any], p: dict[str, Any]) -> Optional[set[int]]:
+    """какие обращения видит сотрудник."""
+    alive = support.alive_ticket_ids(int(chat["id"]))
+    if is_full(p):
+        return alive
+    ids = {int(r["id"]) for r in db.fetchall("SELECT id FROM support_tickets WHERE chat_id = ? AND assigned_admin = ?",
+                                            (int(chat["id"]), p["actor"]))}
+    t = support.open_ticket(chat)
+    # открытое без исполнителя — пул (можно читать и писать комментарии)
+    if t and not t.get("escalated") and not t.get("assigned_admin"):
+        ids.add(int(t["id"]))
+    return ids & alive
+
+
+def _tab_of(c: dict[str, Any], t: Optional[dict[str, Any]], p: dict[str, Any]) -> str:
+    """вкладки open/work/archive для ролей."""
+    if not t or t["status"] != "open":
+        return "archive"
+    mine = t.get("assigned_admin") == p["actor"]
+    if not is_full(p):
+        # у оператора open = только пул; чужие взятые сюда не попадают (_chat_visible)
+        return "mine" if mine else "open"
+    if not t.get("assigned_admin") and not t.get("escalated"):
+        return "open"
+    return "work"
+
+
+def _work_group(t: Optional[dict[str, Any]], p: dict[str, Any]) -> str:
+    """во вкладке «в работе»: escalated → mine → others."""
+    if not t:
+        return ""
+    if t.get("escalated") and not t.get("assigned_admin"):
+        return "escalated"
+    if t.get("assigned_admin") == p["actor"]:
+        return "mine"
+    return "others"
+
+
+_TICKET_JOIN = (
+    "t.id AS _tid, t.number AS _tnumber, t.status AS _tstatus, t.opened_at AS _topened, "
+    "t.assigned_admin AS _tadmin, t.assigned_name AS _tname, t.closed_at AS _tclosed, t.closed_by AS _tclosedby, "
+    "t.close_prompt_id AS _tcp, t.prompt_at AS _tprompt, t.escalated AS _tesc, t.escalate_note AS _tnote, "
+    "t.queue_at AS _tqueue"
+)
+
+
+def _ticket_from_join(c: dict[str, Any]) -> Optional[dict[str, Any]]:
+    if not c.get("_tid"):
+        return None
+    if (c.get("_tstatus") or "open") == "open":
+        return {"id": c["_tid"], "number": c["_tnumber"], "status": "open", "opened_at": c["_topened"],
+                "assigned_admin": c.get("_tadmin"), "assigned_name": c.get("_tname"),
+                "close_prompt": bool(c.get("_tcp")), "prompt_at": c.get("_tprompt") if c.get("_tcp") else None,
+                "escalated": bool(c.get("_tesc")), "escalate_note": c.get("_tnote"),
+                "queue_at": c.get("_tqueue") or c["_topened"]}
+    return {"id": c["_tid"], "number": c["_tnumber"], "status": "closed", "opened_at": c["_topened"],
+            "closed_at": c.get("_tclosed"), "closed_by": c.get("_tclosedby"),
+            "assigned_admin": c.get("_tadmin"), "assigned_name": c.get("_tname")}
+
+
+def _users_by_ids(ids: list[int]) -> dict[int, dict[str, Any]]:
+    uids = list({int(i) for i in ids if i})
+    if not uids:
+        return {}
+    marks = ",".join("?" * len(uids))
+    return {int(u["id"]): u for u in db.fetchall(f"SELECT * FROM users WHERE id IN ({marks})", tuple(uids))}
+
+
+def _sub_status_map(users: dict[int, dict[str, Any]]) -> dict[int, Optional[str]]:
+    """статус подписки пачкой — список чатов иначе делает по 3–4 SELECT на клиента и вешает панель."""
+    out: dict[int, Optional[str]] = {}
+    live: list[int] = []
+    for uid, u in users.items():
+        if u.get("is_banned"):
+            out[uid] = "banned"
+        elif u.get("created_at"):
+            live.append(uid)
+        else:
+            out[uid] = None
+    if not live:
+        return out
+    marks = ",".join("?" * len(live))
+    rows = db.fetchall(
+        f"SELECT user_id, status, type, expires_at, COALESCE(no_renew, 0) AS no_renew FROM subscriptions "
+        f"WHERE user_id IN ({marks})",
+        tuple(live),
+    )
+    now = utcnow()
+    banned: set[int] = set()
+    active: dict[int, dict[str, Any]] = {}
+    expired: set[int] = set()
+    any_sub: set[int] = set()
+    for r in rows:
+        uid = int(r["user_id"])
+        any_sub.add(uid)
+        if r["status"] == "Banned":
+            banned.add(uid)
+        if r["status"] == "Active":
+            exp = parse_iso(r.get("expires_at"))
+            if not exp or exp > now:
+                prev = active.get(uid)
+                if prev is None or (prev.get("expires_at") or "") < (r.get("expires_at") or "\xff"):
+                    active[uid] = r
+        if r["status"] in ("Active", "Expired") and not r["no_renew"]:
+            expired.add(uid)
+    for uid in live:
+        if uid in banned:
+            out[uid] = "blocked"
+        elif uid in active:
+            out[uid] = "trial" if active[uid].get("type") == "trial" else "active"
+        elif uid in expired:
+            out[uid] = "expired"
+        elif uid in any_sub:
+            out[uid] = "lapsed"
+        else:
+            out[uid] = "never"
+    return out
+
+
+def _panel_chat_row(c: dict[str, Any], p: dict[str, Any], t: Any = False,
+                    user: Optional[dict[str, Any]] = None, status: Any = False) -> dict[str, Any]:
+    u = user if user is not None else (get_user(int(c["user_id"])) or {"id": c["user_id"]})
+    if t is False:
+        t = support.ticket_info(c)
+    tt = dict(t) if t else None
+    if tt:
+        assigned = tt.get("assigned_admin")
+        tt["assigned_to_me"] = assigned == p["actor"]
+        tt["holder_role"] = _holder_role(assigned) if assigned else None
+        # куратор может забрать только у оператора; админ — у всех
+        tt["can_takeover"] = bool(
+            assigned and assigned != p["actor"] and tt.get("status") == "open"
+            and _can_manage_assigned(p, assigned)
+        )
+        tt.pop("assigned_admin", None)
+    st = status if status is not False else (subscription_status_for_user(u) if u.get("created_at") else None)
+    return {
+        "id": c["id"], "user_id": c["user_id"], "user_label": _user_label(u),
+        "project": projects.of(c), "project_name": projects.get(projects.of(c)).name,
+        "user_name": " ".join(filter(None, [u.get("first_name"), u.get("last_name")])) or None,
+        "is_banned": bool(u.get("is_banned")), "status": st,
+        "last_message_at": c.get("last_message_at"), "last_preview": c.get("last_preview"), "last_sender": c.get("last_sender"),
+        "unread": int(c.get("unread_admin") or 0),
+        "ticket": tt, "tab": _tab_of(c, t, p), "group": _work_group(t, p) if _tab_of(c, t, p) == "work" else "",
+    }
+
+
+SUPPORT_TABS_FULL = ("open", "work", "archive")
+SUPPORT_TABS_OPERATOR = ("open", "mine")
+
+
+@app.get("/api/panel/support/chats")
+def panel_support_chats(q: str = Query("", max_length=100), status: str = Query("open", max_length=10),
+                        project: str = Query("", max_length=24),
+                        p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """список обращений по вкладкам. Поддержка общая на всю сеть: чаты всех проектов (project= — фильтр)."""
+    tabs = SUPPORT_TABS_FULL if is_full(p) else SUPPORT_TABS_OPERATOR
+    if status not in tabs:
+        status = "open"
+    pf = projects.normalize(project)
+    pw, pp = (" AND c.project_id = ?", (pf,)) if pf else ("", ())
+    rows = db.fetchall(
+        f"SELECT c.*, {_TICKET_JOIN} FROM support_chats c "
+        "JOIN support_tickets t ON t.id = c.open_ticket_id WHERE c.open_ticket_id IS NOT NULL" + pw, pp)
+    if "archive" in tabs:
+        rows += db.fetchall(
+            f"SELECT c.*, {_TICKET_JOIN} FROM support_chats c LEFT JOIN support_tickets t ON t.id = ("
+            "SELECT MAX(id) FROM support_tickets WHERE chat_id = c.id) "
+            "WHERE c.open_ticket_id IS NULL AND c.last_message_at IS NOT NULL" + pw
+            + " ORDER BY c.last_message_at DESC LIMIT 1000", pp)
+    items = []
+    counts = {k: 0 for k in tabs}
+    for c in rows:
+        t = _ticket_from_join(c)
+        if not t:
+            continue
+        if not _chat_visible(c, p, t):
+            continue
+        if not admin_project_ok(p, c.get("project_id")):
+            continue
+        tab = _tab_of(c, t, p)
+        if tab not in counts:
+            continue
+        counts[tab] += 1
+        if tab == status:
+            items.append((c, t))
+    q = q.strip().lower().lstrip("@#")
+    if q:
+        umap = _users_by_ids([int(c["user_id"]) for c, _ in items])
+        def hit(c: dict[str, Any]) -> bool:
+            u = umap.get(int(c["user_id"])) or {}
+            hay = " ".join(str(x or "") for x in (u.get("id"), u.get("telegram_id"), u.get("username"), u.get("email"),
+                                                   u.get("first_name"), u.get("last_name"), c.get("last_preview"))).lower()
+            return q in hay
+        items = [(c, t) for c, t in items if hit(c)]
+    if status == "archive":
+        items.sort(key=lambda ct: ct[0].get("last_message_at") or "", reverse=True)
+    else:
+        # «в работе»: сначала переданные админу, потом мои, потом чужие; closing внизу
+        _wg = {"escalated": 0, "mine": 1, "others": 2}
+        items.sort(key=lambda ct: (_wg.get(_work_group(ct[1], p), 9) if status == "work" else 0,
+                                   1 if (ct[1] or {}).get("close_prompt") else 0, (ct[1] or {}).get("queue_at") or ""))
+    shown = items[:500]
+    umap = _users_by_ids([int(c["user_id"]) for c, _ in shown])
+    smap = _sub_status_map(umap)
+    return {"chats": [_panel_chat_row(c, p, t, user=umap.get(int(c["user_id"])) or {"id": c["user_id"]},
+                                      status=smap.get(int(c["user_id"]))) for c, t in shown],
+            "counts": counts, "tabs": list(tabs)}
+
+
+class TeamMessageBody(BaseModel):
+    text: str = Field("", max_length=teamchat.MAX_TEXT + 100)
+    reply_to: Optional[int] = Field(None, ge=1, le=2 ** 62)
+
+
+class TeamReadBody(BaseModel):
+    last_id: int = Field(0, ge=0, le=2 ** 62)
+
+
+def _team_call(fn, *a):
+    try:
+        return fn(*a)
+    except teamchat.TeamChatError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+
+
+def _team_role(p: dict[str, Any]) -> str:
+    return "owner" if p["kind"] == "owner" else str(p.get("role") or "operator")
+
+
+@app.get("/api/panel/team-chat")
+def panel_team_chat(after: int = Query(0, ge=0, le=2 ** 62), before: int = Query(0, ge=0, le=2 ** 62),
+                    p: dict = Depends(require_panel)) -> dict[str, Any]:
+    return {"messages": teamchat.messages(p["actor"], after, before), "last_read": teamchat.last_read(p["actor"]),
+            # удалённые за сутки: чтобы клиенты убрали текст
+            "deleted": teamchat.recently_deleted(), "edited": teamchat.recently_edited(p["actor"]) if after else [],
+            "me": {"actor": p["actor"], "owner": p["kind"] == "owner"}}
+
+
+@app.get("/api/panel/team-chat/members")
+def panel_team_members(_: dict = Depends(require_panel)) -> dict[str, Any]:
+    """активные сотрудники + админ — для @упоминаний в чате."""
+    return {"members": teamchat.members(OWNER_NAME)}
+
+
+@app.get("/api/panel/team-chat/unread")
+def panel_team_unread(p: dict = Depends(require_panel)) -> dict[str, Any]:
+    return {"unread": teamchat.unread(p["actor"])}
+
+
+@app.post("/api/panel/team-chat/messages")
+def panel_team_post(body: TeamMessageBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    allowed, retry = ratelimit.rate_limit(f"teamchat:{p['actor']}", 30, 60)
+    if not allowed:
+        raise HTTPException(429, detail={"message": f"Слишком часто. Подождите {retry} сек."})
+    name = p.get("name") or ("Администратор" if p["kind"] == "owner" else p.get("username") or "")
+    m = _team_call(teamchat.post, p["actor"], name, _team_role(p), body.text, body.reply_to)
+    try:
+        mentioned = teamchat.mentioned_actors(m["text"], exclude=p["actor"])
+        preview = m["text"][:140]
+        if mentioned:
+            webpush.send("all", f"{name} упомянул вас", preview, url="/support/team", tag="team-mention",
+                         only=mentioned)
+            webpush.send("all", f"Чат сотрудников · {name}", preview, url="/support/team", tag="team-chat",
+                         exclude=[p["actor"], *mentioned])
+        else:
+            webpush.send("all", f"Чат сотрудников · {name}", preview, url="/support/team", tag="team-chat",
+                         exclude=p["actor"])
+    except Exception:  # noqa: BLE001
+        pass
+    return m
+
+
+@app.post("/api/panel/team-chat/read")
+def panel_team_read(body: TeamReadBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    teamchat.mark_read(p["actor"], body.last_id)
+    return {"ok": True}
+
+
+@app.post("/api/panel/team-chat/messages/{message_id}/edit")
+def panel_team_edit(message_id: int, body: TeamMessageBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    return _team_call(teamchat.edit, p["actor"], message_id, body.text)
+
+
+@app.delete("/api/panel/team-chat/messages/{message_id}")
+def panel_team_delete(message_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    _team_call(teamchat.delete, p["actor"], p["kind"] == "owner", message_id)
+    return {"ok": True}
+
+
+@app.get("/api/panel/support/unread")
+def panel_support_unread(p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """бейдж поддержки: пул + мои с новыми."""
+    n = 0
+    for c in db.fetchall("SELECT * FROM support_chats WHERE open_ticket_id IS NOT NULL"):
+        t = support.ticket_info(c)
+        if not t or not _chat_visible(c, p, t):
+            continue
+        tab = _tab_of(c, t, p)
+        own = tab == "mine" or (tab == "work" and _work_group(t, p) == "mine")
+        escalated = tab == "work" and not t.get("assigned_admin") and t.get("escalated")
+        if tab == "open" or escalated or (own and int(c.get("unread_admin") or 0) > 0):
+            n += 1
+    return {"chats": n, "team": teamchat.unread(p["actor"])}
+
+
+def _panel_chat(chat_id: int, p: dict[str, Any]) -> dict[str, Any]:
+    chat = support.get_chat(chat_id)
+    if not chat or not _chat_visible(chat, p):
+        raise HTTPException(404, detail={"message": "Чат не найден"})
+    return chat
+
+
+def _started_by(chat: dict[str, Any], p: dict[str, Any]) -> bool:
+    t = support.open_ticket(chat)
+    return bool(t and t.get("assigned_admin") == p["actor"])
+
+
+@app.get("/api/panel/support/chats/{chat_id}")
+def panel_support_chat(chat_id: int, after: int = Query(0, ge=0), p: dict = Depends(require_panel)) -> dict[str, Any]:
+    chat = _panel_chat(chat_id, p)
+    full = is_full(p)
+    t = support.open_ticket(chat)
+    waiting = bool(t and support.waiting_since(int(t["id"])))
+    return {"chat": {**_panel_chat_row(chat, p), "started_by_me": _started_by(chat, p), "user_waiting": waiting},
+            "messages": _staff_view(support.messages(chat_id, after, tickets=_visible_tickets(chat, p)), p),
+            "changes": _staff_view(support.changes(chat_id, after, tickets=_visible_tickets(chat, p)), p) if after else [],
+            "edit_window_h": support.EDIT_WINDOW // 3600,
+            "limits": _support_limits(),
+            "me": {"name": p["name"], "role": p["role"], "full": full, "can_manage_user": can_manage_user(p, int(chat["user_id"])),
+                   "prompt_ttl_min": support.CLOSE_PROMPT_TTL // 60}}
+
+
+@app.post("/api/panel/support/chats/{chat_id}/read")
+def panel_support_read(chat_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    chat = _panel_chat(chat_id, p)
+    # прочитанным отмечает ведущий (или куратор/владелец)
+    if is_full(p) or _started_by(chat, p):
+        support.mark_read(chat["id"], "admin")
+    return {"ok": True}
+
+
+class SupportStartBody(BaseModel):
+    takeover: bool = False
+
+
+@app.post("/api/panel/support/chats/{chat_id}/start")
+def panel_support_start(chat_id: int, body: Optional[SupportStartBody] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    chat = _panel_chat(chat_id, p)
+    full = is_full(p)
+    _require_operator_shift(p)
+    if not full and not support.open_ticket(chat):
+        raise HTTPException(403, detail={"message": "Обращение закрыто. Оно откроется, когда пользователь напишет снова"})
+    takeover = bool(body and body.takeover) and full
+    t = support.open_ticket(chat)
+    if takeover and t and t.get("assigned_admin") and t.get("assigned_admin") != p["actor"]:
+        if not _can_manage_assigned(p, t.get("assigned_admin")):
+            who = {"owner": "администратор", "curator": "другой куратор"}.get(_holder_role(t.get("assigned_admin")) or "", "другой сотрудник")
+            raise HTTPException(403, detail={"message": f"Нельзя забрать обращение — его ведёт {who}"})
+    return _sup(support.start, chat, p["actor"], p["name"], takeover, _guard(p, "start"))
+
+
+@app.post("/api/panel/support/chats/{chat_id}/wait")
+def panel_support_wait(chat_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """ожидание без ответа пользователю: автоштраф по текущему ожиданию не начисляется."""
+    chat = _panel_chat(chat_id, p)
+    if not _started_by(chat, p):
+        raise HTTPException(409, detail={"message": "Сначала нажмите «Начать»"})
+    msg = _sup(support.ack_wait, chat, p["actor"], p["name"], _guard(p, "write"))
+    return _staff_view([msg], p)[0]
+
+
+@app.post("/api/panel/support/chats/{chat_id}/reopen")
+def panel_support_reopen(chat_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    if not is_full(p):
+        raise HTTPException(403, detail={"message": "Переоткрыть может только куратор или администратор"})
+    chat = _panel_chat(chat_id, p)
+    return _sup(support.reopen, chat, p["actor"], p["name"], _guard(p, "start"))
+
+
+class SupportCloseBody2(BaseModel):
+    force: bool = False
+
+
+@app.post("/api/panel/support/chats/{chat_id}/close")
+def panel_support_close(chat_id: int, body: Optional[SupportCloseBody2] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """закрыть: вопрос юзеру; force сразу (владелец/куратор)."""
+    chat = _panel_chat(chat_id, p)
+    full = is_full(p)
+    force = bool(body and body.force)
+    if force and not full:
+        raise HTTPException(403, detail={"message": "Закрыть сразу может только куратор или администратор"})
+    if not full and not _started_by(chat, p):
+        raise HTTPException(403, detail={"message": "Закрыть можно только своё обращение"})
+    res = _sup(support.close, chat, p["actor"], p["name"], force, _guard(p, "close"))
+    if res.get("state") == "asked":
+        user = get_user(int(chat["user_id"]))
+        if user:
+            _notify_support_user(user, res["message"], support.get_chat(int(chat["id"])))
+    return res
+
+
+class PoolBody(BaseModel):
+    note: str = Field("", max_length=500)
+
+
+@app.post("/api/panel/support/chats/{chat_id}/pool")
+def panel_support_pool(chat_id: int, body: Optional[PoolBody] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """вернуть в пул; оператор обязан указать причину."""
+    chat = _panel_chat(chat_id, p)
+    return _sup(support.to_pool, chat, p["actor"], p["name"], not is_full(p), _guard(p, "pool"),
+                (body.note if body else ""))
+
+
+class EscalateBody(BaseModel):
+    note: str = Field("", max_length=500)
+
+
+def _notify_admins_escalation(chat: dict[str, Any], who: str, note: str) -> None:
+    """передать админу: лс + push."""
+    u = get_user(int(chat["user_id"])) or {}
+    base = forum.panel_url()
+    text = (f"🆘 <b>Обращение передано админу</b>\nОт: {_esc_html(who)}\nПользователь: {_esc_html(_user_label(u))}"
+            + (f"\nПричина: {_esc_html(note)}" if note else "")
+            + (f'\n<a href="{_esc_html(base)}/support/{int(chat["id"])}">Открыть</a>' if base.startswith("https://") else ""))
+    ids: set[int] = set()
+    for part in str(forum.admin_chat_id() or "").replace(",", " ").split():
+        try:
+            ids.add(int(part))
+        except ValueError:
+            pass
+    ids |= {int(r["telegram_id"]) for r in db.fetchall("SELECT telegram_id FROM panel_staff WHERE role = 'curator' AND is_active = 1")}
+
+    def run() -> None:
+        for tg in ids:
+            try:
+                notifier.admin_call("sendMessage", {"chat_id": tg, "text": text, "parse_mode": "HTML",
+                                                    "link_preview_options": {"is_disabled": True}}, timeout=10.0)
+            except Exception:  # noqa: BLE001
+                pass
+    threading.Thread(target=run, daemon=True).start()
+    webpush.send("full", "🆘 Передано админу", f"{who}: {_user_label(u)}" + (f" — {note}" if note else ""),
+                 url=f"/support/{int(chat['id'])}", tag=f"esc{int(chat['id'])}")
+
+
+@app.post("/api/panel/support/chats/{chat_id}/escalate")
+def panel_support_escalate(chat_id: int, body: Optional[EscalateBody] = None, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """оператор отдаёт своё обращение админу."""
+    chat = _panel_chat(chat_id, p)
+    if is_full(p):
+        raise HTTPException(400, detail={"message": "Вы и так администратор — верните обращение в пул или ведите сами"})
+    res = _sup(support.escalate, chat, p["actor"], p["name"], (body.note if body else ""))
+    _notify_admins_escalation(chat, p["name"], res.get("note") or "")
+    return {"ok": True}
+
+
+def _holder_role(assigned: Optional[str]) -> Optional[str]:
+    """роль текущего ведущего: owner | curator | operator."""
+    if not assigned:
+        return None
+    if assigned == "owner":
+        return "owner"
+    if assigned.startswith("staff:"):
+        try:
+            st = staffmod.get(int(assigned.split(":", 1)[1]))
+        except ValueError:
+            return "operator"
+        return staffmod.role_of(st) if st else "operator"
+    return "operator"
+
+
+def _can_manage_assigned(p: dict[str, Any], assigned: Optional[str]) -> bool:
+    """можно ли действовать поверх чужого назначения (забрать / пул / писать / закрыть).
+    владелец — всех; куратор — только операторов; оператор — никого чужого."""
+    if not assigned or assigned == p["actor"]:
+        return True
+    if p.get("kind") == "owner" or p.get("role") == "owner":
+        return True
+    if p.get("role") == "curator" or admin_has(p, "support"):
+        return _holder_role(assigned) == "operator"
+    return False
+
+
+def _holder_is_senior(assigned: Optional[str], p: dict[str, Any]) -> bool:
+    """обращение ведёт тот, кого нельзя перебить."""
+    if not assigned or assigned == p["actor"]:
+        return False
+    return not _can_manage_assigned(p, assigned)
+
+
+def _guard(p: dict[str, Any], op: str):
+    """права на обращение внутри транзакции."""
+    full = is_full(p)
+
+    def g(t: dict[str, Any]):
+        assigned = t.get("assigned_admin")
+        if assigned and assigned != p["actor"] and not _can_manage_assigned(p, assigned):
+            who = {"owner": "администратор", "curator": "другой куратор"}.get(_holder_role(assigned) or "", "другой сотрудник")
+            return (f"Обращение ведёт {who}", 403)
+        if full:
+            return None
+        if op == "start" and (t.get("escalated") or (assigned and assigned != p["actor"])):
+            return ("Обращение уже взял другой сотрудник", 409)
+        if op in ("close", "pool") and assigned != p["actor"]:
+            return ("Это обращение сейчас не у вас", 403)
+        return None
+    return g
+
+
+def _require_writer(chat: dict[str, Any], p: dict[str, Any]) -> None:
+    """писать может ведущий; куратор/владелец — в чужие только если можно перебить ведущего."""
+    if _started_by(chat, p):
+        return
+    if is_full(p):
+        t = support.open_ticket(chat)
+        if not t:
+            raise HTTPException(409, detail={"message": "Обращение закрыто — нажмите «Начать», чтобы открыть новое"})
+        assigned = t.get("assigned_admin")
+        if assigned and assigned != p["actor"] and not _can_manage_assigned(p, assigned):
+            who = {"owner": "администратор", "curator": "другой куратор"}.get(_holder_role(assigned) or "", "другой сотрудник")
+            raise HTTPException(403, detail={"message": f"Обращение ведёт {who}"})
+        return
+    raise HTTPException(409, detail={"message": "Сначала нажмите «Начать»"})
+
+
+@app.post("/api/panel/support/chats/{chat_id}/upload")
+async def panel_support_upload(chat_id: int, request: Request, name: str = Query("file", max_length=200),
+                               p: dict = Depends(require_panel)) -> dict[str, Any]:
+    chat = _panel_chat(chat_id, p)
+    _require_writer(chat, p)
+    return await _stream_upload(request, int(chat["id"]), "admin", p["actor"], name)
+
+
+@app.post("/api/panel/support/chats/{chat_id}/messages")
+def panel_support_send(chat_id: int, body: SupportMessageBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    chat = _panel_chat(chat_id, p)
+    # внутренний комментарий: любой, кто видит чат (тикет брать не нужно)
+    if body.internal:
+        if body.files:
+            raise HTTPException(400, detail={"message": "К комментарию для сотрудников нельзя прикрепить файлы"})
+        msg = _sup(support.send_note, chat, p["name"], body.text or "", p["actor"], body.reply_to,
+                   quote_tickets=_visible_tickets(chat, p))
+        return _staff_view([msg], p)[0]
+
+    _require_writer(chat, p)
+    full = is_full(p)
+    t = support.open_ticket(chat)
+    if full and t and not t.get("assigned_admin"):
+        # куратор/владелец ответил в ничьё: оно становится его
+        _sup(support.start, chat, p["actor"], p["name"], False, _guard(p, "start"))
+        chat = support.get_chat(int(chat["id"])) or chat
+    msg = _sup(support.send_message, chat, "admin", p["name"], body.text or "", body.files, p["actor"], body.reply_to,
+               actor=p["actor"], quote_tickets=_visible_tickets(chat, p), any_ticket=full, guard=_guard(p, "write"))
+    if _started_by(chat, p) or full:
+        support.mark_read(int(chat["id"]), "admin")
+    user = get_user(int(chat["user_id"]))
+    if user:
+        _panel_notify_user_async(user, msg, int(chat["id"]))
+    return _staff_view([msg], p)[0]
+
+
+def _panel_notify_user_async(user: dict[str, Any], msg: dict[str, Any], chat_id: int) -> None:
+    """ответ в панели не ждёт Telegram: иначе sendMessage до 30 с и сайт «висит»."""
+    pid = projects.current_id()
+    uid = int(user["id"])
+    mid = int(msg["id"])
+    payload = dict(msg)
+
+    def _run() -> None:
+        with projects.use(pid):
+            u = get_user(uid) or user
+            tg_id = _notify_support_user(u, payload, support.get_chat(int(chat_id)))
+            if tg_id:
+                db.execute("UPDATE support_messages SET tg_msg_id = ? WHERE id = ?", (int(tg_id), mid))
+
+    threading.Thread(target=_run, name="support-panel-notify", daemon=True).start()
+
+
+def _staff_view(msgs: list[dict[str, Any]], p: dict[str, Any]) -> list[dict[str, Any]]:
+    """для панели: моё/не моё вместо ключа автора."""
+    out = []
+    for m in msgs:
+        m = dict(m)
+        m["mine"] = bool(m.get("author_actor")) and m.get("author_actor") == p["actor"]
+        m.pop("author_actor", None)
+        out.append(m)
+    return out
+
+
+class SupportEditBody(BaseModel):
+    text: str = Field("", max_length=support.MAX_TEXT + 100)
+
+
+def _tg_support_text(text: str) -> str:
+    body = _md_html_to_tg(text, 700) if text else "📎 Вложение"
+    if not body:
+        body = "📎 Вложение"
+    return f"💬 <b>Ответ поддержки</b>\n\n{body}"
+
+
+@app.post("/api/panel/support/chats/{chat_id}/messages/{message_id}/edit")
+def panel_support_edit(chat_id: int, message_id: int, body: SupportEditBody, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """изменить своё сообщение (48 ч)."""
+    chat = _panel_chat(chat_id, p)
+    msg = _sup(support.edit_message, chat, message_id, p["actor"], body.text)
+    row = db.fetchone("SELECT tg_msg_id FROM support_messages WHERE id = ?", (int(message_id),))
+    user = get_user(int(chat["user_id"]))
+    if row and row.get("tg_msg_id") and user and user.get("telegram_id"):
+        try:
+            notifier.call("editMessageText", {"chat_id": int(user["telegram_id"]), "message_id": int(row["tg_msg_id"]),
+                                              "text": _tg_support_text(msg.get("text") or ""), "parse_mode": "HTML",
+                                              "link_preview_options": {"is_disabled": True},
+                                              **({"reply_markup": {"inline_keyboard": [[{"text": "Открыть чат", "web_app": {"url": f"{P().miniapp_url}/support"}}]]}}
+                                                 if P().miniapp_url else {})}, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            pass
+    return _staff_view([msg], p)[0]
+
+
+@app.delete("/api/panel/support/chats/{chat_id}/messages/{message_id}")
+def panel_support_delete(chat_id: int, message_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """удалить своё сообщение (48 ч)."""
+    chat = _panel_chat(chat_id, p)
+    r = _sup(support.delete_message, chat, message_id, p["actor"])
+    user = get_user(int(chat["user_id"]))
+    if r.get("tg_msg_id") and user and user.get("telegram_id"):
+        try:
+            notifier.call("deleteMessage", {"chat_id": int(user["telegram_id"]), "message_id": int(r["tg_msg_id"])}, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True, "id": r["id"]}
+
+
+@app.get("/api/panel/support/storage")
+def panel_support_storage(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return support.storage_stats()
+
+
+@app.get("/api/panel/users/{user_id}/can-manage")
+def panel_user_can_manage(user_id: int, p: dict = Depends(require_panel)) -> dict[str, Any]:
+    """может ли сотрудник менять этого юзера."""
+    if is_admin(p):
+        restricted = sorted(a for a in staffmod.USER_ACTION_KEYS if not admin_has(p, f"users.action.{a}"))
+    else:
+        restricted = sorted(staffmod.OPERATOR_FORBIDDEN_ACTIONS) if p["role"] == "operator" else []
+    return {"can_manage": can_manage_user(p, user_id), "restricted_actions": restricted}
+
+
+class S3ConfigBody(BaseModel):
+    enabled: Optional[bool] = None
+    endpoint: Optional[str] = None
+    region: Optional[str] = None
+    bucket: Optional[str] = None
+    access_key: Optional[str] = None
+    secret_key: Optional[str] = None      # пусто: оставить сохранённый
+    prefix: Optional[str] = None
+    size_gb: Optional[float] = None
+
+
+def _s3(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except s3store.S3Error as e:
+        raise HTTPException(400, detail={"message": e.message})
+
+
+@app.get("/api/panel/settings/s3")
+def panel_s3_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return {**s3store.get_config(), "storage": support.storage_stats()}
+
+
+@app.put("/api/panel/settings/s3")
+def panel_s3_put(body: S3ConfigBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    data = body.model_dump()
+    if data.get("enabled"):
+        # включаем только проверенное хранилище
+        cfg = {**s3store.get_config(with_secret=True), **{k: v for k, v in data.items() if v not in (None, "")}}
+        _s3(s3store.check, cfg)
+    cfg = _s3(s3store.save_config, data)
+    return {**cfg, "storage": support.storage_stats()}
+
+
+@app.post("/api/panel/settings/s3/check")
+def panel_s3_check(body: S3ConfigBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    cfg = {**s3store.get_config(with_secret=True), **{k: v for k, v in body.model_dump().items() if v not in (None, "")}}
+    if not (cfg.get("bucket") and cfg.get("access_key") and cfg.get("secret_key")):
+        raise HTTPException(400, detail={"message": "Укажите бакет, Access Key и Secret Key"})
+    return _s3(s3store.check, cfg)
+
+
+class CaptchaConfigBody(BaseModel):
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None  # auto | yandex | turnstile
+    yandex_site_key: Optional[str] = None
+    yandex_secret: Optional[str] = None
+    turnstile_site_key: Optional[str] = None
+    turnstile_secret: Optional[str] = None
+
+
+@app.get("/api/panel/settings/captcha")
+def panel_captcha_get(_: dict = Depends(require_owner)) -> dict[str, Any]:
+    return captcha_mod.get_config()
+
+
+@app.put("/api/panel/settings/captcha")
+def panel_captcha_put(body: CaptchaConfigBody, _: dict = Depends(require_owner)) -> dict[str, Any]:
+    try:
+        return captcha_mod.save_config(body.model_dump())
+    except captcha_mod.CaptchaError as e:
+        raise HTTPException(e.status, detail={"message": e.message})
+
+
+# ── API v1 (/api/v1/*, см. docs/API_V1.md) ──
+try:
+    from . import apiv1 as _apiv1  # type: ignore
+    from . import apiv1_store  # type: ignore
+except ImportError:  # pragma: no cover
+    import apiv1 as _apiv1  # type: ignore
+    import apiv1_store  # type: ignore
+
+app.include_router(_apiv1.build_router(_sys.modules[__name__]))
+
+# ── серверы мини-приложений проектов: начальное меню панели, агент (/api/agent/*), см. miniapps.py ──
+try:
+    from . import miniapps  # type: ignore
+except ImportError:  # pragma: no cover
+    import miniapps  # type: ignore
+
+app.include_router(miniapps.build_router(_sys.modules[__name__]))
+
+
+@app.on_event("startup")
+def _apiv1_startup() -> None:
+    try:
+        apiv1_store.ensure()
+        apiv1_app.ensure_schema()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[api-v1] init failed: {type(exc).__name__}: {exc}", flush=True)
+    # ключ подписи токенов: короткий API_TOKEN_SECRET — ошибка сразу при старте, а не на первом запросе
+    _apiv1.tokens._signing_key()
+    # воркер очереди выдачи ссылок (provisioning_jobs) — только в сервисе api
+    apiv1_store.start_worker()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("core:app", host="0.0.0.0", port=int(_env("API_PORT", "8000")), reload=ENV != "production")
